@@ -66,7 +66,6 @@ export async function syncFromTally(config = {}) {
       stockItems: counts.stockItems || 0,
       groups: counts.groups || 0,
       raw: data?.data,
-      note: 'Raw Tally ledgers received. Dashboard transformer (ledger → dealer mapping) lands in the next iteration.',
     };
   }
   if (TALLY_BACKEND === 'express') {

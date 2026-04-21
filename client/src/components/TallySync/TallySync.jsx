@@ -268,7 +268,17 @@ export default function TallySync() {
                         </div>
                         {syncResult.diagnostics.parentsSeen?.length > 0 && (
                           <div className="text-[11px] text-gray-400">
-                            Parent groups in feed: {syncResult.diagnostics.parentsSeen.join(', ')}
+                            Parent groups in feed: {syncResult.diagnostics.parentsSeen.join(', ') || '(none)'}
+                          </div>
+                        )}
+                        {syncResult.diagnostics.sampleKeys?.length > 0 && (
+                          <div className="text-[11px] text-gray-400">
+                            Fields on first ledger: {syncResult.diagnostics.sampleKeys.join(', ')}
+                          </div>
+                        )}
+                        {syncResult.diagnostics.sampleLedger && (
+                          <div className="text-[11px] text-gray-400 font-mono">
+                            Sample: {JSON.stringify(syncResult.diagnostics.sampleLedger)}
                           </div>
                         )}
                       </div>

@@ -180,6 +180,16 @@ export function transformTallyLedgers(rawTree) {
       filterMatched: debtors.length > 0,
       usedFallback: debtors.length === 0 && source.length > 0,
       parentsSeen: Array.from(parents).slice(0, 20),
+      // First ledger's keys + the raw Parent/ClosingBalance values so we can
+      // tell if Tally returned extra fields or only names.
+      sampleKeys: ledgers[0] ? Object.keys(ledgers[0]).slice(0, 30) : [],
+      sampleLedger: ledgers[0]
+        ? {
+            NAME: textField(ledgers[0].NAME) || textField(ledgers[0]._NAME),
+            PARENT: textField(ledgers[0].PARENT),
+            CLOSINGBALANCE: textField(ledgers[0].CLOSINGBALANCE),
+          }
+        : null,
     },
   };
 }

@@ -156,17 +156,7 @@ function sundryDebtorsRequest(company: string) {
         <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
         ${companyFilter(company)}
       </STATICVARIABLES>
-      <FETCHLIST>
-        <FETCH>Name</FETCH>
-        <FETCH>Parent</FETCH>
-        <FETCH>ClosingBalance</FETCH>
-        <FETCH>OpeningBalance</FETCH>
-        <FETCH>CreditLimit</FETCH>
-        <FETCH>CreditPeriod</FETCH>
-        <FETCH>PartyGSTIN</FETCH>
-        <FETCH>LedStateName</FETCH>
-        <FETCH>Address</FETCH>
-      </FETCHLIST>
+      <FETCHLIST>Name, Parent, ClosingBalance, OpeningBalance, CreditLimit, CreditPeriod, PartyGSTIN, GSTRegistrationNumber, LedStateName, Address</FETCHLIST>
     </DESC>
   </BODY>
 </ENVELOPE>`;
