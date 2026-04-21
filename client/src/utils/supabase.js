@@ -4,8 +4,17 @@
 
 import { createClient } from '@supabase/supabase-js';
 
-const url = import.meta.env.VITE_SUPABASE_URL;
-const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+// Defaults baked in at build time so the static Pages deploy works without any
+// extra CI configuration. VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY override
+// them if set (useful for local dev or forks pointing at a different project).
+// NOTE: the anon key is safe to ship in a public client — Supabase's security
+// model relies on Row Level Security, not key secrecy. Never commit the
+// postgres connection string or the service_role key.
+const DEFAULT_SUPABASE_URL = 'https://vqusztwxrjokjgkiebem.supabase.co';
+const DEFAULT_SUPABASE_ANON_KEY = 'sb_publishable_xjz2L_v44mY3WCCGq3caug_K4NXsMHW';
+
+const url = import.meta.env.VITE_SUPABASE_URL || DEFAULT_SUPABASE_URL;
+const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || DEFAULT_SUPABASE_ANON_KEY;
 
 export const HAS_SUPABASE = Boolean(url && anonKey);
 

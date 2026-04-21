@@ -1,0 +1,9 @@
+# Supabase CLI config. Project ref is pinned so `supabase link` only needs to be
+# run once per machine (no --project-ref flag needed on subsequent commands).
+project_id = "vqusztwxrjokjgkiebem"
+
+[functions.tally]
+# JWT verification stays on — the browser's Supabase client automatically
+# attaches the signed-in user's token to invoke() calls, so only authenticated
+# dashboard users can proxy Tally requests.
+verify_jwt = true

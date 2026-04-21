@@ -34,20 +34,40 @@ Push to `main` → the `Deploy client to GitHub Pages` workflow builds and publi
 
 ## Supabase setup
 
-1. Create a project at [supabase.com](https://supabase.com). Copy the **Project URL** and **anon key** from Settings → API.
-2. Set `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` as GitHub Actions repo variables (see above).
-3. Auth → Providers → Email: enable. Optionally disable email confirmation for easier demos.
-4. (For Tally Sync) deploy the Edge Function:
-   ```bash
-   npx supabase login
-   npx supabase link --project-ref <your-project-ref>
-   npx supabase functions deploy tally
-   # Optional defaults (can also be passed per-request from the UI):
-   npx supabase secrets set TALLY_HOST=1.2.3.4:9000 TALLY_USERNAME=admin TALLY_PASSWORD=secret
-   ```
-5. Re-run the GitHub Pages workflow. Your dashboard now signs users into Supabase and — when you click **Tally Sync → Test Connection** — the browser calls the Edge Function, which reaches Tally on your behalf.
+The default Supabase project URL + anon key are hardcoded in `client/src/utils/supabase.js`
+so the Pages build works with zero CI configuration. To point at a different project, set
+`VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` as GitHub Actions repository variables
+(they override the defaults).
 
-> Tally is proxied through the Edge Function so the browser never hits Tally's XML endpoint directly (no CORS, no credential exposure). The function accepts per-request overrides for `host`, `username`, `password`, `company`, and falls back to secrets when unset.
+> The anon key is safe to ship in the client bundle — Supabase's security is enforced by
+> Row Level Security policies, not key secrecy. **Never** commit the postgres connection
+> string or the `service_role` key; rotate them in the Supabase dashboard if they leak.
+
+Auth → Providers → Email: enable. For easier demos, also disable "Confirm email".
+
+### Tally Edge Function (one-time)
+
+For Tally Sync to work, deploy the `tally` Edge Function. The project ref is pinned in
+`supabase/config.toml`, so after the first `supabase link` every command is just:
+
+```bash
+bash supabase/deploy.sh
+```
+
+Or manually:
+```bash
+npm install -g supabase
+supabase login
+supabase link --project-ref vqusztwxrjokjgkiebem
+supabase functions deploy tally
+# Optional — set default Tally creds so users don't retype them:
+supabase secrets set TALLY_HOST=1.2.3.4:9000 TALLY_USERNAME=admin TALLY_PASSWORD=secret
+```
+
+Tally is proxied through the Edge Function so the browser never hits Tally's XML endpoint
+directly (no CORS, no credential exposure). The function accepts per-request overrides for
+`host`, `username`, `password`, `company`, and falls back to secrets when unset. JWT
+verification is on, so only signed-in dashboard users can invoke it.
 
 ## Dedicated Express server (optional)
 
