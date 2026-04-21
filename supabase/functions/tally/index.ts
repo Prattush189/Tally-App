@@ -92,30 +92,30 @@ function reportRequest(reportId: string, company: string) {
 </ENVELOPE>`;
 }
 
+// Lightweight sync — asks Tally for the built-in "Ledger" collection with minimal
+// fields. A heavier custom-TDL query with SundryDebtorFilter + many NATIVEMETHODs
+// produced responses large enough that shared-hosting Tally providers drop the
+// connection mid-send ("connection closed before message completed"). This query
+// returns enough to confirm plumbing works; the full transformer pass (map
+// ledgers → dashboard customers, filter to sundry debtors client-side) lands
+// when the CSV-upload or paginated-sync work goes in.
 function sundryDebtorsRequest(company: string) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <ENVELOPE>
-  <HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>CustomLedgerCollection</ID></HEADER>
-  <BODY><DESC>
-    <STATICVARIABLES>
-      <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-      ${companyFilter(company)}
-    </STATICVARIABLES>
-    <TDL><TDLMESSAGE>
-      <COLLECTION NAME="CustomLedgerCollection" ISMODIFY="No">
-        <TYPE>Ledger</TYPE>
-        <NATIVEMETHOD>Name</NATIVEMETHOD>
-        <NATIVEMETHOD>Parent</NATIVEMETHOD>
-        <NATIVEMETHOD>ClosingBalance</NATIVEMETHOD>
-        <NATIVEMETHOD>PartyGSTIN</NATIVEMETHOD>
-        <NATIVEMETHOD>LedStateName</NATIVEMETHOD>
-        <FILTER>SundryDebtorFilter</FILTER>
-      </COLLECTION>
-      <SYSTEM TYPE="Formulae" NAME="SundryDebtorFilter">
-        $Parent = "Sundry Debtors" OR $Parent UNDER "Sundry Debtors"
-      </SYSTEM>
-    </TDLMESSAGE></TDL>
-  </DESC></BODY>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>Ledger</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+        ${companyFilter(company)}
+      </STATICVARIABLES>
+    </DESC>
+  </BODY>
 </ENVELOPE>`;
 }
 

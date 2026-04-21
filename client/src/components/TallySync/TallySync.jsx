@@ -114,18 +114,20 @@ export default function TallySync() {
             {isConnected ? <Wifi size={20} className="text-emerald-400" /> : <WifiOff size={20} className="text-amber-400" />}
             <div>
               <p className="text-sm font-semibold text-white">
-                {isConnected ? 'Connected to Tally Prime' : 'Using Demo Data'}
+                {isConnected ? 'Connected to Tally Prime' : isDemo ? 'Demo Data' : 'Not Connected'}
               </p>
               <p className="text-xs text-gray-400 mt-0.5">
                 {isConnected
                   ? `Live data from Tally · Last sync: ${status?.lastAttempt ? new Date(status.lastAttempt).toLocaleString() : 'N/A'}`
-                  : status?.lastError || 'Tally server not reachable — showing mock data'}
+                  : isDemo
+                    ? 'Pre-loaded sample data powers every dashboard on the demo account.'
+                    : 'Configure your Tally XML endpoint below and click Sync Now to populate dashboards.'}
               </p>
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <span className={`px-3 py-1 rounded-full text-xs font-bold ${isConnected ? 'bg-emerald-500/15 text-emerald-400' : 'bg-amber-500/15 text-amber-400'}`}>
-              {(status?.source || 'mock').toUpperCase()}
+            <span className={`px-3 py-1 rounded-full text-xs font-bold ${isConnected ? 'bg-emerald-500/15 text-emerald-400' : isDemo ? 'bg-indigo-500/15 text-indigo-300' : 'bg-gray-700/40 text-gray-400'}`}>
+              {isConnected ? 'LIVE' : isDemo ? 'DEMO' : 'AWAITING SYNC'}
             </span>
           </div>
         </div>
