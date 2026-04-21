@@ -135,6 +135,13 @@ function countRecords(tree: unknown) {
   walk(tree);
   return counts;
 }
+
+// Lightweight sync — asks Tally for the built-in "Ledger" collection with minimal
+// fields. Heavier custom-TDL queries with many NATIVEMETHODs produced responses
+// large enough that shared-hosting Tally providers drop the connection mid-send
+// ("connection closed before message completed"). This returns enough to confirm
+// plumbing works; ledger → dealer mapping lands with the transformer pass.
+function sundryDebtorsRequest(company: string) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <ENVELOPE>
   <HEADER>
