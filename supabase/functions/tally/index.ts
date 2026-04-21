@@ -33,7 +33,7 @@ const parser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: '_',
   textNodeName: '_text',
-  isArray: (name) => ['LEDGER', 'VOUCHER', 'STOCKITEM', 'BILL', 'BODY', 'COLLECTION'].includes(name),
+  isArray: (name: string) => ['LEDGER', 'VOUCHER', 'STOCKITEM', 'BILL', 'BODY', 'COLLECTION'].includes(name),
 });
 
 function resolveConfig(overrides: TallyConfig): Required<TallyConfig> {
@@ -103,24 +103,35 @@ function reportRequest(reportId: string, company: string) {
 // The response shape varies: ENVELOPE.BODY.DATA.COLLECTION.LEDGER, or nested
 // directly under ENVELOPE.BODY, or inside a RESPONSE wrapper. We just dig for
 // any arrays named LEDGER / VOUCHER / STOCKITEM / GROUP anywhere in the tree.
-function countRecords(tree: unknown): { ledgers: number; vouchers: number; stockItems: number; groups: number } {
+function countRecords(tree: unknown) {
   const counts = { ledgers: 0, vouchers: 0, stockItems: 0, groups: 0 };
-  const seen = new WeakSet<object>();
-  const map: Record<string, keyof typeof counts> = {
-    LEDGER: 'ledgers', VOUCHER: 'vouchers', STOCKITEM: 'stockItems', GROUP: 'groups',
+  const seen = new WeakSet();
+  const bucketFor = (key: string): keyof typeof counts | null => {
+    if (key === 'LEDGER') return 'ledgers';
+    if (key === 'VOUCHER') return 'vouchers';
+    if (key === 'STOCKITEM') return 'stockItems';
+    if (key === 'GROUP') return 'groups';
+    return null;
   };
-  function walk(node: unknown) {
+  const walk = (node: unknown): void => {
     if (!node || typeof node !== 'object') return;
-    if (seen.has(node as object)) return;
-    seen.add(node as object);
-    if (Array.isArray(node)) { node.forEach(walk); return; }
-    for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
-      const bucket = map[key as keyof typeof map];
-      if (bucket && Array.isArray(value)) counts[bucket] += value.length;
-      else if (bucket && value && typeof value === 'object') counts[bucket] += 1;
+    const obj = node as Record<string, unknown>;
+    if (seen.has(obj)) return;
+    seen.add(obj);
+    if (Array.isArray(obj)) {
+      for (const item of obj) walk(item);
+      return;
+    }
+    for (const key of Object.keys(obj)) {
+      const bucket = bucketFor(key);
+      const value = obj[key];
+      if (bucket) {
+        if (Array.isArray(value)) counts[bucket] += value.length;
+        else if (value && typeof value === 'object') counts[bucket] += 1;
+      }
       walk(value);
     }
-  }
+  };
   walk(tree);
   return counts;
 }
