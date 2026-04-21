@@ -147,11 +147,11 @@ function countRecords(tree: unknown) {
   return counts;
 }
 
-// Sync query — built-in Ledger collection with explicit FETCH fields so the
-// response includes Parent / ClosingBalance / GSTIN / state / credit limit
-// per ledger. Without FETCH, Tally returns names only and the client-side
-// transformer can't filter Sundry Debtors or pull outstanding amounts.
-// Kept lean enough that shared hosts don't drop the connection mid-send.
+// Sync query — custom TDL collection with explicit NATIVEMETHOD per field.
+// Tally honours NATIVEMETHOD reliably across versions; <FETCHLIST> is not
+// always respected on a bare built-in collection. Filter to Sundry Debtors
+// happens client-side so we don't trigger the heavier UNDER-clause query
+// that drops the connection on shared hosts.
 function sundryDebtorsRequest(cfg: { company: string; fromDate: string; toDate: string }) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <ENVELOPE>
@@ -159,7 +159,7 @@ function sundryDebtorsRequest(cfg: { company: string; fromDate: string; toDate: 
     <VERSION>1</VERSION>
     <TALLYREQUEST>Export</TALLYREQUEST>
     <TYPE>Collection</TYPE>
-    <ID>Ledger</ID>
+    <ID>B2BIntelLedgers</ID>
   </HEADER>
   <BODY>
     <DESC>
@@ -168,7 +168,22 @@ function sundryDebtorsRequest(cfg: { company: string; fromDate: string; toDate: 
         ${companyFilter(cfg.company)}
         ${dateFilter(cfg)}
       </STATICVARIABLES>
-      <FETCHLIST>Name, Parent, ClosingBalance, OpeningBalance, CreditLimit, CreditPeriod, PartyGSTIN, GSTRegistrationNumber, LedStateName, Address</FETCHLIST>
+      <TDL>
+        <TDLMESSAGE>
+          <COLLECTION NAME="B2BIntelLedgers" ISMODIFY="No">
+            <TYPE>Ledger</TYPE>
+            <NATIVEMETHOD>Name</NATIVEMETHOD>
+            <NATIVEMETHOD>Parent</NATIVEMETHOD>
+            <NATIVEMETHOD>ClosingBalance</NATIVEMETHOD>
+            <NATIVEMETHOD>OpeningBalance</NATIVEMETHOD>
+            <NATIVEMETHOD>CreditLimit</NATIVEMETHOD>
+            <NATIVEMETHOD>CreditPeriod</NATIVEMETHOD>
+            <NATIVEMETHOD>PartyGSTIN</NATIVEMETHOD>
+            <NATIVEMETHOD>LedStateName</NATIVEMETHOD>
+            <NATIVEMETHOD>Address</NATIVEMETHOD>
+          </COLLECTION>
+        </TDLMESSAGE>
+      </TDL>
     </DESC>
   </BODY>
 </ENVELOPE>`;
