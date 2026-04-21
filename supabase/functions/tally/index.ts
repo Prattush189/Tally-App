@@ -394,11 +394,14 @@ Deno.serve(async (req) => {
   const cfg = resolveConfig(body as TallyConfig);
   const tenantKey = (body.tenantKey as string) || 'default';
 
-  // Snapshot + portal-config actions. These are for the local Playwright
-  // sync tool (get-config + ingest) and for the web dashboards to read the
-  // most recent persisted snapshot (get-snapshot) so the browser never has
-  // to reach Tally directly.
-  if (action === 'get-config' || action === 'ingest' || action === 'get-snapshot') {
+  // Snapshot + portal-config actions. These are for the scheduled GitHub
+  // Actions sync (get-config + ingest), the web dashboards reading the most
+  // recent persisted snapshot (get-snapshot), and admins saving / triggering
+  // syncs from the UI (save-config + trigger-sync + get-status).
+  const dbActions = new Set([
+    'get-config', 'save-config', 'ingest', 'get-snapshot', 'get-status', 'trigger-sync',
+  ]);
+  if (dbActions.has(action)) {
     const supabaseUrl = Deno.env.get('SUPABASE_URL') || '';
     const serviceRole = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
     if (!supabaseUrl || !serviceRole) {
@@ -409,17 +412,17 @@ Deno.serve(async (req) => {
     }
     const db = createClient(supabaseUrl, serviceRole, { auth: { persistSession: false } });
 
-    // get-config + ingest both mutate / leak Tally credentials, so they're
-    // gated on LOCAL_SYNC_TOKEN — a shared secret the local Playwright tool
-    // carries in its .env. get-snapshot is read-only, so any caller with the
-    // project anon key may fetch it (same trust level as /sync-full today).
-    if (action === 'get-config' || action === 'ingest') {
+    // Token-gated actions: anything that reads creds or mutates state requires
+    // LOCAL_SYNC_TOKEN. get-snapshot + get-status are read-only (same trust
+    // level as /sync-full) and pass through with just the project anon key.
+    const gatedActions = new Set(['get-config', 'save-config', 'ingest', 'trigger-sync']);
+    if (gatedActions.has(action)) {
       const required = Deno.env.get('LOCAL_SYNC_TOKEN') || '';
       const provided = (body.syncToken as string) || '';
       if (!required) {
         return new Response(JSON.stringify({
           connected: false,
-          error: 'Server missing LOCAL_SYNC_TOKEN — set it with `supabase secrets set LOCAL_SYNC_TOKEN=...` to enable local sync.',
+          error: 'Server missing LOCAL_SYNC_TOKEN — set it with `supabase secrets set LOCAL_SYNC_TOKEN=...` to enable sync.',
         }), { status: 500, headers: jsonHeaders });
       }
       if (provided !== required) {
@@ -430,23 +433,135 @@ Deno.serve(async (req) => {
       }
     }
 
+    if (action === 'save-config') {
+      // Admin UI writes creds here instead of the operator doing
+      // `supabase secrets set`. One row per tenant.
+      const required = ['portalUrl', 'portalUser', 'portalPass'];
+      const missing = required.filter((k) => !body[k] || typeof body[k] !== 'string');
+      if (missing.length) {
+        return new Response(JSON.stringify({
+          connected: false,
+          error: `Missing required fields: ${missing.join(', ')}`,
+        }), { status: 400, headers: jsonHeaders });
+      }
+      const { error } = await db.from('tally_portal_config').upsert({
+        tenant_key: tenantKey,
+        portal_url: String(body.portalUrl).trim().replace(/\/+$/, ''),
+        portal_user: String(body.portalUser).trim(),
+        portal_pass: String(body.portalPass),
+        tally_host: String(body.tallyHost || '').trim(),
+        tally_user: String(body.tallyUser || '').trim(),
+        tally_pass: String(body.tallyPass || ''),
+        company: String(body.company || '').trim(),
+        updated_at: new Date().toISOString(),
+        updated_by: (body.updatedBy as string) || null,
+      }, { onConflict: 'tenant_key' });
+      if (error) {
+        return new Response(JSON.stringify({
+          connected: false,
+          error: `Failed to save config: ${error.message}`,
+        }), { status: 500, headers: jsonHeaders });
+      }
+      return new Response(JSON.stringify({ connected: true, action, tenantKey }), { headers: jsonHeaders });
+    }
+
     if (action === 'get-config') {
-      // Portal creds drive the Playwright login flow. Tally creds (host, user,
-      // pass, company) are returned too so the local tool knows which
-      // on-portal Tally company to scope the XML queries to.
+      // DB row wins; fall back to Deno env secrets for backwards compat with
+      // setups that provisioned via `supabase secrets set` before the UI
+      // existed. tally-level creds are passed through verbatim.
+      const { data: row } = await db
+        .from('tally_portal_config')
+        .select('*')
+        .eq('tenant_key', tenantKey)
+        .maybeSingle();
       return new Response(JSON.stringify({
         connected: true,
         action,
         config: {
-          portalUrl: Deno.env.get('TALLY_PORTAL_URL') || '',
-          portalUser: Deno.env.get('TALLY_PORTAL_USER') || '',
-          portalPass: Deno.env.get('TALLY_PORTAL_PASS') || '',
-          tallyHost: Deno.env.get('TALLY_HOST') || '',
-          tallyUser: Deno.env.get('TALLY_USERNAME') || '',
-          tallyPass: Deno.env.get('TALLY_PASSWORD') || '',
-          company: Deno.env.get('TALLY_COMPANY') || '',
+          portalUrl: row?.portal_url || Deno.env.get('TALLY_PORTAL_URL') || '',
+          portalUser: row?.portal_user || Deno.env.get('TALLY_PORTAL_USER') || '',
+          portalPass: row?.portal_pass || Deno.env.get('TALLY_PORTAL_PASS') || '',
+          tallyHost: row?.tally_host || Deno.env.get('TALLY_HOST') || '',
+          tallyUser: row?.tally_user || Deno.env.get('TALLY_USERNAME') || '',
+          tallyPass: row?.tally_pass || Deno.env.get('TALLY_PASSWORD') || '',
+          company: row?.company || Deno.env.get('TALLY_COMPANY') || '',
           tenantKey,
+          source: row ? 'db' : 'env',
+          updatedAt: row?.updated_at || null,
         },
+      }), { headers: jsonHeaders });
+    }
+
+    if (action === 'trigger-sync') {
+      // Kicks off the scheduled sync workflow via GitHub's workflow_dispatch
+      // API. Needs GITHUB_SYNC_PAT (PAT with 'workflow' scope) + the repo
+      // owner/name in env. Used by the "Sync Now" button in the admin UI.
+      const pat = Deno.env.get('GITHUB_SYNC_PAT') || '';
+      const owner = Deno.env.get('GITHUB_REPO_OWNER') || '';
+      const repo = Deno.env.get('GITHUB_REPO_NAME') || '';
+      const workflow = Deno.env.get('GITHUB_SYNC_WORKFLOW') || 'tally-scheduled-sync.yml';
+      const ref = Deno.env.get('GITHUB_SYNC_REF') || 'main';
+      if (!pat || !owner || !repo) {
+        return new Response(JSON.stringify({
+          connected: false,
+          error: 'GITHUB_SYNC_PAT / GITHUB_REPO_OWNER / GITHUB_REPO_NAME not configured — hourly cron still runs, just no manual trigger.',
+        }), { status: 500, headers: jsonHeaders });
+      }
+      const url = `https://api.github.com/repos/${owner}/${repo}/actions/workflows/${workflow}/dispatches`;
+      const ghRes = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${pat}`,
+          'Accept': 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ ref, inputs: { tenant_key: tenantKey } }),
+      });
+      if (!ghRes.ok) {
+        const text = await ghRes.text();
+        return new Response(JSON.stringify({
+          connected: false,
+          error: `GitHub dispatch failed (HTTP ${ghRes.status}): ${text.slice(0, 200)}`,
+        }), { status: 500, headers: jsonHeaders });
+      }
+      return new Response(JSON.stringify({
+        connected: true,
+        action,
+        message: 'Sync queued. Check GitHub Actions for progress. Snapshot will refresh in ~2 min.',
+      }), { headers: jsonHeaders });
+    }
+
+    if (action === 'get-status') {
+      // Dashboard polls this to show "last synced / next run" info without
+      // leaking creds. Anon-key callers are fine — no secrets returned.
+      const { data: snap } = await db
+        .from('tally_snapshots')
+        .select('counts, errors, source, updated_at')
+        .eq('tenant_key', tenantKey)
+        .maybeSingle();
+      const { data: cfg } = await db
+        .from('tally_portal_config')
+        .select('portal_url, portal_user, company, updated_at')
+        .eq('tenant_key', tenantKey)
+        .maybeSingle();
+      return new Response(JSON.stringify({
+        connected: true,
+        action,
+        configured: Boolean(cfg?.portal_url),
+        configPreview: cfg ? {
+          portalUrl: cfg.portal_url,
+          portalUser: cfg.portal_user,
+          company: cfg.company,
+          updatedAt: cfg.updated_at,
+        } : null,
+        snapshot: snap ? {
+          updatedAt: snap.updated_at,
+          source: snap.source,
+          counts: snap.counts || {},
+          hasErrors: snap.errors && Object.keys(snap.errors).length > 0,
+          errors: snap.errors || {},
+        } : null,
       }), { headers: jsonHeaders });
     }
 

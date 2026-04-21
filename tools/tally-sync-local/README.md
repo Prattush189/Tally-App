@@ -1,12 +1,41 @@
-# Tally local sync
+# Tally sync
 
-Pulls Tally data through the `103.76.213.243` RemoteApp portal and pushes a snapshot to Supabase. Runs on a laptop — no tunnel, no host cooperation, no public IP needed.
+Pulls Tally data through the `103.76.213.243` RemoteApp portal and pushes a snapshot to Supabase. The same script runs in two modes — **scheduled web (recommended)** and **local laptop (debug / fallback)**.
 
 ## Why this exists
 
-The Tally HTTP API (`:9007`) is only reachable **inside the portal's RemoteApp session**. A cloud Edge Function can't see it. This tool drives a real browser through the same login + click-TallyPrime flow a human does, queries Tally from within that session, and uploads the result. Dashboards then read the snapshot from Supabase.
+The Tally HTTP API (`:9007`) is only reachable **inside the portal's RemoteApp session**. A cloud Edge Function can't see it. This tool drives a real Chromium through the same login + click-TallyPrime flow a human does, queries Tally from within that session, and uploads the result. Dashboards then read the snapshot from Supabase.
 
-## One-time setup
+## Web-only setup (scheduled, no laptop)
+
+Runs hourly in GitHub Actions — zero user machine involvement after setup. Admins edit creds via the TallySync page.
+
+1. **Set Supabase secrets** (one machine, once):
+   ```
+   supabase secrets set \
+     LOCAL_SYNC_TOKEN=<long random string> \
+     GITHUB_SYNC_PAT=<GitHub PAT with 'workflow' scope> \
+     GITHUB_REPO_OWNER=Prattush189 \
+     GITHUB_REPO_NAME=Tally-App
+   ```
+   `LOCAL_SYNC_TOKEN` gates the admin UI. `GITHUB_SYNC_PAT` powers the "Trigger Sync Now" button (https://github.com/settings/tokens → fine-grained → `Actions: read & write` on Tally-App repo).
+
+2. **Add GitHub Actions secrets** (repo Settings → Secrets and variables → Actions):
+   - `SUPABASE_URL`, `SUPABASE_ANON_KEY`
+   - `LOCAL_SYNC_TOKEN` (same value as Supabase secret)
+   - `SUPABASE_DB_PASSWORD` (once, for migrations)
+
+3. **In the web app → TallySync page → Scheduled Sync card**:
+   - Paste `LOCAL_SYNC_TOKEN` into admin token (cached in localStorage after save)
+   - Fill portal URL / user / password / Tally company
+   - **Save Configuration**, then **Trigger Sync Now**
+   - ~2 min later dashboards hydrate. Hourly cron keeps them fresh.
+
+To watch a run live: GitHub → Actions → "Tally Scheduled Sync" → latest.
+
+If the portal blocks GitHub runner IPs (HTTP 403 on login), fall back to local mode below.
+
+## Local laptop mode (debug / fallback)
 
 1. Install Node 18+ — `node -v` to check.
 2. From this directory:

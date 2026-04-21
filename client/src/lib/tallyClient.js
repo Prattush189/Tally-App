@@ -102,6 +102,32 @@ export async function syncFromTally(config = {}) {
   throw new Error('Tally is not available on this deployment.');
 }
 
+// Fetch status (is sync configured, when was the last snapshot, what are the
+// counts) — anon-key gated, no secrets returned. Safe to call on page load.
+export async function getSyncStatus(tenantKey = 'default') {
+  if (TALLY_BACKEND !== 'supabase') return null;
+  try {
+    const data = await supabaseInvoke('get-status', { tenantKey });
+    return data;
+  } catch (err) {
+    return { connected: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+// Save portal + Tally creds to the tally_portal_config table. Admin-gated
+// via LOCAL_SYNC_TOKEN — the admin pastes this once; after a successful
+// save we stash it in localStorage so subsequent actions don't re-prompt.
+export async function saveSyncConfig(syncToken, config, tenantKey = 'default') {
+  return supabaseInvoke('save-config', { syncToken, tenantKey, ...config });
+}
+
+// Queue a fresh sync run via GitHub workflow_dispatch. Returns quickly —
+// the actual run takes ~2 min. Dashboards repoll get-snapshot on a timer
+// to show the fresh data when it lands.
+export async function triggerSyncNow(syncToken, tenantKey = 'default') {
+  return supabaseInvoke('trigger-sync', { syncToken, tenantKey });
+}
+
 // Load the most recent snapshot stored by the local Playwright sync tool.
 // Returns the same shape as a successful syncFromTally() so TallySync can
 // feed the result into transformTallyFull without branching.
