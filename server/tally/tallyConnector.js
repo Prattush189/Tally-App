@@ -8,21 +8,19 @@
 
 import { XMLParser } from 'fast-xml-parser';
 
-let TALLY_HOST = process.env.TALLY_HOST || '127.0.0.1';
-let TALLY_PORT = process.env.TALLY_PORT || '9000';
-let TALLY_URL = `http://${TALLY_HOST}:${TALLY_PORT}`;
+let TALLY_HOST = process.env.TALLY_HOST || '';
+let TALLY_URL = TALLY_HOST ? `http://${TALLY_HOST}` : '';
 let TALLY_COMPANY = process.env.TALLY_COMPANY || '';  // Leave empty for active company
 let TALLY_USERNAME = process.env.TALLY_USERNAME || '';
 let TALLY_PASSWORD = process.env.TALLY_PASSWORD || '';
 
 /** Update Tally connection config at runtime (from frontend settings) */
-export function updateConfig({ host, port, username, password, company } = {}) {
+export function updateConfig({ host, username, password, company } = {}) {
   if (host) TALLY_HOST = host;
-  if (port) TALLY_PORT = port;
   if (username !== undefined) TALLY_USERNAME = username;
   if (password !== undefined) TALLY_PASSWORD = password;
   if (company) TALLY_COMPANY = company;
-  TALLY_URL = `http://${TALLY_HOST}:${TALLY_PORT}`;
+  TALLY_URL = `http://${TALLY_HOST}`;
   console.log(`[Tally] Config updated → ${TALLY_URL} (user: ${TALLY_USERNAME || 'none'})`);
 }
 
@@ -39,6 +37,9 @@ const parser = new XMLParser({
 // ─── CORE REQUEST ────────────────────────────────────────────────────────────
 
 async function tallyRequest(xmlBody, timeoutMs = 30000) {
+  if (!TALLY_HOST || !TALLY_URL) {
+    throw new Error('Tally Host IP not configured. Enter your Tally IP in the Tally Sync page.');
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 

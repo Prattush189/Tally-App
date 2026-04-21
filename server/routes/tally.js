@@ -14,10 +14,10 @@ router.get('/status', (req, res) => {
 // POST /api/tally/test — test Tally connection (accepts config from frontend)
 router.post('/test', async (req, res) => {
   try {
-    const { host, port, username, password } = req.body || {};
+    const { host, username, password } = req.body || {};
     // Temporarily apply config for this test
-    if (host || port || username) {
-      updateConfig({ host, port, username, password });
+    if (host || username) {
+      updateConfig({ host, username, password });
     }
     const info = await getCompanyInfo();
     res.json({ connected: true, response: info });
@@ -29,9 +29,9 @@ router.post('/test', async (req, res) => {
 // POST /api/tally/sync — force refresh from Tally (accepts config from frontend)
 router.post('/sync', async (req, res) => {
   try {
-    const { host, port, username, password } = req.body || {};
-    if (host || port || username) {
-      updateConfig({ host, port, username, password });
+    const { host, username, password } = req.body || {};
+    if (host || username) {
+      updateConfig({ host, username, password });
     }
     const data = await refreshFromTally();
     res.json({

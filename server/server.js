@@ -57,6 +57,6 @@ app.get('/api/health', (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n  B2B Intelligence API Server v2.0`);
   console.log(`  Running on http://localhost:${PORT}`);
-  console.log(`  Tally: http://${process.env.TALLY_HOST || '127.0.0.1'}:${process.env.TALLY_PORT || '9000'}`);
+  console.log(`  Tally: ${process.env.TALLY_HOST ? `http://${process.env.TALLY_HOST}` : 'Not configured (set TALLY_HOST or use Tally Sync page)'}`);
   console.log(`  Health: http://localhost:${PORT}/api/health\n`);
 });
