@@ -153,17 +153,17 @@ export default function TallySync() {
             <div className="space-y-3">
               <div>
                 <label className="block text-xs text-gray-500 mb-1">Tally Host IP</label>
-                <input type="text" value={config.host} disabled={isDemo} onChange={e => setConfig(c => ({ ...c, host: e.target.value }))}
+                <input type="text" value={config.host} disabled={isDemo || testing || syncing} onChange={e => setConfig(c => ({ ...c, host: e.target.value }))}
                   className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Enter Tally Host IP" />
               </div>
               <div>
                 <label className="block text-xs text-gray-500 mb-1">Tally Username</label>
-                <input type="text" value={config.username} disabled={isDemo} onChange={e => setConfig(c => ({ ...c, username: e.target.value }))}
+                <input type="text" value={config.username} disabled={isDemo || testing || syncing} onChange={e => setConfig(c => ({ ...c, username: e.target.value }))}
                   className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Enter Tally username" />
               </div>
               <div>
                 <label className="block text-xs text-gray-500 mb-1">Tally Password</label>
-                <input type="password" value={config.password} disabled={isDemo} onChange={e => setConfig(c => ({ ...c, password: e.target.value }))}
+                <input type="password" value={config.password} disabled={isDemo || testing || syncing} onChange={e => setConfig(c => ({ ...c, password: e.target.value }))}
                   className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Enter Tally password" />
               </div>
               <div className="bg-gray-900/50 rounded-lg p-3">
