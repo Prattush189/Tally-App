@@ -5,6 +5,7 @@ import {
   HAS_SUPABASE, supabase,
   supabaseRegister, supabaseLogin, supabaseMe, supabaseLogout,
 } from '../utils/supabase';
+import { DEMO_EMAIL, DEMO_PASSWORD, DEMO_NAME, isDemoUser } from '../utils/demo';
 
 const AuthContext = createContext(null);
 
@@ -139,9 +140,32 @@ export function AuthProvider({ children }) {
     setUser(null);
   };
 
+  // One-click demo login. Tries to sign in with the fixed creds; if the account
+  // doesn't exist yet, registers it first then signs in. The demo user sees
+  // mock data on all dashboards and has Tally Sync locked to view-only.
+  const loginAsDemo = async () => {
+    try {
+      return await login(DEMO_EMAIL, DEMO_PASSWORD);
+    } catch (loginErr) {
+      try {
+        const data = await register(DEMO_NAME, DEMO_EMAIL, DEMO_PASSWORD);
+        return data;
+      } catch (registerErr) {
+        if (registerErr?.needsConfirmation) {
+          throw new Error('Demo account needs email confirmation in Supabase. Disable "Confirm email" under Authentication → Providers → Email, then try again.');
+        }
+        // If the account exists but password is wrong, or some other issue, surface the login error.
+        throw loginErr;
+      }
+    }
+  };
+
+  const isDemo = isDemoUser(user);
+
   return (
     <AuthContext.Provider value={{
-      user, login, register, logout, loading,
+      user, login, register, logout, loginAsDemo, loading,
+      isDemo,
       hasBackend: HAS_BACKEND, hasSupabase: HAS_SUPABASE,
     }}>
       {children}

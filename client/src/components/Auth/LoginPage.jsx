@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
-import { Activity, Eye, EyeOff, LogIn, UserPlus, AlertCircle } from 'lucide-react';
+import { Activity, Eye, EyeOff, LogIn, UserPlus, AlertCircle, Sparkles, Copy, Check } from 'lucide-react';
+import { DEMO_EMAIL, DEMO_PASSWORD } from '../../utils/demo';
 
 export default function LoginPage() {
-  const { login, register } = useAuth();
+  const { login, register, loginAsDemo } = useAuth();
   const [mode, setMode] = useState('login'); // 'login' | 'register'
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -11,6 +12,8 @@ export default function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [demoLoading, setDemoLoading] = useState(false);
+  const [copied, setCopied] = useState('');
 
   const isRegister = mode === 'register';
 
@@ -33,6 +36,26 @@ export default function LoginPage() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleDemo = async () => {
+    setError('');
+    setDemoLoading(true);
+    try {
+      await loginAsDemo();
+    } catch (err) {
+      setError(err.message || 'Could not sign into the demo account.');
+    } finally {
+      setDemoLoading(false);
+    }
+  };
+
+  const copy = async (text, label) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(label);
+      setTimeout(() => setCopied(''), 1200);
+    } catch { /* older browsers */ }
   };
 
   const switchMode = (next) => {
@@ -165,6 +188,44 @@ export default function LoginPage() {
               </>
             )}
           </p>
+
+          {/* Demo account — one-click view-only tour with sample data. */}
+          <div className="mt-6 pt-6 border-t border-gray-700/40">
+            <div className="flex items-center gap-2 mb-3">
+              <Sparkles size={14} className="text-indigo-300" />
+              <p className="text-xs font-semibold text-indigo-300 uppercase tracking-wider">Just looking around?</p>
+            </div>
+            <div className="rounded-xl bg-indigo-500/5 border border-indigo-500/20 p-4 space-y-3">
+              <p className="text-xs text-gray-400 leading-relaxed">
+                The demo account is view-only and comes pre-loaded with sample dealer, invoice, and payment data across all 22 modules.
+              </p>
+              <div className="grid grid-cols-[auto,1fr,auto] gap-x-2 gap-y-1.5 text-xs items-center">
+                <span className="text-gray-500">Email</span>
+                <code className="text-gray-200 font-mono truncate">{DEMO_EMAIL}</code>
+                <button type="button" onClick={() => copy(DEMO_EMAIL, 'email')} title="Copy" className="text-gray-500 hover:text-indigo-300 p-1">
+                  {copied === 'email' ? <Check size={13} className="text-emerald-400" /> : <Copy size={13} />}
+                </button>
+                <span className="text-gray-500">Password</span>
+                <code className="text-gray-200 font-mono truncate">{DEMO_PASSWORD}</code>
+                <button type="button" onClick={() => copy(DEMO_PASSWORD, 'password')} title="Copy" className="text-gray-500 hover:text-indigo-300 p-1">
+                  {copied === 'password' ? <Check size={13} className="text-emerald-400" /> : <Copy size={13} />}
+                </button>
+              </div>
+              <button
+                type="button"
+                onClick={handleDemo}
+                disabled={demoLoading}
+                className="w-full bg-indigo-500/20 hover:bg-indigo-500/30 disabled:opacity-50 disabled:cursor-wait text-indigo-200 font-semibold text-sm py-2.5 rounded-lg flex items-center justify-center gap-2 transition-all border border-indigo-500/30"
+              >
+                {demoLoading ? (
+                  <div className="w-4 h-4 border-2 border-indigo-200/30 border-t-indigo-200 rounded-full animate-spin" />
+                ) : (
+                  <Sparkles size={15} />
+                )}
+                {demoLoading ? 'Loading demo...' : 'Continue as Demo'}
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </div>

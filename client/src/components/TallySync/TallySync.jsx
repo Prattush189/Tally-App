@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
-import { RefreshCw, CheckCircle, AlertTriangle, Wifi, WifiOff, Database, Users, Package, Layers } from 'lucide-react';
+import { RefreshCw, CheckCircle, AlertTriangle, Wifi, WifiOff, Database, Users, Package, Layers, Eye } from 'lucide-react';
 import SectionHeader from '../common/SectionHeader';
 import { fmt } from '../../utils/format';
+import { useAuth } from '../../context/AuthContext';
 import {
   TALLY_BACKEND, tallyAvailable, testConnection, syncFromTally,
   getStatus, getDataSummary,
@@ -25,6 +26,7 @@ function loadTallyConfig() {
 }
 
 export default function TallySync() {
+  const { isDemo } = useAuth();
   const [status, setStatus] = useState(null);
   const [summary, setSummary] = useState(null);
   const [syncing, setSyncing] = useState(false);
@@ -47,6 +49,7 @@ export default function TallySync() {
   }, [available]);
 
   const handleTest = async () => {
+    if (isDemo) return;
     setTesting(true);
     setTestResult(null);
     try {
@@ -58,6 +61,7 @@ export default function TallySync() {
   };
 
   const handleSync = async () => {
+    if (isDemo) return;
     setSyncing(true);
     setSyncResult(null);
     try {
@@ -127,6 +131,20 @@ export default function TallySync() {
         </div>
       </div>
 
+      {isDemo && (
+        <div className="glass-card p-4 border border-indigo-500/30 bg-indigo-500/5">
+          <div className="flex items-start gap-3">
+            <Eye size={18} className="text-indigo-300 flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="text-sm font-semibold text-white">View-only demo account</p>
+              <p className="text-xs text-gray-400 mt-0.5">
+                You can browse every page with pre-loaded sample data, but Test Connection and Sync are disabled. Create your own account to connect your live Tally server.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Left: Actions */}
         <div className="space-y-4">
@@ -135,18 +153,18 @@ export default function TallySync() {
             <div className="space-y-3">
               <div>
                 <label className="block text-xs text-gray-500 mb-1">Tally Host IP</label>
-                <input type="text" value={config.host} onChange={e => setConfig(c => ({ ...c, host: e.target.value }))}
-                  className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500" placeholder="Enter Tally Host IP" />
+                <input type="text" value={config.host} disabled={isDemo} onChange={e => setConfig(c => ({ ...c, host: e.target.value }))}
+                  className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Enter Tally Host IP" />
               </div>
               <div>
                 <label className="block text-xs text-gray-500 mb-1">Tally Username</label>
-                <input type="text" value={config.username} onChange={e => setConfig(c => ({ ...c, username: e.target.value }))}
-                  className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500" placeholder="Enter Tally username" />
+                <input type="text" value={config.username} disabled={isDemo} onChange={e => setConfig(c => ({ ...c, username: e.target.value }))}
+                  className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Enter Tally username" />
               </div>
               <div>
                 <label className="block text-xs text-gray-500 mb-1">Tally Password</label>
-                <input type="password" value={config.password} onChange={e => setConfig(c => ({ ...c, password: e.target.value }))}
-                  className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500" placeholder="Enter Tally password" />
+                <input type="password" value={config.password} disabled={isDemo} onChange={e => setConfig(c => ({ ...c, password: e.target.value }))}
+                  className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Enter Tally password" />
               </div>
               <div className="bg-gray-900/50 rounded-lg p-3">
                 <p className="text-xs text-gray-500 mb-1">Company</p>
@@ -164,13 +182,15 @@ export default function TallySync() {
             </div>
 
             <div className="flex gap-3">
-              <button onClick={handleTest} disabled={testing}
-                className={`flex-1 py-2.5 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 transition-all border ${testing ? 'border-gray-600 text-gray-500' : 'border-indigo-500/30 text-indigo-400 hover:bg-indigo-500/10'}`}>
+              <button onClick={handleTest} disabled={testing || isDemo}
+                title={isDemo ? 'Disabled for the demo account' : ''}
+                className={`flex-1 py-2.5 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 transition-all border disabled:opacity-40 disabled:cursor-not-allowed ${testing ? 'border-gray-600 text-gray-500' : 'border-indigo-500/30 text-indigo-400 hover:bg-indigo-500/10'}`}>
                 <Wifi size={14} className={testing ? 'animate-pulse' : ''} />
                 {testing ? 'Testing...' : 'Test Connection'}
               </button>
-              <button onClick={handleSync} disabled={syncing}
-                className={`flex-1 py-2.5 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 transition-all ${syncing ? 'bg-indigo-500/50 cursor-wait' : 'bg-indigo-600 hover:bg-indigo-500'} text-white`}>
+              <button onClick={handleSync} disabled={syncing || isDemo}
+                title={isDemo ? 'Disabled for the demo account' : ''}
+                className={`flex-1 py-2.5 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 transition-all disabled:opacity-40 disabled:cursor-not-allowed ${syncing ? 'bg-indigo-500/50 cursor-wait' : 'bg-indigo-600 hover:bg-indigo-500'} text-white`}>
                 <RefreshCw size={14} className={syncing ? 'animate-spin' : ''} />
                 {syncing ? 'Syncing...' : 'Sync Now'}
               </button>
