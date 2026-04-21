@@ -11,7 +11,8 @@ import {
 import SectionHeader from '../common/SectionHeader';
 import RiskBadge from '../common/RiskBadge';
 import LoadingSpinner from '../common/LoadingSpinner';
-import api from '../../utils/api';
+import api, { HAS_BACKEND } from '../../utils/api';
+import { getDealer, getDealers } from '../../lib/extendedEngine';
 import { fmt, TOOLTIP_STYLE, CHART_COLORS } from '../../utils/format';
 
 const priorityColors = { Critical: '#ef4444', High: '#f97316', Medium: '#f59e0b', Low: '#3b82f6' };
@@ -28,21 +29,33 @@ export default function DealerProfile() {
 
   // Load dealer list
   useEffect(() => {
-    api.get('/extended/dealers').then(r => {
-      setDealers(r.data.dealers);
+    if (HAS_BACKEND) {
+      api.get('/extended/dealers').then(r => {
+        setDealers(r.data.dealers);
+        setListLoading(false);
+      }).catch(() => setListLoading(false));
+    } else {
+      setDealers(getDealers().dealers);
       setListLoading(false);
-    }).catch(() => setListLoading(false));
+    }
   }, []);
 
   // Load dealer profile
   useEffect(() => {
     if (!selectedId) return;
     setLoading(true);
-    api.get(`/extended/dealer/${selectedId}`).then(r => {
-      setDealer(r.data);
+    if (HAS_BACKEND) {
+      api.get(`/extended/dealer/${selectedId}`).then(r => {
+        setDealer(r.data);
+        setLoading(false);
+        setExpandedSuggestion(null);
+      }).catch(() => setLoading(false));
+    } else {
+      const d = getDealer(selectedId);
+      setDealer(d);
       setLoading(false);
       setExpandedSuggestion(null);
-    }).catch(() => setLoading(false));
+    }
   }, [selectedId]);
 
   const filtered = dealers.filter(d =>

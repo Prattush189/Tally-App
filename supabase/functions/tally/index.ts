@@ -1,0 +1,146 @@
+// Supabase Edge Function — proxies Tally Prime XML requests from the browser.
+// Tally's XML API doesn't speak CORS and usually can't be reached directly from a browser
+// (credentials, private IPs, etc.), so we do the HTTP from inside Supabase and stream the
+// parsed JSON back to the client.
+//
+// Deploy: supabase functions deploy tally
+// Secrets (optional defaults):
+//   supabase secrets set TALLY_HOST=1.2.3.4:9000 TALLY_USERNAME=... TALLY_PASSWORD=...
+// If the request body includes host/username/password they override the secrets.
+//
+// Actions:
+//   { action: 'test' }                    → getCompanyInfo
+//   { action: 'sync' }                    → list of customers summary
+//   { action: 'request', xml: '...' }     → raw XML passthrough
+// Optional fields on every request: host, username, password, company.
+
+import { XMLParser } from 'npm:fast-xml-parser@4.3.4';
+
+type TallyConfig = {
+  host?: string;
+  username?: string;
+  password?: string;
+  company?: string;
+};
+
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+};
+
+const parser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: '_',
+  textNodeName: '_text',
+  isArray: (name) => ['LEDGER', 'VOUCHER', 'STOCKITEM', 'BILL', 'BODY', 'COLLECTION'].includes(name),
+});
+
+function resolveConfig(overrides: TallyConfig): Required<TallyConfig> {
+  const host = overrides.host || Deno.env.get('TALLY_HOST') || '';
+  const username = overrides.username ?? Deno.env.get('TALLY_USERNAME') ?? '';
+  const password = overrides.password ?? Deno.env.get('TALLY_PASSWORD') ?? '';
+  const company = overrides.company || Deno.env.get('TALLY_COMPANY') || '';
+  return { host, username, password, company };
+}
+
+async function tallyRequest(xml: string, cfg: Required<TallyConfig>, timeoutMs = 30000) {
+  if (!cfg.host) throw new Error('Tally host not configured. Provide "host" in the request body or set TALLY_HOST secret.');
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const headers: Record<string, string> = { 'Content-Type': 'application/xml' };
+    if (cfg.username && cfg.password) {
+      headers['Authorization'] = 'Basic ' + btoa(`${cfg.username}:${cfg.password}`);
+    }
+    const res = await fetch(`http://${cfg.host}`, {
+      method: 'POST', headers, body: xml, signal: controller.signal,
+    });
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(`Tally authentication failed (${res.status}). Check username/password.`);
+    }
+    if (!res.ok) throw new Error(`Tally returned HTTP ${res.status}: ${res.statusText}`);
+    const text = await res.text();
+    return parser.parse(text);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function companyFilter(company: string) {
+  return company ? `<SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>` : '';
+}
+
+function reportRequest(reportId: string, company: string) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Data</TYPE><ID>${reportId}</ID></HEADER>
+  <BODY><DESC><STATICVARIABLES>
+    <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+    ${companyFilter(company)}
+  </STATICVARIABLES></DESC></BODY>
+</ENVELOPE>`;
+}
+
+function sundryDebtorsRequest(company: string) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>CustomLedgerCollection</ID></HEADER>
+  <BODY><DESC>
+    <STATICVARIABLES>
+      <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      ${companyFilter(company)}
+    </STATICVARIABLES>
+    <TDL><TDLMESSAGE>
+      <COLLECTION NAME="CustomLedgerCollection" ISMODIFY="No">
+        <TYPE>Ledger</TYPE>
+        <NATIVEMETHOD>Name</NATIVEMETHOD>
+        <NATIVEMETHOD>Parent</NATIVEMETHOD>
+        <NATIVEMETHOD>ClosingBalance</NATIVEMETHOD>
+        <NATIVEMETHOD>PartyGSTIN</NATIVEMETHOD>
+        <NATIVEMETHOD>LedStateName</NATIVEMETHOD>
+        <FILTER>SundryDebtorFilter</FILTER>
+      </COLLECTION>
+      <SYSTEM TYPE="Formulae" NAME="SundryDebtorFilter">
+        $Parent = "Sundry Debtors" OR $Parent UNDER "Sundry Debtors"
+      </SYSTEM>
+    </TDLMESSAGE></TDL>
+  </DESC></BODY>
+</ENVELOPE>`;
+}
+
+Deno.serve(async (req) => {
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', { headers: corsHeaders });
+  }
+
+  try {
+    const body = await req.json().catch(() => ({}));
+    const action = body.action || 'test';
+    const cfg = resolveConfig(body);
+
+    let xml: string;
+    if (action === 'test') {
+      xml = reportRequest('List of Companies', cfg.company);
+    } else if (action === 'sync') {
+      xml = sundryDebtorsRequest(cfg.company);
+    } else if (action === 'request') {
+      if (!body.xml) throw new Error('Missing "xml" field for action="request"');
+      xml = body.xml;
+    } else {
+      throw new Error(`Unknown action: ${action}`);
+    }
+
+    const result = await tallyRequest(xml, cfg);
+    return new Response(JSON.stringify({ connected: true, action, data: result }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return new Response(JSON.stringify({ connected: false, error: message }), {
+      status: 400,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  }
+});

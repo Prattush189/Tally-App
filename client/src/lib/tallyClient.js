@@ -1,0 +1,71 @@
+// Tally client — routes Tally calls to the configured backend.
+// Priority: Supabase Edge Function ("tally") > Express REST backend > unavailable.
+
+import api, { HAS_BACKEND } from '../utils/api';
+import { HAS_SUPABASE, supabase } from '../utils/supabase';
+
+export const TALLY_BACKEND =
+  HAS_SUPABASE ? 'supabase' :
+  HAS_BACKEND ? 'express' :
+  'none';
+
+export function tallyAvailable() {
+  return TALLY_BACKEND !== 'none';
+}
+
+async function supabaseInvoke(action, config = {}) {
+  const { data, error } = await supabase.functions.invoke('tally', {
+    body: { action, ...config },
+  });
+  if (error) {
+    const message = error.context?.error || error.message || 'Tally function failed';
+    throw new Error(message);
+  }
+  return data;
+}
+
+export async function testConnection(config = {}) {
+  if (TALLY_BACKEND === 'supabase') {
+    const data = await supabaseInvoke('test', config);
+    return { connected: Boolean(data?.connected), response: data?.data, error: data?.error };
+  }
+  if (TALLY_BACKEND === 'express') {
+    const r = await api.post('/tally/test', config);
+    return r.data;
+  }
+  throw new Error('Tally is not available on this deployment. Configure Supabase (VITE_SUPABASE_URL) or a dedicated backend (VITE_API_URL).');
+}
+
+export async function syncFromTally(config = {}) {
+  if (TALLY_BACKEND === 'supabase') {
+    const data = await supabaseInvoke('sync', config);
+    // Minimal sync response — the Edge Function returns raw parsed XML.
+    // Future work: port the server transformer to extract customers/skus/categories here.
+    return {
+      success: Boolean(data?.connected),
+      error: data?.error,
+      raw: data?.data,
+      note: 'Supabase sync returned raw Tally data — full transformer not yet wired. Use a dedicated backend for the end-to-end sync pipeline.',
+    };
+  }
+  if (TALLY_BACKEND === 'express') {
+    const r = await api.post('/tally/sync', config);
+    return r.data;
+  }
+  throw new Error('Tally is not available on this deployment.');
+}
+
+export async function getStatus() {
+  if (TALLY_BACKEND === 'express') {
+    try { return (await api.get('/tally/status')).data; } catch { return null; }
+  }
+  // Supabase: return stateless placeholder. Full status requires persisting sync metadata.
+  return { connected: false, source: 'mock', lastAttempt: null, lastError: null };
+}
+
+export async function getDataSummary() {
+  if (TALLY_BACKEND === 'express') {
+    try { return (await api.get('/tally/data-summary')).data; } catch { return null; }
+  }
+  return null;
+}

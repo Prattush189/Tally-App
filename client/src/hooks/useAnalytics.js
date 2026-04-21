@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
-import api from '../utils/api';
+import api, { HAS_BACKEND } from '../utils/api';
+import { runAnalytics } from '../lib/analyticsEngine';
 
 export function useAnalytics(endpoint) {
   const [data, setData] = useState(null);
@@ -9,11 +10,15 @@ export function useAnalytics(endpoint) {
   const fetchData = async () => {
     setLoading(true);
     try {
-      const res = await api.get(`/analytics/${endpoint}`);
-      setData(res.data);
+      if (HAS_BACKEND) {
+        const res = await api.get(`/analytics/${endpoint}`);
+        setData(res.data);
+      } else {
+        setData(runAnalytics(endpoint));
+      }
       setError(null);
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to fetch data');
+      setError(err.response?.data?.error || err.message || 'Failed to fetch data');
     } finally {
       setLoading(false);
     }

@@ -1,8 +1,11 @@
 import { useState, useEffect } from 'react';
 import { RefreshCw, CheckCircle, AlertTriangle, Wifi, WifiOff, Database, Users, Package, Layers } from 'lucide-react';
 import SectionHeader from '../common/SectionHeader';
-import api from '../../utils/api';
 import { fmt } from '../../utils/format';
+import {
+  TALLY_BACKEND, tallyAvailable, testConnection, syncFromTally,
+  getStatus, getDataSummary,
+} from '../../lib/tallyClient';
 
 export default function TallySync() {
   const [status, setStatus] = useState(null);
@@ -11,24 +14,21 @@ export default function TallySync() {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null);
   const [syncResult, setSyncResult] = useState(null);
-  const [config, setConfig] = useState({
-    host: '',
-    username: '',
-    password: '',
-  });
+  const [config, setConfig] = useState({ host: '', username: '', password: '' });
 
-  // Load status on mount
+  const available = tallyAvailable();
+
   useEffect(() => {
-    api.get('/tally/status').then(r => setStatus(r.data)).catch(() => {});
-    api.get('/tally/data-summary').then(r => setSummary(r.data)).catch(() => {});
-  }, []);
+    if (!available) return;
+    getStatus().then(setStatus).catch(() => {});
+    getDataSummary().then(setSummary).catch(() => {});
+  }, [available]);
 
   const handleTest = async () => {
     setTesting(true);
     setTestResult(null);
     try {
-      const r = await api.post('/tally/test', config);
-      setTestResult(r.data);
+      setTestResult(await testConnection(config));
     } catch (err) {
       setTestResult({ connected: false, error: err.message });
     }
@@ -39,24 +39,47 @@ export default function TallySync() {
     setSyncing(true);
     setSyncResult(null);
     try {
-      const r = await api.post('/tally/sync', config);
-      setSyncResult(r.data);
-      // Refresh status
-      const s = await api.get('/tally/status');
-      setStatus(s.data);
-      const sm = await api.get('/tally/data-summary');
-      setSummary(sm.data);
+      const r = await syncFromTally(config);
+      setSyncResult(r);
+      const s = await getStatus();
+      if (s) setStatus(s);
+      const sm = await getDataSummary();
+      if (sm) setSummary(sm);
     } catch (err) {
-      setSyncResult({ success: false, error: err.response?.data?.error || err.message });
+      setSyncResult({ success: false, error: err.message });
     }
     setSyncing(false);
   };
 
   const isConnected = status?.connected;
 
+  if (!available) {
+    return (
+      <div className="space-y-6">
+        <SectionHeader icon={RefreshCw} title="Tally Prime 7.0 Integration" subtitle="Live connection to Tally XML Server — requires a backend" />
+        <div className="glass-card p-6 border-l-4 border-amber-500">
+          <div className="flex items-start gap-3">
+            <AlertTriangle size={22} className="text-amber-400 flex-shrink-0 mt-0.5" />
+            <div className="space-y-2">
+              <p className="text-sm font-semibold text-white">Tally sync is not configured for this deployment.</p>
+              <p className="text-xs text-gray-400">
+                Tally's XML API can't be called directly from a browser. Wire up one of the backends below and redeploy:
+              </p>
+              <ul className="text-xs text-gray-300 list-disc list-inside space-y-1">
+                <li><span className="font-semibold">Supabase</span> — deploy the <code className="text-indigo-300">tally</code> Edge Function and set <code className="text-indigo-300">VITE_SUPABASE_URL</code> + <code className="text-indigo-300">VITE_SUPABASE_ANON_KEY</code> as GitHub Actions variables.</li>
+                <li><span className="font-semibold">Dedicated server</span> — run <code className="text-indigo-300">server/</code> (Railway, VPS, etc.) and set <code className="text-indigo-300">VITE_API_URL</code>.</li>
+              </ul>
+              <p className="text-xs text-gray-500">Dashboards keep working on mock data in the meantime.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
-      <SectionHeader icon={RefreshCw} title="Tally Prime 7.0 Integration" subtitle="Live connection to Tally XML Server — pulls real data for all analytics" />
+      <SectionHeader icon={RefreshCw} title="Tally Prime 7.0 Integration" subtitle={`Live connection via ${TALLY_BACKEND} backend — pulls real data for all analytics`} />
 
       {/* Connection Status Banner */}
       <div className={`glass-card p-5 border-l-4 ${isConnected ? 'border-emerald-500' : 'border-amber-500'}`}>
