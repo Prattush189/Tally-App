@@ -8,8 +8,8 @@
 
 import { XMLParser } from 'fast-xml-parser';
 
-let TALLY_HOST = process.env.TALLY_HOST || '103.76.213.243';
-let TALLY_PORT = process.env.TALLY_PORT || '65430';
+let TALLY_HOST = process.env.TALLY_HOST || '127.0.0.1';
+let TALLY_PORT = process.env.TALLY_PORT || '9000';
 let TALLY_URL = `http://${TALLY_HOST}:${TALLY_PORT}`;
 let TALLY_COMPANY = process.env.TALLY_COMPANY || '';  // Leave empty for active company
 let TALLY_USERNAME = process.env.TALLY_USERNAME || '';

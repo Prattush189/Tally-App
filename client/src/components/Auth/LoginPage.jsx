@@ -1,26 +1,44 @@
 import { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
-import { Activity, Eye, EyeOff, LogIn, AlertCircle } from 'lucide-react';
+import { Activity, Eye, EyeOff, LogIn, UserPlus, AlertCircle } from 'lucide-react';
 
 export default function LoginPage() {
-  const { login } = useAuth();
+  const { login, register } = useAuth();
+  const [mode, setMode] = useState('login'); // 'login' | 'register'
+  const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
+  const isRegister = mode === 'register';
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
     setLoading(true);
     try {
-      await login(email, password);
+      if (isRegister) {
+        await register(name, email, password);
+      } else {
+        await login(email, password);
+      }
     } catch (err) {
-      setError(err.response?.data?.error || 'Login failed. Please check your credentials.');
+      setError(
+        err.response?.data?.error ||
+        err.message ||
+        (isRegister ? 'Registration failed. Please try again.' : 'Login failed. Please check your credentials.')
+      );
     } finally {
       setLoading(false);
     }
+  };
+
+  const switchMode = (next) => {
+    setMode(next);
+    setError('');
+    setPassword('');
   };
 
   return (
@@ -41,9 +59,32 @@ export default function LoginPage() {
           <p className="text-gray-400 mt-2">Invoice & Payment-Driven Analytics</p>
         </div>
 
-        {/* Login Card */}
+        {/* Auth Card */}
         <div className="glass-card p-8">
-          <h2 className="text-lg font-semibold text-white mb-6">Sign in to your account</h2>
+          <div className="flex gap-2 mb-6 p-1 rounded-xl bg-gray-900/60 border border-gray-700/30">
+            <button
+              type="button"
+              onClick={() => switchMode('login')}
+              className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${
+                !isRegister ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-gray-200'
+              }`}
+            >
+              Sign in
+            </button>
+            <button
+              type="button"
+              onClick={() => switchMode('register')}
+              className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${
+                isRegister ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-gray-200'
+              }`}
+            >
+              Create account
+            </button>
+          </div>
+
+          <h2 className="text-lg font-semibold text-white mb-6">
+            {isRegister ? 'Create your account' : 'Sign in to your account'}
+          </h2>
 
           {error && (
             <div className="flex items-center gap-2 p-3 mb-4 rounded-lg bg-red-500/10 border border-red-500/20">
@@ -53,11 +94,25 @@ export default function LoginPage() {
           )}
 
           <form onSubmit={handleSubmit} className="space-y-5">
+            {isRegister && (
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-1.5">Full name</label>
+                <input
+                  type="text" value={name} onChange={e => setName(e.target.value)}
+                  placeholder="Your name"
+                  autoComplete="name"
+                  className="w-full bg-gray-900/60 border border-gray-600/50 rounded-xl px-4 py-3 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/30 transition-all"
+                  required
+                  minLength={2}
+                />
+              </div>
+            )}
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-1.5">Email</label>
               <input
                 type="email" value={email} onChange={e => setEmail(e.target.value)}
-                placeholder="admin@b2bintel.com"
+                placeholder="you@example.com"
+                autoComplete="email"
                 className="w-full bg-gray-900/60 border border-gray-600/50 rounded-xl px-4 py-3 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/30 transition-all"
                 required
               />
@@ -67,9 +122,11 @@ export default function LoginPage() {
               <div className="relative">
                 <input
                   type={showPassword ? 'text' : 'password'} value={password} onChange={e => setPassword(e.target.value)}
-                  placeholder="Enter your password"
+                  placeholder={isRegister ? 'At least 8 characters' : 'Enter your password'}
+                  autoComplete={isRegister ? 'new-password' : 'current-password'}
                   className="w-full bg-gray-900/60 border border-gray-600/50 rounded-xl px-4 py-3 pr-12 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/30 transition-all"
                   required
+                  minLength={isRegister ? 8 : undefined}
                 />
                 <button type="button" onClick={() => setShowPassword(!showPassword)} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-300">
                   {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
@@ -80,25 +137,34 @@ export default function LoginPage() {
               type="submit" disabled={loading}
               className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-600/50 disabled:cursor-wait text-white font-semibold py-3 rounded-xl flex items-center justify-center gap-2 transition-all"
             >
-              {loading ? <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <LogIn size={18} />}
-              {loading ? 'Signing in...' : 'Sign In'}
+              {loading ? (
+                <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+              ) : isRegister ? (
+                <UserPlus size={18} />
+              ) : (
+                <LogIn size={18} />
+              )}
+              {loading
+                ? (isRegister ? 'Creating account...' : 'Signing in...')
+                : (isRegister ? 'Create account' : 'Sign In')}
             </button>
           </form>
 
-          {/* Demo credentials hint */}
-          <div className="mt-6 p-4 rounded-xl bg-gray-900/60 border border-gray-700/30">
-            <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Demo Credentials</p>
-            <div className="space-y-1.5 text-sm">
-              <div className="flex justify-between">
-                <span className="text-gray-500">Admin:</span>
-                <span className="text-gray-300 font-mono text-xs">admin@b2bintel.com / admin123</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-500">Viewer:</span>
-                <span className="text-gray-300 font-mono text-xs">demo@b2bintel.com / demo2026</span>
-              </div>
-            </div>
-          </div>
+          <p className="text-center text-sm text-gray-400 mt-6">
+            {isRegister ? (
+              <>Already have an account?{' '}
+                <button type="button" onClick={() => switchMode('login')} className="text-indigo-400 hover:text-indigo-300 font-medium">
+                  Sign in
+                </button>
+              </>
+            ) : (
+              <>New here?{' '}
+                <button type="button" onClick={() => switchMode('register')} className="text-indigo-400 hover:text-indigo-300 font-medium">
+                  Create an account
+                </button>
+              </>
+            )}
+          </p>
         </div>
       </div>
     </div>

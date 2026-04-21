@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>B2B Customer Intelligence</title>
+  <script>
+    // GitHub Pages SPA fallback: redirect any unknown path back to the app root
+    // while preserving the path as a query param so the client can restore it.
+    (function () {
+      var segments = window.location.pathname.split('/').filter(Boolean);
+      var repo = segments[0] || '';
+      var target = '/' + repo + '/';
+      if (window.location.pathname !== target) {
+        window.location.replace(target);
+      }
+    })();
+  </script>
+</head>
+<body>
+  <noscript>This application requires JavaScript. Please return to <a href="/">the home page</a>.</noscript>
+</body>
+</html>
