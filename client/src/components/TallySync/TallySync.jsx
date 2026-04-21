@@ -7,6 +7,23 @@ import {
   getStatus, getDataSummary,
 } from '../../lib/tallyClient';
 
+const TALLY_CONFIG_KEY = 'b2b_tally_config';
+
+function loadTallyConfig() {
+  try {
+    const raw = localStorage.getItem(TALLY_CONFIG_KEY);
+    if (!raw) return { host: '', username: '', password: '' };
+    const parsed = JSON.parse(raw);
+    return {
+      host: parsed.host || '',
+      username: parsed.username || '',
+      password: parsed.password || '',
+    };
+  } catch {
+    return { host: '', username: '', password: '' };
+  }
+}
+
 export default function TallySync() {
   const [status, setStatus] = useState(null);
   const [summary, setSummary] = useState(null);
@@ -14,9 +31,14 @@ export default function TallySync() {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null);
   const [syncResult, setSyncResult] = useState(null);
-  const [config, setConfig] = useState({ host: '', username: '', password: '' });
+  const [config, setConfig] = useState(loadTallyConfig);
 
   const available = tallyAvailable();
+
+  useEffect(() => {
+    try { localStorage.setItem(TALLY_CONFIG_KEY, JSON.stringify(config)); }
+    catch { /* quota / private mode */ }
+  }, [config]);
 
   useEffect(() => {
     if (!available) return;

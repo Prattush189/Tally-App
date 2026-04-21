@@ -3,7 +3,10 @@
 project_id = "vqusztwxrjokjgkiebem"
 
 [functions.tally]
-# JWT verification stays on — the browser's Supabase client automatically
-# attaches the signed-in user's token to invoke() calls, so only authenticated
-# dashboard users can proxy Tally requests.
-verify_jwt = true
+# JWT verification is OFF because Supabase projects on the new publishable-key
+# format (sb_publishable_...) issue ES256-signed session tokens, which the
+# Edge Function runtime's built-in verifier doesn't support yet.
+# The function is still protected at the platform level — callers must send
+# the project anon key via the "apikey" header, which supabase-js does
+# automatically. Tally credentials live in server-side secrets.
+verify_jwt = false

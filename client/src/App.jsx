@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import LoginPage from './components/Auth/LoginPage';
 import Sidebar from './components/Layout/Sidebar';
@@ -26,12 +26,21 @@ import InventoryBudget from './components/InventoryBudget/InventoryBudget';
 import MarketingBudget from './components/MarketingBudget/MarketingBudget';
 import DealerProfile from './components/DealerProfile/DealerProfile';
 
+const ACTIVE_PAGE_KEY = 'b2b_active_page';
+
 function DashboardApp() {
   const { user } = useAuth();
-  const [active, setActive] = useState('overview');
+  const [active, setActive] = useState(() => {
+    try { return localStorage.getItem(ACTIVE_PAGE_KEY) || 'overview'; }
+    catch { return 'overview'; }
+  });
   const [searchQuery, setSearchQuery] = useState('');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [syncing, setSyncing] = useState(false);
+
+  useEffect(() => {
+    try { localStorage.setItem(ACTIVE_PAGE_KEY, active); } catch { /* quota / private mode */ }
+  }, [active]);
 
   if (!user) return <LoginPage />;
 
