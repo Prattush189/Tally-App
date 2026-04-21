@@ -76,7 +76,12 @@ function extractLedgers(tree) {
 
 function isSundryDebtor(ledger) {
   const parent = textField(ledger.PARENT).toLowerCase();
-  return parent === 'sundry debtors' || parent.startsWith('sundry debtors');
+  if (!parent) return false;
+  // Match "Sundry Debtors", anything nested under it ("Sundry Debtors / X"),
+  // and the common synonyms shops use for the same group.
+  return parent.includes('sundry debtor')
+    || parent === 'debtors'
+    || parent.includes('accounts receivable');
 }
 
 function buildCustomer(ledger, index) {
@@ -144,13 +149,37 @@ function buildCustomer(ledger, index) {
 export function transformTallyLedgers(rawTree) {
   const ledgers = extractLedgers(rawTree);
   const debtors = ledgers.filter(isSundryDebtor);
-  const customers = debtors.map(buildCustomer);
+
+  // Fallback — if no ledger has a recognizable Sundry Debtor parent (common
+  // when Tally returns name-only responses or the group is renamed), keep
+  // ledgers that have a non-zero closing balance. They're almost certainly
+  // the accounts we care about; the user can refine later.
+  const source = debtors.length > 0
+    ? debtors
+    : ledgers.filter(l => Math.abs(parseAmount(l.CLOSINGBALANCE)) > 0);
+
+  const customers = source.map(buildCustomer);
+
+  // Unique parent groups found in the feed — useful diagnostic so the UI can
+  // tell the user WHY their filter didn't match (e.g. group is "Trade
+  // Debtors" instead of "Sundry Debtors").
+  const parents = new Set();
+  for (const l of ledgers) {
+    const p = textField(l.PARENT);
+    if (p) parents.add(p);
+  }
+
   return {
     customers,
     totals: {
       ledgers: ledgers.length,
       sundryDebtors: debtors.length,
       outstanding: customers.reduce((s, c) => s + c.outstandingAmount, 0),
+    },
+    diagnostics: {
+      filterMatched: debtors.length > 0,
+      usedFallback: debtors.length === 0 && source.length > 0,
+      parentsSeen: Array.from(parents).slice(0, 20),
     },
   };
 }

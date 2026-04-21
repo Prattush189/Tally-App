@@ -72,10 +72,11 @@ export default function TallySync() {
       // Dashboards read from liveData on the next render so numbers reflect the sync.
       if (r?.success && r?.raw) {
         try {
-          const { customers, totals } = transformTallyLedgers(r.raw);
+          const { customers, totals, diagnostics } = transformTallyLedgers(r.raw);
+          r.dealersStored = customers.length;
+          r.diagnostics = diagnostics;
           if (customers.length) {
             saveLiveCustomers(user?.email, customers, totals);
-            r.dealersStored = customers.length;
           }
         } catch (transformErr) {
           r.transformError = transformErr.message;
@@ -257,6 +258,20 @@ export default function TallySync() {
                     )}
                     {syncResult.transformError && (
                       <div className="text-xs text-red-300/80 pt-1">Transform warning: {syncResult.transformError}</div>
+                    )}
+                    {syncResult.diagnostics && !syncResult.diagnostics.filterMatched && (
+                      <div className="text-xs text-amber-300/80 pt-1 space-y-1">
+                        <div>
+                          {syncResult.diagnostics.usedFallback
+                            ? `No "Sundry Debtors" group found — falling back to ledgers with non-zero balances (${syncResult.dealersStored}).`
+                            : 'No ledgers matched and no balances found — dashboards will stay empty.'}
+                        </div>
+                        {syncResult.diagnostics.parentsSeen?.length > 0 && (
+                          <div className="text-[11px] text-gray-400">
+                            Parent groups in feed: {syncResult.diagnostics.parentsSeen.join(', ')}
+                          </div>
+                        )}
+                      </div>
                     )}
                   </div>
                 ) : `✗ Sync failed: ${syncResult.error}`}

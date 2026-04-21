@@ -136,11 +136,11 @@ function countRecords(tree: unknown) {
   return counts;
 }
 
-// Lightweight sync — asks Tally for the built-in "Ledger" collection with minimal
-// fields. Heavier custom-TDL queries with many NATIVEMETHODs produced responses
-// large enough that shared-hosting Tally providers drop the connection mid-send
-// ("connection closed before message completed"). This returns enough to confirm
-// plumbing works; ledger → dealer mapping lands with the transformer pass.
+// Sync query — built-in Ledger collection with explicit FETCH fields so the
+// response includes Parent / ClosingBalance / GSTIN / state / credit limit
+// per ledger. Without FETCH, Tally returns names only and the client-side
+// transformer can't filter Sundry Debtors or pull outstanding amounts.
+// Kept lean enough that shared hosts don't drop the connection mid-send.
 function sundryDebtorsRequest(company: string) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <ENVELOPE>
@@ -156,6 +156,17 @@ function sundryDebtorsRequest(company: string) {
         <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
         ${companyFilter(company)}
       </STATICVARIABLES>
+      <FETCHLIST>
+        <FETCH>Name</FETCH>
+        <FETCH>Parent</FETCH>
+        <FETCH>ClosingBalance</FETCH>
+        <FETCH>OpeningBalance</FETCH>
+        <FETCH>CreditLimit</FETCH>
+        <FETCH>CreditPeriod</FETCH>
+        <FETCH>PartyGSTIN</FETCH>
+        <FETCH>LedStateName</FETCH>
+        <FETCH>Address</FETCH>
+      </FETCHLIST>
     </DESC>
   </BODY>
 </ENVELOPE>`;
