@@ -12,8 +12,7 @@ export default function TallySync() {
   const [testResult, setTestResult] = useState(null);
   const [syncResult, setSyncResult] = useState(null);
   const [config, setConfig] = useState({
-    host: '103.76.213.243',
-    port: '65430',
+    host: '',
     username: '',
     password: '',
   });
@@ -89,17 +88,10 @@ export default function TallySync() {
           <div className="glass-card p-6 space-y-5">
             <h3 className="text-lg font-semibold text-white">Tally Connection</h3>
             <div className="space-y-3">
-              <div className="grid grid-cols-3 gap-3">
-                <div className="col-span-2">
-                  <label className="block text-xs text-gray-500 mb-1">Tally Host IP</label>
-                  <input type="text" value={config.host} onChange={e => setConfig(c => ({ ...c, host: e.target.value }))}
-                    className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500" placeholder="103.76.213.243" />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">Port</label>
-                  <input type="text" value={config.port} onChange={e => setConfig(c => ({ ...c, port: e.target.value }))}
-                    className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500" placeholder="65430" />
-                </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">Tally Host IP</label>
+                <input type="text" value={config.host} onChange={e => setConfig(c => ({ ...c, host: e.target.value }))}
+                  className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500" placeholder="Enter Tally Host IP" />
               </div>
               <div>
                 <label className="block text-xs text-gray-500 mb-1">Tally Username</label>
@@ -214,7 +206,7 @@ export default function TallySync() {
             <h3 className="text-lg font-semibold text-white mb-4">How It Works</h3>
             <div className="space-y-4">
               {[
-                { step: '1', title: 'Tally Prime 7.0 (Cloud)', desc: 'Running at 103.76.213.243:65430 with XML Server enabled', color: 'bg-emerald-500/20 text-emerald-400', active: true },
+                { step: '1', title: 'Tally Prime 7.0 (Cloud)', desc: 'Enter your Tally Host IP and credentials to connect', color: 'bg-emerald-500/20 text-emerald-400', active: true },
                 { step: '2', title: 'XML API Requests', desc: 'Dashboard sends TDL XML queries to fetch ledgers, vouchers, stock items', color: 'bg-blue-500/20 text-blue-400', active: true },
                 { step: '3', title: 'Data Transform', desc: 'Raw Tally data → structured customers, invoices, payments, inventory', color: 'bg-indigo-500/20 text-indigo-400', active: true },
                 { step: '4', title: 'Analytics Engine', desc: 'Computes churn, health, forecasting, suggestions from real data', color: 'bg-violet-500/20 text-violet-400', active: true },
@@ -258,8 +250,7 @@ export default function TallySync() {
                 <p className="font-semibold text-amber-400 mb-1">Environment Variables</p>
                 <p>Configure in your <code className="text-gray-300">.env</code> file:</p>
                 <pre className="mt-2 bg-gray-900/60 rounded p-2 text-gray-300 overflow-x-auto">
-{`TALLY_HOST=103.76.213.243
-TALLY_PORT=65430
+{`TALLY_HOST=your-tally-ip
 TALLY_COMPANY=UNITED AGENCIES DISTRIBUTORS LLP`}
                 </pre>
               </div>
