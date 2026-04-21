@@ -26,11 +26,13 @@ import InventoryBudget from './components/InventoryBudget/InventoryBudget';
 import MarketingBudget from './components/MarketingBudget/MarketingBudget';
 import DealerProfile from './components/DealerProfile/DealerProfile';
 import NoDataNotice from './components/common/NoDataNotice';
+import { loadLiveCustomers } from './lib/liveData';
 
 const ACTIVE_PAGE_KEY = 'b2b_active_page';
 
 function DashboardApp() {
   const { user, isDemo } = useAuth();
+  const hasLiveData = !isDemo && !!loadLiveCustomers(user?.email)?.customers?.length;
   const [active, setActive] = useState(() => {
     try { return localStorage.getItem(ACTIVE_PAGE_KEY) || 'overview'; }
     catch { return 'overview'; }
@@ -54,7 +56,7 @@ function DashboardApp() {
     // Tally Sync is always accessible — it's how real users wire up their data.
     // Every other module needs data to be meaningful; non-demo users see a
     // "no data yet" card instead of mock numbers pretending to be their own.
-    if (!isDemo && active !== 'tally') {
+    if (!isDemo && !hasLiveData && active !== 'tally') {
       return <NoDataNotice onNavigate={setActive} />;
     }
     switch (active) {

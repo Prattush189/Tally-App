@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react';
 import api, { HAS_BACKEND } from '../utils/api';
 import { runExtended } from '../lib/extendedEngine';
+import { loadLiveCustomers } from '../lib/liveData';
 import { useAuth } from '../context/AuthContext';
 
 export function useExtended(endpoint) {
-  const { isDemo } = useAuth();
+  const { isDemo, user } = useAuth();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -18,7 +19,12 @@ export function useExtended(endpoint) {
       } else if (isDemo) {
         setData(runExtended(endpoint));
       } else {
-        setData(null);
+        const live = loadLiveCustomers(user?.email);
+        if (live && live.customers.length) {
+          setData(runExtended(endpoint, { customers: live.customers }));
+        } else {
+          setData(null);
+        }
       }
       setError(null);
     } catch (err) {
@@ -28,7 +34,7 @@ export function useExtended(endpoint) {
     }
   };
 
-  useEffect(() => { fetchData(); }, [endpoint, isDemo]);
+  useEffect(() => { fetchData(); }, [endpoint, isDemo, user?.email]);
 
   return { data, loading, error, refresh: fetchData };
 }

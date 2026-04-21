@@ -13,12 +13,15 @@ import RiskBadge from '../common/RiskBadge';
 import LoadingSpinner from '../common/LoadingSpinner';
 import api, { HAS_BACKEND } from '../../utils/api';
 import { getDealer, getDealers } from '../../lib/extendedEngine';
+import { loadLiveCustomers } from '../../lib/liveData';
+import { useAuth } from '../../context/AuthContext';
 import { fmt, TOOLTIP_STYLE, CHART_COLORS } from '../../utils/format';
 
 const priorityColors = { Critical: '#ef4444', High: '#f97316', Medium: '#f59e0b', Low: '#3b82f6' };
 const typeColors = { Retention: '#ef4444', 'Cross-sell': '#8b5cf6', 'SKU Deepening': '#6366f1', Payment: '#f59e0b', Growth: '#22c55e', Timing: '#3b82f6' };
 
 export default function DealerProfile() {
+  const { isDemo, user } = useAuth();
   const [dealers, setDealers] = useState([]);
   const [search, setSearch] = useState('');
   const [selectedId, setSelectedId] = useState(null);
@@ -27,6 +30,10 @@ export default function DealerProfile() {
   const [listLoading, setListLoading] = useState(true);
   const [expandedSuggestion, setExpandedSuggestion] = useState(null);
 
+  // Pick the customer source: live synced data for real users, mock for demo.
+  const liveCustomers = !isDemo ? loadLiveCustomers(user?.email)?.customers : null;
+  const overrides = liveCustomers ? { customers: liveCustomers } : undefined;
+
   // Load dealer list
   useEffect(() => {
     if (HAS_BACKEND) {
@@ -34,11 +41,14 @@ export default function DealerProfile() {
         setDealers(r.data.dealers);
         setListLoading(false);
       }).catch(() => setListLoading(false));
+    } else if (isDemo || liveCustomers) {
+      setDealers(getDealers(overrides).dealers);
+      setListLoading(false);
     } else {
-      setDealers(getDealers().dealers);
+      setDealers([]);
       setListLoading(false);
     }
-  }, []);
+  }, [isDemo, user?.email]);
 
   // Load dealer profile
   useEffect(() => {
@@ -51,7 +61,7 @@ export default function DealerProfile() {
         setExpandedSuggestion(null);
       }).catch(() => setLoading(false));
     } else {
-      const d = getDealer(selectedId);
+      const d = getDealer(selectedId, overrides);
       setDealer(d);
       setLoading(false);
       setExpandedSuggestion(null);

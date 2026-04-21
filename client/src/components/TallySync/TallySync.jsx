@@ -7,6 +7,8 @@ import {
   TALLY_BACKEND, tallyAvailable, testConnection, syncFromTally,
   getStatus, getDataSummary,
 } from '../../lib/tallyClient';
+import { transformTallyLedgers } from '../../lib/tallyTransformer';
+import { saveLiveCustomers, loadLiveCustomers, clearLiveCustomers } from '../../lib/liveData';
 
 const TALLY_CONFIG_KEY = 'b2b_tally_config';
 
@@ -26,7 +28,7 @@ function loadTallyConfig() {
 }
 
 export default function TallySync() {
-  const { isDemo } = useAuth();
+  const { isDemo, user } = useAuth();
   const [status, setStatus] = useState(null);
   const [summary, setSummary] = useState(null);
   const [syncing, setSyncing] = useState(false);
@@ -66,6 +68,19 @@ export default function TallySync() {
     setSyncResult(null);
     try {
       const r = await syncFromTally(config);
+      // Transform raw Tally ledgers → dashboard customer shape and persist.
+      // Dashboards read from liveData on the next render so numbers reflect the sync.
+      if (r?.success && r?.raw) {
+        try {
+          const { customers, totals } = transformTallyLedgers(r.raw);
+          if (customers.length) {
+            saveLiveCustomers(user?.email, customers, totals);
+            r.dealersStored = customers.length;
+          }
+        } catch (transformErr) {
+          r.transformError = transformErr.message;
+        }
+      }
       setSyncResult(r);
       const s = await getStatus();
       if (s) setStatus(s);
@@ -76,6 +91,14 @@ export default function TallySync() {
     }
     setSyncing(false);
   };
+
+  const handleClearLiveData = () => {
+    if (isDemo) return;
+    clearLiveCustomers(user?.email);
+    setSyncResult({ success: true, cleared: true });
+  };
+
+  const liveSnapshot = !isDemo ? loadLiveCustomers(user?.email) : null;
 
   const isConnected = status?.connected;
 
@@ -211,23 +234,39 @@ export default function TallySync() {
               <div className={`p-3 rounded-lg border text-sm ${syncResult.success ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' : 'bg-red-500/10 border-red-500/20 text-red-400'}`}>
                 {syncResult.success ? (
                   <div className="space-y-1">
-                    <div>✓ Synced successfully from Tally</div>
-                    <div className="text-xs text-emerald-300/80">
-                      {[
-                        syncResult.customers != null && `${syncResult.customers} dealers`,
-                        syncResult.skus != null && `${syncResult.skus} SKUs`,
-                        syncResult.categories != null && `${syncResult.categories} categories`,
-                        syncResult.ledgers ? `${syncResult.ledgers} ledgers` : null,
-                        syncResult.vouchers ? `${syncResult.vouchers} vouchers` : null,
-                        syncResult.stockItems ? `${syncResult.stockItems} stock items` : null,
-                        syncResult.groups ? `${syncResult.groups} groups` : null,
-                      ].filter(Boolean).join(' · ') || 'No records returned'}
-                    </div>
-                    {syncResult.note && (
+                    <div>{syncResult.cleared ? '✓ Local Tally data cleared' : '✓ Synced successfully from Tally'}</div>
+                    {!syncResult.cleared && (
+                      <div className="text-xs text-emerald-300/80">
+                        {[
+                          syncResult.customers != null && `${syncResult.customers} dealers`,
+                          syncResult.skus != null && `${syncResult.skus} SKUs`,
+                          syncResult.categories != null && `${syncResult.categories} categories`,
+                          syncResult.ledgers ? `${syncResult.ledgers} ledgers` : null,
+                          syncResult.vouchers ? `${syncResult.vouchers} vouchers` : null,
+                          syncResult.stockItems ? `${syncResult.stockItems} stock items` : null,
+                          syncResult.groups ? `${syncResult.groups} groups` : null,
+                          syncResult.dealersStored ? `${syncResult.dealersStored} sundry debtors → dashboards` : null,
+                        ].filter(Boolean).join(' · ') || 'No records returned'}
+                      </div>
+                    )}
+                    {syncResult.note && !syncResult.cleared && (
                       <div className="text-xs text-amber-300/80 pt-1">{syncResult.note}</div>
+                    )}
+                    {syncResult.transformError && (
+                      <div className="text-xs text-red-300/80 pt-1">Transform warning: {syncResult.transformError}</div>
                     )}
                   </div>
                 ) : `✗ Sync failed: ${syncResult.error}`}
+              </div>
+            )}
+            {liveSnapshot && !isDemo && (
+              <div className="flex items-center justify-between text-xs text-gray-400 mt-3 pt-3 border-t border-gray-700/40">
+                <span>
+                  <span className="text-gray-300">{liveSnapshot.customers.length}</span> dealers cached from {new Date(liveSnapshot.syncedAt).toLocaleString()}
+                </span>
+                <button type="button" onClick={handleClearLiveData} className="text-red-300/80 hover:text-red-200 underline underline-offset-2">
+                  Clear
+                </button>
               </div>
             )}
           </div>
