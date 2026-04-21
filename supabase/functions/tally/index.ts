@@ -10,9 +10,10 @@
 //
 // Actions:
 //   { action: 'test' }                    → getCompanyInfo
-//   { action: 'sync' }                    → list of customers summary
+//   { action: 'sync' }                    → Sundry Debtor ledgers (lean)
+//   { action: 'sync-full' }               → ledgers + sales + receipts + stock items + stock groups
 //   { action: 'request', xml: '...' }     → raw XML passthrough
-// Optional fields on every request: host, username, password, company.
+// Optional fields on every request: host, username, password, company, fromDate, toDate.
 
 import { XMLParser } from 'npm:fast-xml-parser@4.3.4';
 
@@ -35,7 +36,12 @@ const parser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: '_',
   textNodeName: '_text',
-  isArray: (name: string) => ['LEDGER', 'VOUCHER', 'STOCKITEM', 'BILL', 'BODY', 'COLLECTION'].includes(name),
+  isArray: (name: string) => [
+    'LEDGER', 'VOUCHER', 'STOCKITEM', 'STOCKGROUP', 'BILL', 'BODY', 'COLLECTION',
+    'ALLINVENTORYENTRIES.LIST', 'INVENTORYENTRIES.LIST',
+    'ALLLEDGERENTRIES.LIST', 'LEDGERENTRIES.LIST',
+    'BILLALLOCATIONS.LIST', 'BATCHALLOCATIONS.LIST',
+  ].includes(name),
 });
 
 function resolveConfig(overrides: TallyConfig): Required<TallyConfig> {
@@ -103,13 +109,6 @@ function reportRequest(reportId: string, company: string) {
 </ENVELOPE>`;
 }
 
-// Lightweight sync — asks Tally for the built-in "Ledger" collection with minimal
-// fields. A heavier custom-TDL query with SundryDebtorFilter + many NATIVEMETHODs
-// produced responses large enough that shared-hosting Tally providers drop the
-// connection mid-send ("connection closed before message completed"). This query
-// returns enough to confirm plumbing works; the full transformer pass (map
-// ledgers → dashboard customers, filter to sundry debtors client-side) lands
-// when the CSV-upload or paginated-sync work goes in.
 // Walk the parsed Tally XML response and count the most common record types.
 // The response shape varies: ENVELOPE.BODY.DATA.COLLECTION.LEDGER, or nested
 // directly under ENVELOPE.BODY, or inside a RESPONSE wrapper. We just dig for
@@ -145,6 +144,188 @@ function countRecords(tree: unknown) {
   };
   walk(tree);
   return counts;
+}
+
+// Count how many occurrences of a single top-level node name exist anywhere
+// in a parsed Tally response (VOUCHER, STOCKITEM, etc.). Used for per-collection
+// coverage reporting in sync-full so the UI can explain "17 vouchers · 0 stock
+// items — did Tally drop the stock query?".
+function countNode(tree: unknown, target: string): number {
+  let total = 0;
+  const seen = new WeakSet();
+  const walk = (node: unknown): void => {
+    if (!node || typeof node !== 'object') return;
+    const obj = node as Record<string, unknown>;
+    if (seen.has(obj)) return;
+    seen.add(obj);
+    if (Array.isArray(obj)) {
+      for (const item of obj) walk(item);
+      return;
+    }
+    for (const key of Object.keys(obj)) {
+      const value = obj[key];
+      if (key === target) {
+        if (Array.isArray(value)) total += value.length;
+        else if (value && typeof value === 'object') total += 1;
+      }
+      walk(value);
+    }
+  };
+  walk(tree);
+  return total;
+}
+
+// Sales vouchers — line items included (AllInventoryEntries) so the client
+// transformer can derive SKU / category penetration per dealer. Filter to
+// VoucherType = Sales (or nested under) via a formula system, the way the
+// Express connector does it. Heavier than the ledger query; bumped timeout.
+function salesVouchersRequest(cfg: { company: string; fromDate: string; toDate: string }) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>B2BIntelSales</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+        ${companyFilter(cfg.company)}
+        ${dateFilter(cfg)}
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <COLLECTION NAME="B2BIntelSales" ISMODIFY="No">
+            <TYPE>Voucher</TYPE>
+            <NATIVEMETHOD>Date</NATIVEMETHOD>
+            <NATIVEMETHOD>VoucherNumber</NATIVEMETHOD>
+            <NATIVEMETHOD>VoucherTypeName</NATIVEMETHOD>
+            <NATIVEMETHOD>PartyLedgerName</NATIVEMETHOD>
+            <NATIVEMETHOD>Amount</NATIVEMETHOD>
+            <NATIVEMETHOD>AllLedgerEntries</NATIVEMETHOD>
+            <NATIVEMETHOD>AllInventoryEntries</NATIVEMETHOD>
+            <FILTER>B2BIntelSalesFilter</FILTER>
+          </COLLECTION>
+          <SYSTEM TYPE="Formulae" NAME="B2BIntelSalesFilter">
+            $VoucherTypeName = "Sales" OR $VoucherTypeName UNDER "Sales"
+          </SYSTEM>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>`;
+}
+
+// Receipt vouchers — BillAllocations included so we can derive DSO and
+// on-time/late payment history per bill.
+function receiptVouchersRequest(cfg: { company: string; fromDate: string; toDate: string }) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>B2BIntelReceipts</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+        ${companyFilter(cfg.company)}
+        ${dateFilter(cfg)}
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <COLLECTION NAME="B2BIntelReceipts" ISMODIFY="No">
+            <TYPE>Voucher</TYPE>
+            <NATIVEMETHOD>Date</NATIVEMETHOD>
+            <NATIVEMETHOD>VoucherNumber</NATIVEMETHOD>
+            <NATIVEMETHOD>VoucherTypeName</NATIVEMETHOD>
+            <NATIVEMETHOD>PartyLedgerName</NATIVEMETHOD>
+            <NATIVEMETHOD>Amount</NATIVEMETHOD>
+            <NATIVEMETHOD>AllLedgerEntries</NATIVEMETHOD>
+            <NATIVEMETHOD>BillAllocations</NATIVEMETHOD>
+            <FILTER>B2BIntelReceiptFilter</FILTER>
+          </COLLECTION>
+          <SYSTEM TYPE="Formulae" NAME="B2BIntelReceiptFilter">
+            $VoucherTypeName = "Receipt" OR $VoucherTypeName UNDER "Receipt"
+          </SYSTEM>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>`;
+}
+
+// Stock items — SKU master. Parent / Category build the category lookup used
+// for SKU and category penetration on the dealer side.
+function stockItemsRequest(cfg: { company: string }) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>B2BIntelStockItems</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+        ${companyFilter(cfg.company)}
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <COLLECTION NAME="B2BIntelStockItems" ISMODIFY="No">
+            <TYPE>StockItem</TYPE>
+            <NATIVEMETHOD>Name</NATIVEMETHOD>
+            <NATIVEMETHOD>Parent</NATIVEMETHOD>
+            <NATIVEMETHOD>Category</NATIVEMETHOD>
+            <NATIVEMETHOD>BaseUnits</NATIVEMETHOD>
+            <NATIVEMETHOD>OpeningBalance</NATIVEMETHOD>
+            <NATIVEMETHOD>ClosingBalance</NATIVEMETHOD>
+            <NATIVEMETHOD>ClosingRate</NATIVEMETHOD>
+            <NATIVEMETHOD>ClosingValue</NATIVEMETHOD>
+            <NATIVEMETHOD>HSNCode</NATIVEMETHOD>
+            <NATIVEMETHOD>GSTApplicable</NATIVEMETHOD>
+          </COLLECTION>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>`;
+}
+
+// Stock groups — category master used as denominator for catPenetration.
+function stockGroupsRequest(cfg: { company: string }) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>B2BIntelStockGroups</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+        ${companyFilter(cfg.company)}
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <COLLECTION NAME="B2BIntelStockGroups" ISMODIFY="No">
+            <TYPE>StockGroup</TYPE>
+            <NATIVEMETHOD>Name</NATIVEMETHOD>
+            <NATIVEMETHOD>Parent</NATIVEMETHOD>
+          </COLLECTION>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>`;
 }
 
 // Sync query — custom TDL collection with explicit NATIVEMETHOD per field.
@@ -208,11 +389,50 @@ Deno.serve(async (req) => {
   const action = (body.action as string) || 'test';
   const cfg = resolveConfig(body as TallyConfig);
 
+  if (action === 'sync-full') {
+    // Pull every collection the dashboards need in parallel. Each request is
+    // independent so a slow / dropped one doesn't kill the rest — we report
+    // partial failures per collection and let the client degrade gracefully.
+    const jobs = [
+      { key: 'ledgers' as const, xml: sundryDebtorsRequest(cfg), node: 'LEDGER', timeoutMs: 90000 },
+      { key: 'salesVouchers' as const, xml: salesVouchersRequest(cfg), node: 'VOUCHER', timeoutMs: 120000 },
+      { key: 'receiptVouchers' as const, xml: receiptVouchersRequest(cfg), node: 'VOUCHER', timeoutMs: 120000 },
+      { key: 'stockItems' as const, xml: stockItemsRequest(cfg), node: 'STOCKITEM', timeoutMs: 90000 },
+      { key: 'stockGroups' as const, xml: stockGroupsRequest(cfg), node: 'STOCKGROUP', timeoutMs: 60000 },
+    ];
+    const settled = await Promise.allSettled(
+      jobs.map((j) => tallyRequest(j.xml, cfg, j.timeoutMs)),
+    );
+    const data: Record<string, unknown> = {};
+    const counts: Record<string, number> = {};
+    const errors: Record<string, string> = {};
+    let anyConnected = false;
+    settled.forEach((res, i) => {
+      const job = jobs[i];
+      if (res.status === 'fulfilled') {
+        data[job.key] = res.value;
+        counts[job.key] = countNode(res.value, job.node);
+        anyConnected = true;
+      } else {
+        data[job.key] = null;
+        counts[job.key] = 0;
+        errors[job.key] = res.reason instanceof Error ? res.reason.message : String(res.reason);
+      }
+    });
+    return new Response(JSON.stringify({
+      connected: anyConnected,
+      action,
+      counts,
+      data,
+      errors,
+    }), { headers: jsonHeaders });
+  }
+
   let xml: string;
   if (action === 'test') {
     xml = reportRequest('List of Companies', cfg.company);
   } else if (action === 'sync') {
-    xml = sundryDebtorsRequest(cfg.company);
+    xml = sundryDebtorsRequest(cfg);
   } else if (action === 'request') {
     if (!body.xml || typeof body.xml !== 'string') {
       return new Response(JSON.stringify({ connected: false, error: 'Missing "xml" field for action="request"' }), {

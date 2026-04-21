@@ -56,17 +56,44 @@ export async function testConnection(config = {}) {
 
 export async function syncFromTally(config = {}) {
   if (TALLY_BACKEND === 'supabase') {
-    const data = await supabaseInvoke('sync', config);
-    const counts = data?.counts || {};
-    return {
-      success: Boolean(data?.connected),
-      error: data?.error,
-      ledgers: counts.ledgers || 0,
-      vouchers: counts.vouchers || 0,
-      stockItems: counts.stockItems || 0,
-      groups: counts.groups || 0,
-      raw: data?.data,
-    };
+    // Try the full pull first — one call returns ledgers + sales + receipts +
+    // stock items + stock groups. If the Edge Function itself fails (timeout,
+    // network, etc.) fall back to the lean ledger-only sync so dashboards
+    // still get a signal. Per-collection failures come back inside `errors`
+    // on a successful response; we surface them without blocking.
+    try {
+      const data = await supabaseInvoke('sync-full', config);
+      const counts = data?.counts || {};
+      const bundle = data?.data || {};
+      return {
+        success: Boolean(data?.connected),
+        error: data?.error,
+        partial: false,
+        mode: 'full',
+        ledgers: counts.ledgers || 0,
+        salesVouchers: counts.salesVouchers || 0,
+        receiptVouchers: counts.receiptVouchers || 0,
+        stockItems: counts.stockItems || 0,
+        stockGroups: counts.stockGroups || 0,
+        collectionErrors: data?.errors || {},
+        raw: bundle,
+      };
+    } catch (fullErr) {
+      const data = await supabaseInvoke('sync', config);
+      const counts = data?.counts || {};
+      return {
+        success: Boolean(data?.connected),
+        error: data?.error,
+        partial: true,
+        mode: 'lean',
+        fullError: fullErr instanceof Error ? fullErr.message : String(fullErr),
+        ledgers: counts.ledgers || 0,
+        vouchers: counts.vouchers || 0,
+        stockItems: counts.stockItems || 0,
+        groups: counts.groups || 0,
+        raw: data?.data,
+      };
+    }
   }
   if (TALLY_BACKEND === 'express') {
     const r = await api.post('/tally/sync', config);

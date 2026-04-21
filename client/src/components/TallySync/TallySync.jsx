@@ -7,7 +7,7 @@ import {
   TALLY_BACKEND, tallyAvailable, testConnection, syncFromTally,
   getStatus, getDataSummary,
 } from '../../lib/tallyClient';
-import { transformTallyLedgers } from '../../lib/tallyTransformer';
+import { transformTallyLedgers, transformTallyFull } from '../../lib/tallyTransformer';
 import { saveLiveCustomers, loadLiveCustomers, clearLiveCustomers } from '../../lib/liveData';
 import { availableRanges, rangeByKey } from '../../utils/dateRange';
 
@@ -72,11 +72,14 @@ export default function TallySync() {
     setSyncResult(null);
     try {
       const r = await syncFromTally({ ...config, fromDate: activeRange.fromDate, toDate: activeRange.toDate });
-      // Transform raw Tally ledgers → dashboard customer shape and persist.
+      // Transform raw Tally data → dashboard customer shape and persist.
       // Dashboards read from liveData on the next render so numbers reflect the sync.
       if (r?.success && r?.raw) {
         try {
-          const { customers, totals, diagnostics } = transformTallyLedgers(r.raw);
+          const useFull = r.mode === 'full' && r.raw && typeof r.raw === 'object' && 'ledgers' in r.raw;
+          const { customers, totals, diagnostics } = useFull
+            ? transformTallyFull(r.raw)
+            : transformTallyLedgers(r.raw);
           r.dealersStored = customers.length;
           r.diagnostics = diagnostics;
           if (customers.length) {
@@ -275,11 +278,28 @@ export default function TallySync() {
                           syncResult.skus != null && `${syncResult.skus} SKUs`,
                           syncResult.categories != null && `${syncResult.categories} categories`,
                           syncResult.ledgers ? `${syncResult.ledgers} ledgers` : null,
+                          syncResult.salesVouchers ? `${syncResult.salesVouchers} sales vouchers` : null,
+                          syncResult.receiptVouchers ? `${syncResult.receiptVouchers} receipt vouchers` : null,
                           syncResult.vouchers ? `${syncResult.vouchers} vouchers` : null,
                           syncResult.stockItems ? `${syncResult.stockItems} stock items` : null,
+                          syncResult.stockGroups ? `${syncResult.stockGroups} stock groups` : null,
                           syncResult.groups ? `${syncResult.groups} groups` : null,
-                          syncResult.dealersStored ? `${syncResult.dealersStored} sundry debtors → dashboards` : null,
+                          syncResult.dealersStored ? `${syncResult.dealersStored} dealers → dashboards` : null,
                         ].filter(Boolean).join(' · ') || 'No records returned'}
+                      </div>
+                    )}
+                    {syncResult.mode === 'lean' && (
+                      <div className="text-xs text-amber-300/80 pt-1">
+                        Full sync unavailable{syncResult.fullError ? ` (${syncResult.fullError})` : ''} — fell back to ledger-only. Sales history / SKU penetration will stay at zero until the full sync succeeds.
+                      </div>
+                    )}
+                    {syncResult.collectionErrors && Object.keys(syncResult.collectionErrors).length > 0 && (
+                      <div className="text-xs text-amber-300/80 pt-1 space-y-0.5">
+                        {Object.entries(syncResult.collectionErrors).map(([col, msg]) => (
+                          <div key={col}>
+                            <span className="font-semibold">{col}</span>: {String(msg)}
+                          </div>
+                        ))}
                       </div>
                     )}
                     {syncResult.note && !syncResult.cleared && (
