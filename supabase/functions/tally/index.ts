@@ -410,7 +410,16 @@ Deno.serve(async (req) => {
     const counts: Record<string, number> = {};
     const errors: Record<string, string> = {};
     let anyConnected = false;
+    let first = true;
     for (const job of jobs) {
+      // Cooldown between calls. Some upstream boxes (captive-portal gated
+      // tunnels, single-connection forwarders) reset the socket on the very
+      // next connection; a short pause lets them settle. Skip on the first
+      // job and when the budget is already tight.
+      if (!first && deadline - Date.now() > 5000) {
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+      first = false;
       const budget = deadline - Date.now();
       if (budget <= 1000) {
         data[job.key] = null;
@@ -419,15 +428,32 @@ Deno.serve(async (req) => {
         continue;
       }
       const timeout = Math.min(job.timeoutMs, budget);
-      try {
-        const result = await tallyRequest(job.xml, cfg, timeout);
+      let result: unknown;
+      let lastErr: unknown;
+      // One retry on connection-reset-class failures. Doesn't apply to auth
+      // errors or 4xx/5xx — only to TCP resets and timed-out reads, which
+      // flaky tunnels tend to produce on the 2nd+ connection.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          result = await tallyRequest(job.xml, cfg, Math.max(5000, Math.floor(timeout / (2 - attempt))));
+          lastErr = null;
+          break;
+        } catch (err) {
+          lastErr = err;
+          const msg = err instanceof Error ? err.message : String(err);
+          const retriable = /reset by peer|ECONNRESET|network error|signal has been aborted|fetch failed/i.test(msg);
+          if (!retriable || deadline - Date.now() < 5000) break;
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+      }
+      if (lastErr) {
+        data[job.key] = null;
+        counts[job.key] = 0;
+        errors[job.key] = lastErr instanceof Error ? lastErr.message : String(lastErr);
+      } else {
         data[job.key] = result;
         counts[job.key] = countNode(result, job.node);
         anyConnected = true;
-      } catch (err) {
-        data[job.key] = null;
-        counts[job.key] = 0;
-        errors[job.key] = err instanceof Error ? err.message : String(err);
       }
     }
     return new Response(JSON.stringify({
