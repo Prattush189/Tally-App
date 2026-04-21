@@ -152,9 +152,10 @@ export default function TallySync() {
             <h3 className="text-lg font-semibold text-white">Tally Connection</h3>
             <div className="space-y-3">
               <div>
-                <label className="block text-xs text-gray-500 mb-1">Tally Host IP</label>
+                <label className="block text-xs text-gray-500 mb-1">Tally Host or URL</label>
                 <input type="text" value={config.host} disabled={isDemo || testing || syncing} onChange={e => setConfig(c => ({ ...c, host: e.target.value }))}
-                  className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Enter Tally Host IP" />
+                  className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="1.2.3.4:9000  or  https://tally.example.com" />
+                <p className="text-[11px] text-gray-500 mt-1">Paste the same URL you use in your browser to reach Tally. Http/https both supported.</p>
               </div>
               <div>
                 <label className="block text-xs text-gray-500 mb-1">Tally Username</label>

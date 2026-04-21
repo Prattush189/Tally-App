@@ -44,6 +44,14 @@ function resolveConfig(overrides: TallyConfig): Required<TallyConfig> {
   return { host, username, password, company };
 }
 
+// Accept either a bare "host" / "host:port" or a full URL ("https://host:port/path").
+// Falls back to http://<host> when no scheme is provided.
+function buildTallyUrl(host: string): string {
+  const trimmed = host.trim();
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  return `http://${trimmed}`;
+}
+
 async function tallyRequest(xml: string, cfg: Required<TallyConfig>, timeoutMs = 30000) {
   if (!cfg.host) throw new Error('Tally host not configured. Provide "host" in the request body or set TALLY_HOST secret.');
 
@@ -54,7 +62,8 @@ async function tallyRequest(xml: string, cfg: Required<TallyConfig>, timeoutMs =
     if (cfg.username && cfg.password) {
       headers['Authorization'] = 'Basic ' + btoa(`${cfg.username}:${cfg.password}`);
     }
-    const res = await fetch(`http://${cfg.host}`, {
+    const url = buildTallyUrl(cfg.host);
+    const res = await fetch(url, {
       method: 'POST', headers, body: xml, signal: controller.signal,
     });
     if (res.status === 401 || res.status === 403) {
