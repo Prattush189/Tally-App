@@ -102,6 +102,33 @@ export async function syncFromTally(config = {}) {
   throw new Error('Tally is not available on this deployment.');
 }
 
+// Load the most recent snapshot stored by the local Playwright sync tool.
+// Returns the same shape as a successful syncFromTally() so TallySync can
+// feed the result into transformTallyFull without branching.
+export async function loadFromSnapshot(tenantKey = 'default') {
+  if (TALLY_BACKEND !== 'supabase') return null;
+  try {
+    const data = await supabaseInvoke('get-snapshot', { tenantKey });
+    if (!data?.connected) return { success: false, error: data?.error || 'No snapshot available' };
+    const counts = data?.counts || {};
+    return {
+      success: true,
+      mode: 'snapshot',
+      source: data.source,
+      updatedAt: data.updatedAt,
+      ledgers: counts.ledgers || 0,
+      salesVouchers: counts.salesVouchers || 0,
+      receiptVouchers: counts.receiptVouchers || 0,
+      stockItems: counts.stockItems || 0,
+      stockGroups: counts.stockGroups || 0,
+      collectionErrors: data?.errors || {},
+      raw: data?.data || {},
+    };
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 export async function getStatus() {
   if (TALLY_BACKEND === 'express') {
     try { return (await api.get('/tally/status')).data; } catch { return null; }

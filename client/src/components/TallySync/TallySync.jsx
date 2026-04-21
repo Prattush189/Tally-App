@@ -1,11 +1,11 @@
 import { useState, useEffect } from 'react';
-import { RefreshCw, CheckCircle, AlertTriangle, Wifi, WifiOff, Database, Users, Package, Layers, Eye } from 'lucide-react';
+import { RefreshCw, CheckCircle, AlertTriangle, Wifi, WifiOff, Database, Users, Package, Layers, Eye, Cloud } from 'lucide-react';
 import SectionHeader from '../common/SectionHeader';
 import { fmt } from '../../utils/format';
 import { useAuth } from '../../context/AuthContext';
 import {
   TALLY_BACKEND, tallyAvailable, testConnection, syncFromTally,
-  getStatus, getDataSummary,
+  getStatus, getDataSummary, loadFromSnapshot,
 } from '../../lib/tallyClient';
 import { transformTallyLedgers, transformTallyFull } from '../../lib/tallyTransformer';
 import { saveLiveCustomers, loadLiveCustomers, clearLiveCustomers } from '../../lib/liveData';
@@ -38,6 +38,8 @@ export default function TallySync() {
   const [syncResult, setSyncResult] = useState(null);
   const [config, setConfig] = useState(loadTallyConfig);
   const [rangeKey, setRangeKey] = useState('all');
+  const [loadingSnapshot, setLoadingSnapshot] = useState(false);
+  const [snapshotInfo, setSnapshotInfo] = useState(null);
 
   const available = tallyAvailable();
   const ranges = availableRanges();
@@ -104,6 +106,52 @@ export default function TallySync() {
     }
     setSyncing(false);
   };
+
+  // Pull the most recent snapshot written by the local Playwright sync tool
+  // and feed it through the existing transformer so dashboards hydrate without
+  // needing Tally reachable from the browser.
+  const handleLoadSnapshot = async () => {
+    if (isDemo) return;
+    setLoadingSnapshot(true);
+    try {
+      const r = await loadFromSnapshot();
+      if (r?.success && r?.raw) {
+        try {
+          const { customers, totals, diagnostics } = transformTallyFull(r.raw);
+          r.dealersStored = customers.length;
+          r.diagnostics = diagnostics;
+          if (customers.length) {
+            saveLiveCustomers(user?.email, customers, {
+              ...totals,
+              range: activeRange.label || 'All data',
+              fromDate: activeRange.fromDate,
+              toDate: activeRange.toDate,
+              source: `snapshot (${r.source})`,
+              syncedAt: r.updatedAt,
+            });
+          }
+        } catch (transformErr) {
+          r.transformError = transformErr.message;
+        }
+      }
+      setSyncResult(r);
+      setSnapshotInfo(r?.success ? { updatedAt: r.updatedAt, source: r.source } : null);
+    } catch (err) {
+      setSyncResult({ success: false, error: err.message });
+    }
+    setLoadingSnapshot(false);
+  };
+
+  // Auto-load the latest snapshot on first mount. If the local sync tool has
+  // posted one, dashboards come up with real numbers without the user needing
+  // to press anything. Skipped when there's already a local cache (to avoid
+  // clobbering whatever dashboards rendered with) and for demo accounts.
+  useEffect(() => {
+    if (!available || isDemo) return;
+    if (loadLiveCustomers(user?.email)) return;
+    handleLoadSnapshot();
+
+  }, [available, isDemo, user?.email]);
 
   const handleClearLiveData = () => {
     if (isDemo) return;
@@ -243,20 +291,33 @@ export default function TallySync() {
               )}
             </div>
 
-            <div className="flex gap-3">
+            <div className="flex flex-wrap gap-3">
               <button onClick={handleTest} disabled={testing || isDemo}
                 title={isDemo ? 'Disabled for the demo account' : ''}
-                className={`flex-1 py-2.5 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 transition-all border disabled:opacity-40 disabled:cursor-not-allowed ${testing ? 'border-gray-600 text-gray-500' : 'border-indigo-500/30 text-indigo-400 hover:bg-indigo-500/10'}`}>
+                className={`flex-1 min-w-[10rem] py-2.5 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 transition-all border disabled:opacity-40 disabled:cursor-not-allowed ${testing ? 'border-gray-600 text-gray-500' : 'border-indigo-500/30 text-indigo-400 hover:bg-indigo-500/10'}`}>
                 <Wifi size={14} className={testing ? 'animate-pulse' : ''} />
                 {testing ? 'Testing...' : 'Test Connection'}
               </button>
+              <button onClick={handleLoadSnapshot} disabled={loadingSnapshot || isDemo}
+                title={isDemo ? 'Disabled for the demo account' : 'Load the most recent snapshot pushed by the local sync tool'}
+                className={`flex-1 min-w-[10rem] py-2.5 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 transition-all border disabled:opacity-40 disabled:cursor-not-allowed ${loadingSnapshot ? 'border-gray-600 text-gray-500' : 'border-cyan-500/30 text-cyan-300 hover:bg-cyan-500/10'}`}>
+                <Cloud size={14} className={loadingSnapshot ? 'animate-pulse' : ''} />
+                {loadingSnapshot ? 'Loading...' : 'Load Cloud Snapshot'}
+              </button>
               <button onClick={handleSync} disabled={syncing || isDemo}
-                title={isDemo ? 'Disabled for the demo account' : ''}
-                className={`flex-1 py-2.5 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 transition-all disabled:opacity-40 disabled:cursor-not-allowed ${syncing ? 'bg-indigo-500/50 cursor-wait' : 'bg-indigo-600 hover:bg-indigo-500'} text-white`}>
+                title={isDemo ? 'Disabled for the demo account' : 'Fetch live from Tally — needs the Edge Function to reach Tally directly'}
+                className={`flex-1 min-w-[10rem] py-2.5 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 transition-all disabled:opacity-40 disabled:cursor-not-allowed ${syncing ? 'bg-indigo-500/50 cursor-wait' : 'bg-indigo-600 hover:bg-indigo-500'} text-white`}>
                 <RefreshCw size={14} className={syncing ? 'animate-spin' : ''} />
-                {syncing ? 'Syncing...' : 'Sync Now'}
+                {syncing ? 'Syncing...' : 'Sync Now (Live)'}
               </button>
             </div>
+
+            {snapshotInfo?.updatedAt && (
+              <div className="text-xs text-cyan-300/80 flex items-center gap-2">
+                <Cloud size={12} /> Snapshot from {new Date(snapshotInfo.updatedAt).toLocaleString()}
+                {snapshotInfo.source ? ` · via ${snapshotInfo.source}` : ''}
+              </div>
+            )}
 
             {/* Test Result */}
             {testResult && (

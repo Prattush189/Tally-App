@@ -1,0 +1,20 @@
+{
+  "name": "tally-sync-local",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Drives the 103.76.213.243 portal via Playwright, pulls Tally XML, posts snapshots to Supabase.",
+  "scripts": {
+    "sync": "node sync.mjs",
+    "sync:headed": "HEADED=1 node sync.mjs",
+    "postinstall": "playwright install chromium"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "fast-xml-parser": "^4.3.4",
+    "playwright": "^1.44.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

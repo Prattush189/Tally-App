@@ -13,9 +13,13 @@
 //   { action: 'sync' }                    → Sundry Debtor ledgers (lean)
 //   { action: 'sync-full' }               → ledgers + sales + receipts + stock items + stock groups
 //   { action: 'request', xml: '...' }     → raw XML passthrough
+//   { action: 'get-config', syncToken }   → returns portal creds for the local Playwright tool
+//   { action: 'ingest', syncToken, data } → persists a snapshot to tally_snapshots
+//   { action: 'get-snapshot' }            → reads the latest snapshot for dashboards
 // Optional fields on every request: host, username, password, company, fromDate, toDate.
 
 import { XMLParser } from 'npm:fast-xml-parser@4.3.4';
+import { createClient } from 'npm:@supabase/supabase-js@2';
 
 type TallyConfig = {
   host?: string;
@@ -388,6 +392,121 @@ Deno.serve(async (req) => {
 
   const action = (body.action as string) || 'test';
   const cfg = resolveConfig(body as TallyConfig);
+  const tenantKey = (body.tenantKey as string) || 'default';
+
+  // Snapshot + portal-config actions. These are for the local Playwright
+  // sync tool (get-config + ingest) and for the web dashboards to read the
+  // most recent persisted snapshot (get-snapshot) so the browser never has
+  // to reach Tally directly.
+  if (action === 'get-config' || action === 'ingest' || action === 'get-snapshot') {
+    const supabaseUrl = Deno.env.get('SUPABASE_URL') || '';
+    const serviceRole = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
+    if (!supabaseUrl || !serviceRole) {
+      return new Response(JSON.stringify({
+        connected: false,
+        error: 'Server missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY — snapshot actions unavailable.',
+      }), { status: 500, headers: jsonHeaders });
+    }
+    const db = createClient(supabaseUrl, serviceRole, { auth: { persistSession: false } });
+
+    // get-config + ingest both mutate / leak Tally credentials, so they're
+    // gated on LOCAL_SYNC_TOKEN — a shared secret the local Playwright tool
+    // carries in its .env. get-snapshot is read-only, so any caller with the
+    // project anon key may fetch it (same trust level as /sync-full today).
+    if (action === 'get-config' || action === 'ingest') {
+      const required = Deno.env.get('LOCAL_SYNC_TOKEN') || '';
+      const provided = (body.syncToken as string) || '';
+      if (!required) {
+        return new Response(JSON.stringify({
+          connected: false,
+          error: 'Server missing LOCAL_SYNC_TOKEN — set it with `supabase secrets set LOCAL_SYNC_TOKEN=...` to enable local sync.',
+        }), { status: 500, headers: jsonHeaders });
+      }
+      if (provided !== required) {
+        return new Response(JSON.stringify({
+          connected: false,
+          error: 'Invalid syncToken',
+        }), { status: 401, headers: jsonHeaders });
+      }
+    }
+
+    if (action === 'get-config') {
+      // Portal creds drive the Playwright login flow. Tally creds (host, user,
+      // pass, company) are returned too so the local tool knows which
+      // on-portal Tally company to scope the XML queries to.
+      return new Response(JSON.stringify({
+        connected: true,
+        action,
+        config: {
+          portalUrl: Deno.env.get('TALLY_PORTAL_URL') || '',
+          portalUser: Deno.env.get('TALLY_PORTAL_USER') || '',
+          portalPass: Deno.env.get('TALLY_PORTAL_PASS') || '',
+          tallyHost: Deno.env.get('TALLY_HOST') || '',
+          tallyUser: Deno.env.get('TALLY_USERNAME') || '',
+          tallyPass: Deno.env.get('TALLY_PASSWORD') || '',
+          company: Deno.env.get('TALLY_COMPANY') || '',
+          tenantKey,
+        },
+      }), { headers: jsonHeaders });
+    }
+
+    if (action === 'ingest') {
+      const data = body.data;
+      if (!data || typeof data !== 'object') {
+        return new Response(JSON.stringify({
+          connected: false,
+          error: 'ingest requires a "data" object with the parsed Tally collections',
+        }), { status: 400, headers: jsonHeaders });
+      }
+      const counts = (body.counts && typeof body.counts === 'object') ? body.counts : {};
+      const errors = (body.errors && typeof body.errors === 'object') ? body.errors : {};
+      const source = (body.source as string) || 'local-playwright';
+      const { error } = await db.from('tally_snapshots').upsert({
+        tenant_key: tenantKey,
+        data,
+        counts,
+        errors,
+        source,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'tenant_key' });
+      if (error) {
+        return new Response(JSON.stringify({
+          connected: false,
+          error: `Failed to persist snapshot: ${error.message}`,
+        }), { status: 500, headers: jsonHeaders });
+      }
+      return new Response(JSON.stringify({ connected: true, action, tenantKey }), { headers: jsonHeaders });
+    }
+
+    // get-snapshot
+    const { data: row, error } = await db
+      .from('tally_snapshots')
+      .select('data, counts, errors, source, updated_at')
+      .eq('tenant_key', tenantKey)
+      .maybeSingle();
+    if (error) {
+      return new Response(JSON.stringify({
+        connected: false,
+        error: `Failed to load snapshot: ${error.message}`,
+      }), { status: 500, headers: jsonHeaders });
+    }
+    if (!row) {
+      return new Response(JSON.stringify({
+        connected: false,
+        action,
+        error: 'No snapshot yet — run the local sync tool to populate one.',
+      }), { headers: jsonHeaders });
+    }
+    return new Response(JSON.stringify({
+      connected: true,
+      action,
+      counts: row.counts || {},
+      errors: row.errors || {},
+      data: row.data,
+      source: row.source,
+      updatedAt: row.updated_at,
+    }), { headers: jsonHeaders });
+  }
 
   if (action === 'sync-full') {
     // Serial, not parallel. Shared-host Tally tunnels (ngrok free, cloudflare
