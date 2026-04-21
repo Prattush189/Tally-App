@@ -115,32 +115,51 @@ Deno.serve(async (req) => {
     return new Response('ok', { headers: corsHeaders });
   }
 
+  const jsonHeaders = { ...corsHeaders, 'Content-Type': 'application/json' };
+
+  let body: Record<string, unknown> = {};
   try {
-    const body = await req.json().catch(() => ({}));
-    const action = body.action || 'test';
-    const cfg = resolveConfig(body);
+    body = await req.json();
+  } catch {
+    return new Response(JSON.stringify({ connected: false, error: 'Request body must be JSON' }), {
+      status: 400, headers: jsonHeaders,
+    });
+  }
 
-    let xml: string;
-    if (action === 'test') {
-      xml = reportRequest('List of Companies', cfg.company);
-    } else if (action === 'sync') {
-      xml = sundryDebtorsRequest(cfg.company);
-    } else if (action === 'request') {
-      if (!body.xml) throw new Error('Missing "xml" field for action="request"');
-      xml = body.xml;
-    } else {
-      throw new Error(`Unknown action: ${action}`);
+  const action = (body.action as string) || 'test';
+  const cfg = resolveConfig(body as TallyConfig);
+
+  let xml: string;
+  if (action === 'test') {
+    xml = reportRequest('List of Companies', cfg.company);
+  } else if (action === 'sync') {
+    xml = sundryDebtorsRequest(cfg.company);
+  } else if (action === 'request') {
+    if (!body.xml || typeof body.xml !== 'string') {
+      return new Response(JSON.stringify({ connected: false, error: 'Missing "xml" field for action="request"' }), {
+        status: 400, headers: jsonHeaders,
+      });
     }
+    xml = body.xml;
+  } else {
+    return new Response(JSON.stringify({ connected: false, error: `Unknown action: ${action}` }), {
+      status: 400, headers: jsonHeaders,
+    });
+  }
 
+  // Tally-level failures (can't reach, auth, timeout) return HTTP 200 with
+  // { connected: false, error }. This keeps supabase.functions.invoke() happy
+  // so the browser can surface the actual message instead of a generic
+  // "Edge Function returned a non-2xx status code".
+  try {
     const result = await tallyRequest(xml, cfg);
     return new Response(JSON.stringify({ connected: true, action, data: result }), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      headers: jsonHeaders,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return new Response(JSON.stringify({ connected: false, error: message }), {
-      status: 400,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    return new Response(JSON.stringify({ connected: false, action, error: message }), {
+      headers: jsonHeaders,
     });
   }
 });

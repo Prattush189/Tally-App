@@ -13,13 +13,31 @@ export function tallyAvailable() {
   return TALLY_BACKEND !== 'none';
 }
 
+async function readErrorBody(error) {
+  // supabase-js puts the Response on error.context when a function returns non-2xx.
+  // We try to parse it as JSON to surface the real error message.
+  const ctx = error?.context;
+  if (ctx && typeof ctx.json === 'function') {
+    try {
+      const body = await ctx.json();
+      if (body?.error) return body.error;
+      if (body?.message) return body.message;
+    } catch {
+      try {
+        const text = await ctx.text();
+        if (text) return text;
+      } catch { /* ignore */ }
+    }
+  }
+  return error?.message || 'Tally function failed';
+}
+
 async function supabaseInvoke(action, config = {}) {
   const { data, error } = await supabase.functions.invoke('tally', {
     body: { action, ...config },
   });
   if (error) {
-    const message = error.context?.error || error.message || 'Tally function failed';
-    throw new Error(message);
+    throw new Error(await readErrorBody(error));
   }
   return data;
 }
