@@ -100,7 +100,10 @@ export default function TallySync() {
 
   const liveSnapshot = !isDemo ? loadLiveCustomers(user?.email) : null;
 
-  const isConnected = status?.connected;
+  // A saved live snapshot counts as "connected" regardless of backend, since
+  // the whole point of the banner is "do the dashboards have real data".
+  const isConnected = Boolean(status?.connected) || Boolean(liveSnapshot);
+  const lastSyncAt = status?.lastAttempt || liveSnapshot?.syncedAt;
 
   if (!available) {
     return (
@@ -141,7 +144,7 @@ export default function TallySync() {
               </p>
               <p className="text-xs text-gray-400 mt-0.5">
                 {isConnected
-                  ? `Live data from Tally · Last sync: ${status?.lastAttempt ? new Date(status.lastAttempt).toLocaleString() : 'N/A'}`
+                  ? `Live data from Tally · Last sync: ${lastSyncAt ? new Date(lastSyncAt).toLocaleString() : 'N/A'}${liveSnapshot ? ` · ${liveSnapshot.customers.length} dealers cached` : ''}`
                   : isDemo
                     ? 'Pre-loaded sample data powers every dashboard on the demo account.'
                     : 'Configure your Tally XML endpoint below and click Sync Now to populate dashboards.'}
