@@ -9,6 +9,7 @@ import {
 } from '../../lib/tallyClient';
 import { transformTallyLedgers } from '../../lib/tallyTransformer';
 import { saveLiveCustomers, loadLiveCustomers, clearLiveCustomers } from '../../lib/liveData';
+import { availableRanges, rangeByKey } from '../../utils/dateRange';
 
 const TALLY_CONFIG_KEY = 'b2b_tally_config';
 
@@ -36,8 +37,11 @@ export default function TallySync() {
   const [testResult, setTestResult] = useState(null);
   const [syncResult, setSyncResult] = useState(null);
   const [config, setConfig] = useState(loadTallyConfig);
+  const [rangeKey, setRangeKey] = useState('all');
 
   const available = tallyAvailable();
+  const ranges = availableRanges();
+  const activeRange = rangeByKey(rangeKey);
 
   useEffect(() => {
     try { localStorage.setItem(TALLY_CONFIG_KEY, JSON.stringify(config)); }
@@ -55,7 +59,7 @@ export default function TallySync() {
     setTesting(true);
     setTestResult(null);
     try {
-      setTestResult(await testConnection(config));
+      setTestResult(await testConnection({ ...config, fromDate: activeRange.fromDate, toDate: activeRange.toDate }));
     } catch (err) {
       setTestResult({ connected: false, error: err.message });
     }
@@ -67,7 +71,7 @@ export default function TallySync() {
     setSyncing(true);
     setSyncResult(null);
     try {
-      const r = await syncFromTally(config);
+      const r = await syncFromTally({ ...config, fromDate: activeRange.fromDate, toDate: activeRange.toDate });
       // Transform raw Tally ledgers → dashboard customer shape and persist.
       // Dashboards read from liveData on the next render so numbers reflect the sync.
       if (r?.success && r?.raw) {
@@ -76,7 +80,12 @@ export default function TallySync() {
           r.dealersStored = customers.length;
           r.diagnostics = diagnostics;
           if (customers.length) {
-            saveLiveCustomers(user?.email, customers, totals);
+            saveLiveCustomers(user?.email, customers, {
+              ...totals,
+              range: activeRange.label || 'All data',
+              fromDate: activeRange.fromDate,
+              toDate: activeRange.toDate,
+            });
           }
         } catch (transformErr) {
           r.transformError = transformErr.message;
@@ -196,10 +205,30 @@ export default function TallySync() {
                 <input type="password" value={config.password} disabled={isDemo || testing || syncing} onChange={e => setConfig(c => ({ ...c, password: e.target.value }))}
                   className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Enter Tally password" />
               </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">Date range</label>
+                <select
+                  value={rangeKey}
+                  disabled={isDemo || testing || syncing}
+                  onChange={e => setRangeKey(e.target.value)}
+                  className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {ranges.map(r => (
+                    <option key={r.key || r.label} value={r.key || r.label}>{r.label}</option>
+                  ))}
+                </select>
+                <p className="text-[11px] text-gray-500 mt-1">
+                  Picks which financial year's balances Tally returns (ClosingBalance is as-of the end date). Re-sync any time to pull a different range.
+                </p>
+              </div>
               <div className="bg-gray-900/50 rounded-lg p-3">
                 <p className="text-xs text-gray-500 mb-1">Company</p>
                 <p className="text-sm text-white">UNITED AGENCIES DISTRIBUTORS LLP</p>
-                <p className="text-xs text-gray-500 mt-0.5">Financial Year: from 1-Apr-25</p>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  {activeRange.fromDate
+                    ? `${activeRange.label}: ${activeRange.fromDate} → ${activeRange.toDate}`
+                    : 'All available data (Tally default range)'}
+                </p>
               </div>
               {status?.cacheAge != null && (
                 <div className="bg-gray-900/50 rounded-lg p-3">
@@ -278,7 +307,12 @@ export default function TallySync() {
                         )}
                         {syncResult.diagnostics.sampleLedger && (
                           <div className="text-[11px] text-gray-400 font-mono">
-                            Sample: {JSON.stringify(syncResult.diagnostics.sampleLedger)}
+                            Sample (resolved): {JSON.stringify(syncResult.diagnostics.sampleLedger)}
+                          </div>
+                        )}
+                        {syncResult.diagnostics.sampleRaw && Object.keys(syncResult.diagnostics.sampleRaw).length > 0 && (
+                          <div className="text-[11px] text-gray-400 font-mono break-all">
+                            Sample (raw keys): {JSON.stringify(syncResult.diagnostics.sampleRaw).slice(0, 600)}
                           </div>
                         )}
                       </div>

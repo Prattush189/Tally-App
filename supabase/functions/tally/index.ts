@@ -21,6 +21,8 @@ type TallyConfig = {
   username?: string;
   password?: string;
   company?: string;
+  fromDate?: string;  // Tally format: YYYYMMDD (e.g. 20250401)
+  toDate?: string;
 };
 
 const corsHeaders = {
@@ -41,7 +43,16 @@ function resolveConfig(overrides: TallyConfig): Required<TallyConfig> {
   const username = overrides.username ?? Deno.env.get('TALLY_USERNAME') ?? '';
   const password = overrides.password ?? Deno.env.get('TALLY_PASSWORD') ?? '';
   const company = overrides.company || Deno.env.get('TALLY_COMPANY') || '';
-  return { host, username, password, company };
+  const fromDate = overrides.fromDate || '';
+  const toDate = overrides.toDate || '';
+  return { host, username, password, company, fromDate, toDate };
+}
+
+function dateFilter(cfg: { fromDate: string; toDate: string }) {
+  const parts: string[] = [];
+  if (cfg.fromDate) parts.push(`<SVFROMDATE Type="Date">${cfg.fromDate}</SVFROMDATE>`);
+  if (cfg.toDate) parts.push(`<SVTODATE Type="Date">${cfg.toDate}</SVTODATE>`);
+  return parts.join('');
 }
 
 // Accept either a bare "host" / "host:port" or a full URL ("https://host:port/path").
@@ -77,7 +88,7 @@ async function tallyRequest(xml: string, cfg: Required<TallyConfig>, timeoutMs =
   }
 }
 
-function companyFilter(company: string) {
+function companyFilter(company: string): string {
   return company ? `<SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>` : '';
 }
 
@@ -141,7 +152,7 @@ function countRecords(tree: unknown) {
 // per ledger. Without FETCH, Tally returns names only and the client-side
 // transformer can't filter Sundry Debtors or pull outstanding amounts.
 // Kept lean enough that shared hosts don't drop the connection mid-send.
-function sundryDebtorsRequest(company: string) {
+function sundryDebtorsRequest(cfg: { company: string; fromDate: string; toDate: string }) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <ENVELOPE>
   <HEADER>
@@ -154,7 +165,8 @@ function sundryDebtorsRequest(company: string) {
     <DESC>
       <STATICVARIABLES>
         <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-        ${companyFilter(company)}
+        ${companyFilter(cfg.company)}
+        ${dateFilter(cfg)}
       </STATICVARIABLES>
       <FETCHLIST>Name, Parent, ClosingBalance, OpeningBalance, CreditLimit, CreditPeriod, PartyGSTIN, GSTRegistrationNumber, LedStateName, Address</FETCHLIST>
     </DESC>

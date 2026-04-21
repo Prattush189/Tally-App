@@ -38,6 +38,25 @@ function textField(value) {
   return '';
 }
 
+// Read a field from a Tally ledger whether it's present as a child element
+// (<LEDGER><NAME>Abc</NAME>) or as an attribute (<LEDGER NAME="Abc">). Our
+// XML parser prefixes attributes with '_', so we look both places.
+function readField(ledger, name) {
+  const direct = textField(ledger[name]);
+  if (direct) return direct;
+  const attr = textField(ledger['_' + name]);
+  if (attr) return attr;
+  // Also try the all-caps/mixed-case variants Tally occasionally uses
+  const lower = name.toLowerCase();
+  for (const key of Object.keys(ledger)) {
+    if (key.toLowerCase() === lower || key.toLowerCase() === '_' + lower) {
+      const v = textField(ledger[key]);
+      if (v) return v;
+    }
+  }
+  return '';
+}
+
 function stateToRegion(state) {
   const s = (state || '').toLowerCase();
   if (/(punjab|haryana|delhi|himachal|kashmir|uttarakhand|uttar pradesh|chandigarh)/.test(s)) return 'North';
@@ -75,7 +94,7 @@ function extractLedgers(tree) {
 }
 
 function isSundryDebtor(ledger) {
-  const parent = textField(ledger.PARENT).toLowerCase();
+  const parent = readField(ledger, 'PARENT').toLowerCase();
   if (!parent) return false;
   // Match "Sundry Debtors", anything nested under it ("Sundry Debtors / X"),
   // and the common synonyms shops use for the same group.
@@ -85,15 +104,16 @@ function isSundryDebtor(ledger) {
 }
 
 function buildCustomer(ledger, index) {
-  const name = textField(ledger.NAME) || textField(ledger._NAME) || `Dealer-${index + 1}`;
-  const gstin = textField(ledger.PARTYGSTIN) || textField(ledger.GSTREGISTRATIONNUMBER);
-  const state = textField(ledger.LEDSTATENAME) || textField(ledger.STATENAME);
+  const name = readField(ledger, 'NAME') || `Dealer-${index + 1}`;
+  const gstin = readField(ledger, 'PARTYGSTIN') || readField(ledger, 'GSTREGISTRATIONNUMBER');
+  const state = readField(ledger, 'LEDSTATENAME') || readField(ledger, 'STATENAME');
   const region = stateToRegion(state);
-  const city = cityFromAddress(ledger.ADDRESS, state) || state;
-  const closing = parseAmount(ledger.CLOSINGBALANCE);
+  const addressField = ledger.ADDRESS ?? ledger._ADDRESS;
+  const city = cityFromAddress(addressField, state) || state;
+  const closing = parseAmount(readField(ledger, 'CLOSINGBALANCE'));
   const outstandingAmount = Math.max(0, closing);
-  const creditLimit = parseAmount(ledger.CREDITLIMIT);
-  const creditPeriod = parseInt(textField(ledger.CREDITPERIOD), 10) || 30;
+  const creditLimit = parseAmount(readField(ledger, 'CREDITLIMIT'));
+  const creditPeriod = parseInt(readField(ledger, 'CREDITPERIOD'), 10) || 30;
 
   // Simple heuristic so payment-risk dashboards aren't entirely flat
   let paymentRisk = 'Low';
@@ -156,7 +176,7 @@ export function transformTallyLedgers(rawTree) {
   // the accounts we care about; the user can refine later.
   const source = debtors.length > 0
     ? debtors
-    : ledgers.filter(l => Math.abs(parseAmount(l.CLOSINGBALANCE)) > 0);
+    : ledgers.filter(l => Math.abs(parseAmount(readField(l, 'CLOSINGBALANCE'))) > 0);
 
   const customers = source.map(buildCustomer);
 
@@ -165,8 +185,21 @@ export function transformTallyLedgers(rawTree) {
   // Debtors" instead of "Sundry Debtors").
   const parents = new Set();
   for (const l of ledgers) {
-    const p = textField(l.PARENT);
+    const p = readField(l, 'PARENT');
     if (p) parents.add(p);
+  }
+
+  // Build a richer sample so we can diagnose attribute-vs-element differences.
+  let sampleKeys = [];
+  const sampleRaw = {};
+  if (ledgers[0]) {
+    sampleKeys = Object.keys(ledgers[0]).slice(0, 30);
+    for (const key of sampleKeys) {
+      const v = ledgers[0][key];
+      sampleRaw[key] = typeof v === 'string'
+        ? v.slice(0, 80)
+        : JSON.stringify(v).slice(0, 80);
+    }
   }
 
   return {
@@ -180,16 +213,15 @@ export function transformTallyLedgers(rawTree) {
       filterMatched: debtors.length > 0,
       usedFallback: debtors.length === 0 && source.length > 0,
       parentsSeen: Array.from(parents).slice(0, 20),
-      // First ledger's keys + the raw Parent/ClosingBalance values so we can
-      // tell if Tally returned extra fields or only names.
-      sampleKeys: ledgers[0] ? Object.keys(ledgers[0]).slice(0, 30) : [],
+      sampleKeys,
       sampleLedger: ledgers[0]
         ? {
-            NAME: textField(ledgers[0].NAME) || textField(ledgers[0]._NAME),
-            PARENT: textField(ledgers[0].PARENT),
-            CLOSINGBALANCE: textField(ledgers[0].CLOSINGBALANCE),
+            NAME: readField(ledgers[0], 'NAME'),
+            PARENT: readField(ledgers[0], 'PARENT'),
+            CLOSINGBALANCE: readField(ledgers[0], 'CLOSINGBALANCE'),
           }
         : null,
+      sampleRaw,
     },
   };
 }
