@@ -99,7 +99,31 @@ function reportRequest(reportId: string, company: string) {
 // returns enough to confirm plumbing works; the full transformer pass (map
 // ledgers → dashboard customers, filter to sundry debtors client-side) lands
 // when the CSV-upload or paginated-sync work goes in.
-function sundryDebtorsRequest(company: string) {
+// Walk the parsed Tally XML response and count the most common record types.
+// The response shape varies: ENVELOPE.BODY.DATA.COLLECTION.LEDGER, or nested
+// directly under ENVELOPE.BODY, or inside a RESPONSE wrapper. We just dig for
+// any arrays named LEDGER / VOUCHER / STOCKITEM / GROUP anywhere in the tree.
+function countRecords(tree: unknown): { ledgers: number; vouchers: number; stockItems: number; groups: number } {
+  const counts = { ledgers: 0, vouchers: 0, stockItems: 0, groups: 0 };
+  const seen = new WeakSet<object>();
+  const map: Record<string, keyof typeof counts> = {
+    LEDGER: 'ledgers', VOUCHER: 'vouchers', STOCKITEM: 'stockItems', GROUP: 'groups',
+  };
+  function walk(node: unknown) {
+    if (!node || typeof node !== 'object') return;
+    if (seen.has(node as object)) return;
+    seen.add(node as object);
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+      const bucket = map[key as keyof typeof map];
+      if (bucket && Array.isArray(value)) counts[bucket] += value.length;
+      else if (bucket && value && typeof value === 'object') counts[bucket] += 1;
+      walk(value);
+    }
+  }
+  walk(tree);
+  return counts;
+}
   return `<?xml version="1.0" encoding="UTF-8"?>
 <ENVELOPE>
   <HEADER>
@@ -162,7 +186,8 @@ Deno.serve(async (req) => {
   // "Edge Function returned a non-2xx status code".
   try {
     const result = await tallyRequest(xml, cfg);
-    return new Response(JSON.stringify({ connected: true, action, data: result }), {
+    const counts = countRecords(result);
+    return new Response(JSON.stringify({ connected: true, action, counts, data: result }), {
       headers: jsonHeaders,
     });
   } catch (err) {

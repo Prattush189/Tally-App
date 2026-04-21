@@ -57,13 +57,16 @@ export async function testConnection(config = {}) {
 export async function syncFromTally(config = {}) {
   if (TALLY_BACKEND === 'supabase') {
     const data = await supabaseInvoke('sync', config);
-    // Minimal sync response — the Edge Function returns raw parsed XML.
-    // Future work: port the server transformer to extract customers/skus/categories here.
+    const counts = data?.counts || {};
     return {
       success: Boolean(data?.connected),
       error: data?.error,
+      ledgers: counts.ledgers || 0,
+      vouchers: counts.vouchers || 0,
+      stockItems: counts.stockItems || 0,
+      groups: counts.groups || 0,
       raw: data?.data,
-      note: 'Supabase sync returned raw Tally data — full transformer not yet wired. Use a dedicated backend for the end-to-end sync pipeline.',
+      note: 'Raw Tally ledgers received. Dashboard transformer (ledger → dealer mapping) lands in the next iteration.',
     };
   }
   if (TALLY_BACKEND === 'express') {

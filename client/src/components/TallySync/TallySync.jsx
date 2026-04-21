@@ -209,9 +209,25 @@ export default function TallySync() {
             {/* Sync Result */}
             {syncResult && (
               <div className={`p-3 rounded-lg border text-sm ${syncResult.success ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' : 'bg-red-500/10 border-red-500/20 text-red-400'}`}>
-                {syncResult.success
-                  ? `✓ Synced: ${syncResult.customers} dealers, ${syncResult.skus} SKUs, ${syncResult.categories} categories`
-                  : `✗ Sync failed: ${syncResult.error}`}
+                {syncResult.success ? (
+                  <div className="space-y-1">
+                    <div>✓ Synced successfully from Tally</div>
+                    <div className="text-xs text-emerald-300/80">
+                      {[
+                        syncResult.customers != null && `${syncResult.customers} dealers`,
+                        syncResult.skus != null && `${syncResult.skus} SKUs`,
+                        syncResult.categories != null && `${syncResult.categories} categories`,
+                        syncResult.ledgers ? `${syncResult.ledgers} ledgers` : null,
+                        syncResult.vouchers ? `${syncResult.vouchers} vouchers` : null,
+                        syncResult.stockItems ? `${syncResult.stockItems} stock items` : null,
+                        syncResult.groups ? `${syncResult.groups} groups` : null,
+                      ].filter(Boolean).join(' · ') || 'No records returned'}
+                    </div>
+                    {syncResult.note && (
+                      <div className="text-xs text-amber-300/80 pt-1">{syncResult.note}</div>
+                    )}
+                  </div>
+                ) : `✗ Sync failed: ${syncResult.error}`}
               </div>
             )}
           </div>
