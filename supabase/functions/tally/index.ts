@@ -52,7 +52,7 @@ function buildTallyUrl(host: string): string {
   return `http://${trimmed}`;
 }
 
-async function tallyRequest(xml: string, cfg: Required<TallyConfig>, timeoutMs = 30000) {
+async function tallyRequest(xml: string, cfg: Required<TallyConfig>, timeoutMs = 120000) {
   if (!cfg.host) throw new Error('Tally host not configured. Provide "host" in the request body or set TALLY_HOST secret.');
 
   const controller = new AbortController();
