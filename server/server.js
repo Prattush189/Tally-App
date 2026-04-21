@@ -10,8 +10,23 @@ import { getDashboardData, getDataStatus } from './tally/dataManager.js';
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-app.use(cors());
-app.use(express.json());
+const allowedOrigins = (process.env.CORS_ORIGIN || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
+const corsOptions = allowedOrigins.length
+  ? {
+      origin: (origin, cb) => {
+        if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+        return cb(new Error('Not allowed by CORS'));
+      },
+      credentials: true,
+    }
+  : { origin: true };
+
+app.use(cors(corsOptions));
+app.use(express.json({ limit: '1mb' }));
 
 // Attempt Tally connection on startup (non-blocking)
 getDashboardData().then(data => {
@@ -42,6 +57,6 @@ app.get('/api/health', (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n  B2B Intelligence API Server v2.0`);
   console.log(`  Running on http://localhost:${PORT}`);
-  console.log(`  Tally: http://${process.env.TALLY_HOST || '103.76.213.243'}:${process.env.TALLY_PORT || '65430'}`);
+  console.log(`  Tally: http://${process.env.TALLY_HOST || '127.0.0.1'}:${process.env.TALLY_PORT || '9000'}`);
   console.log(`  Health: http://localhost:${PORT}/api/health\n`);
 });

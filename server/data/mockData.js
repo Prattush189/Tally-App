@@ -1,13 +1,6 @@
-import bcrypt from 'bcryptjs';
-
 // ─── USERS ──────────────────────────────────────────────────────────────────
-const passwordHash = bcrypt.hashSync('admin123', 10);
-const demoHash = bcrypt.hashSync('demo2026', 10);
-
-export const users = [
-  { id: 1, email: 'admin@b2bintel.com', password: passwordHash, name: 'Vaibhav Jain', role: 'admin', avatar: 'VJ' },
-  { id: 2, email: 'demo@b2bintel.com', password: demoHash, name: 'Demo User', role: 'viewer', avatar: 'DU' },
-];
+// Users are created via the /api/auth/register endpoint; there are no seed accounts.
+export const users = [];
 
 // ─── CATEGORIES & SKUS ─────────────────────────────────────────────────────
 export const CATEGORIES = [
