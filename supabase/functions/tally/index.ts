@@ -390,35 +390,46 @@ Deno.serve(async (req) => {
   const cfg = resolveConfig(body as TallyConfig);
 
   if (action === 'sync-full') {
-    // Pull every collection the dashboards need in parallel. Each request is
-    // independent so a slow / dropped one doesn't kill the rest — we report
-    // partial failures per collection and let the client degrade gracefully.
+    // Serial, not parallel. Shared-host Tally tunnels (ngrok free, cloudflare
+    // quick tunnels, etc.) often only allow 1-2 concurrent connections; 5 at
+    // once is what makes them drop the whole session. Trade faster wall clock
+    // for reliability.
+    //
+    // Cumulative deadline of ~130s keeps us under Supabase's 150s function
+    // timeout. If we blow the budget we stop queuing further jobs and return
+    // what we have, with the skipped ones marked as errors.
     const jobs = [
-      { key: 'ledgers' as const, xml: sundryDebtorsRequest(cfg), node: 'LEDGER', timeoutMs: 90000 },
-      { key: 'salesVouchers' as const, xml: salesVouchersRequest(cfg), node: 'VOUCHER', timeoutMs: 120000 },
-      { key: 'receiptVouchers' as const, xml: receiptVouchersRequest(cfg), node: 'VOUCHER', timeoutMs: 120000 },
-      { key: 'stockItems' as const, xml: stockItemsRequest(cfg), node: 'STOCKITEM', timeoutMs: 90000 },
-      { key: 'stockGroups' as const, xml: stockGroupsRequest(cfg), node: 'STOCKGROUP', timeoutMs: 60000 },
+      { key: 'ledgers' as const, xml: sundryDebtorsRequest(cfg), node: 'LEDGER', timeoutMs: 25000 },
+      { key: 'salesVouchers' as const, xml: salesVouchersRequest(cfg), node: 'VOUCHER', timeoutMs: 40000 },
+      { key: 'receiptVouchers' as const, xml: receiptVouchersRequest(cfg), node: 'VOUCHER', timeoutMs: 30000 },
+      { key: 'stockItems' as const, xml: stockItemsRequest(cfg), node: 'STOCKITEM', timeoutMs: 25000 },
+      { key: 'stockGroups' as const, xml: stockGroupsRequest(cfg), node: 'STOCKGROUP', timeoutMs: 15000 },
     ];
-    const settled = await Promise.allSettled(
-      jobs.map((j) => tallyRequest(j.xml, cfg, j.timeoutMs)),
-    );
+    const deadline = Date.now() + 130000;
     const data: Record<string, unknown> = {};
     const counts: Record<string, number> = {};
     const errors: Record<string, string> = {};
     let anyConnected = false;
-    settled.forEach((res, i) => {
-      const job = jobs[i];
-      if (res.status === 'fulfilled') {
-        data[job.key] = res.value;
-        counts[job.key] = countNode(res.value, job.node);
-        anyConnected = true;
-      } else {
+    for (const job of jobs) {
+      const budget = deadline - Date.now();
+      if (budget <= 1000) {
         data[job.key] = null;
         counts[job.key] = 0;
-        errors[job.key] = res.reason instanceof Error ? res.reason.message : String(res.reason);
+        errors[job.key] = 'Skipped — wall-clock budget exhausted by earlier queries';
+        continue;
       }
-    });
+      const timeout = Math.min(job.timeoutMs, budget);
+      try {
+        const result = await tallyRequest(job.xml, cfg, timeout);
+        data[job.key] = result;
+        counts[job.key] = countNode(result, job.node);
+        anyConnected = true;
+      } catch (err) {
+        data[job.key] = null;
+        counts[job.key] = 0;
+        errors[job.key] = err instanceof Error ? err.message : String(err);
+      }
+    }
     return new Response(JSON.stringify({
       connected: anyConnected,
       action,
