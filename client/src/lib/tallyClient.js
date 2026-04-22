@@ -56,13 +56,18 @@ export async function testConnection(config = {}) {
 
 export async function syncFromTally(config = {}) {
   if (TALLY_BACKEND === 'supabase') {
+    // Manual "Sync Now" presses should always pull fresh data — skipFresh=true
+    // is the scheduled-cron optimization and is surprising when a user has
+    // clicked a button and expects new numbers. Caller can override by
+    // passing skipFresh: true in config.
+    const body = { skipFresh: false, ...config };
     // Try the full pull first — one call returns ledgers + sales + receipts +
     // stock items + stock groups. If the Edge Function itself fails (timeout,
     // network, etc.) fall back to the lean ledger-only sync so dashboards
     // still get a signal. Per-collection failures come back inside `errors`
     // on a successful response; we surface them without blocking.
     try {
-      const data = await supabaseInvoke('sync-full', config);
+      const data = await supabaseInvoke('sync-full', body);
       const counts = data?.counts || {};
       const bundle = data?.data || {};
       const errors = data?.errors || {};

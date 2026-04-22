@@ -42,6 +42,7 @@ const parser = new XMLParser({
   textNodeName: '_text',
   isArray: (name: string) => [
     'LEDGER', 'VOUCHER', 'STOCKITEM', 'STOCKGROUP', 'BILL', 'BODY', 'COLLECTION',
+    'COMPANY',
     'ALLINVENTORYENTRIES.LIST', 'INVENTORYENTRIES.LIST',
     'ALLLEDGERENTRIES.LIST', 'LEDGERENTRIES.LIST',
     'BILLALLOCATIONS.LIST', 'BATCHALLOCATIONS.LIST',
@@ -670,11 +671,17 @@ Deno.serve(async (req) => {
           for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
             const k = key.toUpperCase();
             if (k === 'COMPANY' || k === 'COMPANIES') {
-              // Company nodes — look at both the @_NAME attribute (fast-xml-parser
-              // prefixes attrs with '_' in our config) and a nested NAME child.
-              const rec = value as Record<string, unknown>;
-              const name = (rec?._NAME as string) || (rec?.NAME as string);
-              if (typeof name === 'string' && name.trim()) seen.add(name.trim());
+              // Multi-company responses come back as an array (COMPANY is
+              // array-forced in our isArray config); single-company ones
+              // can still be a bare object. Handle both so the dropdown
+              // populates correctly for users with 4 companies loaded.
+              const items = Array.isArray(value) ? value : [value];
+              for (const item of items) {
+                if (!item || typeof item !== 'object') continue;
+                const rec = item as Record<string, unknown>;
+                const name = (rec?._NAME as string) || (rec?.NAME as string);
+                if (typeof name === 'string' && name.trim()) seen.add(name.trim());
+              }
               walk(value);
             } else {
               walk(value);
@@ -817,9 +824,16 @@ Deno.serve(async (req) => {
           if (typeof node !== 'object') return;
           for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
             if (key.toUpperCase() === 'COMPANY') {
-              const rec = value as Record<string, unknown>;
-              const name = (rec?._NAME as string) || (rec?.NAME as string);
-              if (typeof name === 'string' && name.trim()) seen.add(name.trim());
+              // COMPANY is array-forced in our isArray config so multi-company
+              // responses come back as an array; but a single-company tally
+              // could legitimately return one object. Handle both.
+              const items = Array.isArray(value) ? value : [value];
+              for (const item of items) {
+                if (!item || typeof item !== 'object') continue;
+                const rec = item as Record<string, unknown>;
+                const name = (rec?._NAME as string) || (rec?.NAME as string);
+                if (typeof name === 'string' && name.trim()) seen.add(name.trim());
+              }
             }
             walk(value);
           }
