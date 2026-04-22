@@ -54,9 +54,14 @@ export default function Header({ active, searchQuery, onSearchChange, onRefresh,
             </span>
           </div>
         )}
-        <div className="flex items-center gap-2 text-xs text-gray-500">
+        <div className="flex items-center gap-2 text-xs text-gray-500" title={`Build ${import.meta.env.VITE_BUILD_SHA || 'dev'}`}>
           <div className={`w-2 h-2 rounded-full ${dotClass}`} />
           <span>{statusLabel}</span>
+          {import.meta.env.VITE_BUILD_SHA && (
+            <span className="text-gray-600 font-mono text-[10px]" title="Short commit SHA of this deployed bundle">
+              {import.meta.env.VITE_BUILD_SHA}
+            </span>
+          )}
         </div>
       </div>
     </header>

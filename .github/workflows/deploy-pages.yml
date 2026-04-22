@@ -40,12 +40,21 @@ jobs:
           repo="${GITHUB_REPOSITORY##*/}"
           echo "base=/${repo}/" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve build SHA
+        id: sha
+        run: echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+        working-directory: .
+
       - name: Build
         env:
           VITE_BASE: ${{ steps.base.outputs.base }}
           VITE_API_URL: ${{ vars.VITE_API_URL }}
           VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
+          # Inject the short commit SHA so the client header can display it.
+          # Makes "am I seeing the latest bundle?" a one-glance check instead
+          # of a ctrl+shift+R dance.
+          VITE_BUILD_SHA: ${{ steps.sha.outputs.sha }}
         run: npm run build
 
       - name: Setup Pages
