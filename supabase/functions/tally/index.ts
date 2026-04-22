@@ -802,12 +802,12 @@ Deno.serve(async (req) => {
     let anyConnected = false;
     let first = true;
     for (const job of jobs) {
-      // Cooldown between calls. Some upstream boxes (captive-portal gated
-      // tunnels, single-connection forwarders) reset the socket on the very
-      // next connection; a short pause lets them settle. Skip on the first
-      // job and when the budget is already tight.
-      if (!first && deadline - Date.now() > 5000) {
-        await new Promise((r) => setTimeout(r, 1500));
+      // Cooldown between calls. Observed behaviour: after a big response
+      // (3000+ ledgers) the tunnel refuses the next 2-3 connections for
+      // several seconds. 1.5s wasn't enough; 4s lets it fully flush before
+      // the next POST. Skipped on the first job and when budget is tight.
+      if (!first && deadline - Date.now() > 10000) {
+        await new Promise((r) => setTimeout(r, 4000));
       }
       first = false;
       const budget = deadline - Date.now();

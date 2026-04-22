@@ -74,23 +74,33 @@ function cityFromAddress(address, fallback) {
   return parts[parts.length - 2] || parts[0] || fallback || '';
 }
 
-// Walk a parsed XML tree and return the first array of LEDGER objects we find.
+// Walk a parsed XML tree and return every LEDGER node we find, flattened
+// into one array. Tally responses sometimes include stray LEDGER references
+// at shallow depths (metadata / default ledger / bill allocation contexts)
+// alongside the main COLLECTION > LEDGER[] payload. Returning the FIRST
+// hit used to make us miss the real collection and show a single sample
+// ledger instead of the 3000+ we actually want. Exhaustive walk fixes that.
 function extractLedgers(tree) {
-  if (!tree || typeof tree !== 'object') return [];
-  if (Array.isArray(tree)) {
-    for (const item of tree) {
-      const found = extractLedgers(item);
-      if (found.length) return found;
+  return extractAllByKey(tree, 'LEDGER');
+}
+
+function extractAllByKey(tree, nodeName) {
+  const acc = [];
+  const walk = (node) => {
+    if (node == null) return;
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    if (typeof node !== 'object') return;
+    for (const [key, value] of Object.entries(node)) {
+      if (key === nodeName) {
+        if (Array.isArray(value)) acc.push(...value);
+        else if (value && typeof value === 'object') acc.push(value);
+      } else {
+        walk(value);
+      }
     }
-    return [];
-  }
-  for (const [key, value] of Object.entries(tree)) {
-    if (key === 'LEDGER' && Array.isArray(value)) return value;
-    if (key === 'LEDGER' && value && typeof value === 'object') return [value];
-    const nested = extractLedgers(value);
-    if (nested.length) return nested;
-  }
-  return [];
+  };
+  walk(tree);
+  return acc;
 }
 
 function isSundryDebtor(ledger) {
@@ -193,22 +203,10 @@ function buildCustomer(ledger, index) {
 // Generic version of extractLedgers — walks the parsed XML tree and returns
 // the first array of nodes matching `nodeName`. Used to pull VOUCHER /
 // STOCKITEM / STOCKGROUP collections out of their parsed trees.
+// Same exhaustive walk as extractLedgers, parameterised by node name.
+// Used for VOUCHER / STOCKITEM / STOCKGROUP collections.
 function extractCollection(tree, nodeName) {
-  if (!tree || typeof tree !== 'object') return [];
-  if (Array.isArray(tree)) {
-    for (const item of tree) {
-      const found = extractCollection(item, nodeName);
-      if (found.length) return found;
-    }
-    return [];
-  }
-  for (const [key, value] of Object.entries(tree)) {
-    if (key === nodeName && Array.isArray(value)) return value;
-    if (key === nodeName && value && typeof value === 'object') return [value];
-    const nested = extractCollection(value, nodeName);
-    if (nested.length) return nested;
-  }
-  return [];
+  return extractAllByKey(tree, nodeName);
 }
 
 // Tally serialises dates as YYYYMMDD. Accept that form plus ISO-ish strings
