@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { MapPin, TrendingUp, Users, DollarSign, AlertTriangle } from 'lucide-react';
 import { ComposableMap, Geographies, Geography } from 'react-simple-maps';
 import SectionHeader from '../common/SectionHeader';
@@ -8,10 +8,16 @@ import { useExtended } from '../../hooks/useExtended';
 import { fmt, TOOLTIP_STYLE } from '../../utils/format';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
-// Real India states TopoJSON hosted on jsdelivr (stable CDN, well-cached).
-// Includes all 28 states + 8 UTs as separate features with NAME_1 properties.
-// Browser caches it after the first load, so repeat visits don't refetch.
-const INDIA_TOPOJSON = 'https://cdn.jsdelivr.net/gh/deldersveld/topojson@master/countries/india/india-states.json';
+// Fallback chain of public India-states TopoJSON/GeoJSON mirrors. We try them
+// in order until one loads — some CDNs get blocked by ad blockers or have
+// expired paths, so having three alternatives keeps the map from going dark.
+// First good response wins; we pass the parsed object (not a URL) to
+// react-simple-maps so parse errors surface in our catch handler.
+const INDIA_MAP_SOURCES = [
+  'https://cdn.jsdelivr.net/gh/deldersveld/topojson@master/countries/india/india-states.json',
+  'https://cdn.jsdelivr.net/gh/Anuj-Arora/india-states-geojson@main/india.json',
+  'https://raw.githubusercontent.com/deldersveld/topojson/master/countries/india/india-states.json',
+];
 
 // Normalize name for matching between our state data and the TopoJSON
 // properties. TopoJSON sometimes uses "NCT of Delhi", "Orissa" (old spelling),
@@ -31,6 +37,32 @@ export default function IndiaMap() {
   const { data, loading } = useExtended('map');
   const [selected, setSelected] = useState(null);
   const [hover, setHover] = useState(null);
+  const [geoData, setGeoData] = useState(null);
+  const [geoError, setGeoError] = useState(null);
+
+  // Manually fetch the TopoJSON so we can walk the fallback list and surface
+  // any error visibly instead of rendering a silent empty SVG. AbortController
+  // cancels in-flight fetches on unmount / re-render.
+  useEffect(() => {
+    const ctrl = new AbortController();
+    (async () => {
+      for (const url of INDIA_MAP_SOURCES) {
+        try {
+          const res = await fetch(url, { signal: ctrl.signal });
+          if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+          const parsed = await res.json();
+          setGeoData(parsed);
+          setGeoError(null);
+          return;
+        } catch (err) {
+          if (err.name === 'AbortError') return;
+          console.warn(`[IndiaMap] ${url} failed:`, err.message);
+        }
+      }
+      setGeoError('Could not fetch any India TopoJSON source. Check console + network tab — likely blocked by an extension or firewall.');
+    })();
+    return () => ctrl.abort();
+  }, []);
 
   if (loading || !data) return <LoadingSpinner />;
 
@@ -76,12 +108,26 @@ export default function IndiaMap() {
         <div className="lg:col-span-3 glass-card p-5">
           <h3 className="text-sm font-semibold text-gray-300 mb-4">India — Revenue Heatmap</h3>
           <div className="relative" style={{ minHeight: 520 }}>
+            {geoError ? (
+              <div className="h-[520px] flex flex-col items-center justify-center text-center p-6 gap-3">
+                <AlertTriangle size={32} className="text-amber-400" />
+                <p className="text-sm font-semibold text-white">Map tiles couldn't load</p>
+                <p className="text-xs text-gray-400 max-w-md">{geoError}</p>
+                <p className="text-[11px] text-gray-500">State bubbles and the right-side panel still work — click a state in the list.</p>
+              </div>
+            ) : !geoData ? (
+              <div className="h-[520px] flex items-center justify-center">
+                <p className="text-xs text-gray-500">Loading map…</p>
+              </div>
+            ) : (
             <ComposableMap
               projection="geoMercator"
               projectionConfig={{ center: [82, 22], scale: 1000 }}
+              width={800}
+              height={520}
               style={{ width: '100%', height: 520 }}
             >
-              <Geographies geography={INDIA_TOPOJSON}>
+              <Geographies geography={geoData}>
                 {({ geographies }) =>
                   geographies.map((geo) => {
                     const name = geo.properties.NAME_1 || geo.properties.name || '';
@@ -118,6 +164,7 @@ export default function IndiaMap() {
                 }
               </Geographies>
             </ComposableMap>
+            )}
             {hover && (
               <div className="absolute top-2 right-2 bg-gray-900/90 border border-gray-700/60 rounded-lg px-3 py-2 text-xs text-gray-200 pointer-events-none">
                 <p className="font-semibold text-white">{hover}</p>
