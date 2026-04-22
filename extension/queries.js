@@ -15,13 +15,13 @@
     return parts.join('');
   }
 
-  // Voucher queries default to the last 180 days when no range is supplied —
+  // Voucher queries default to the last 90 days when no range is supplied —
   // pulling all-time history blows past the tunnel's payload ceiling.
   function voucherDateFilter(cfg) {
     if (cfg.fromDate || cfg.toDate) return dateFilter(cfg);
     const d = new Date();
     const to = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
-    d.setDate(d.getDate() - 180);
+    d.setDate(d.getDate() - 90);
     const from = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
     return `<SVFROMDATE Type="Date">${from}</SVFROMDATE><SVTODATE Type="Date">${to}</SVTODATE>`;
   }
@@ -45,14 +45,11 @@
             <NATIVEMETHOD>Parent</NATIVEMETHOD>
             <NATIVEMETHOD>OpeningBalance</NATIVEMETHOD>
             <NATIVEMETHOD>ClosingBalance</NATIVEMETHOD>
-            <NATIVEMETHOD>Mailingname</NATIVEMETHOD>
-            <NATIVEMETHOD>LedgerMailingDetails.List</NATIVEMETHOD>
-            <NATIVEMETHOD>LedgerContact</NATIVEMETHOD>
-            <NATIVEMETHOD>Email</NATIVEMETHOD>
             <NATIVEMETHOD>PartyGSTIN</NATIVEMETHOD>
             <NATIVEMETHOD>LedStateName</NATIVEMETHOD>
             <NATIVEMETHOD>CreditPeriod</NATIVEMETHOD>
             <NATIVEMETHOD>CreditLimit</NATIVEMETHOD>
+            <NATIVEMETHOD>Address</NATIVEMETHOD>
           </COLLECTION>
         </TDLMESSAGE>
       </TDL>

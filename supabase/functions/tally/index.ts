@@ -65,15 +65,15 @@ function dateFilter(cfg: { fromDate: string; toDate: string }) {
   return parts.join('');
 }
 
-// Voucher queries default to the last 180 days when no range is supplied.
+// Voucher queries default to the last 90 days when no range is supplied.
 // Pulling all-time history (years of invoices + line items) regularly blows
 // past the tunnel's payload ceiling and trips "connection closed before
-// message completed". 180 days is enough for churn / aging / DSO.
+// message completed". 90 days is enough for churn / aging / DSO.
 function voucherDateFilter(cfg: { fromDate: string; toDate: string }) {
   if (cfg.fromDate || cfg.toDate) return dateFilter(cfg);
   const d = new Date();
   const to = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
-  d.setDate(d.getDate() - 180);
+  d.setDate(d.getDate() - 90);
   const from = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
   return `<SVFROMDATE Type="Date">${from}</SVFROMDATE><SVTODATE Type="Date">${to}</SVTODATE>`;
 }
@@ -672,13 +672,19 @@ Deno.serve(async (req) => {
     // timeout. If we blow the budget we stop queuing further jobs and return
     // what we have, with the skipped ones marked as errors.
     const jobs = [
-      { key: 'ledgers' as const, xml: sundryDebtorsRequest(cfg), node: 'LEDGER', timeoutMs: 25000 },
-      { key: 'salesVouchers' as const, xml: salesVouchersRequest(cfg), node: 'VOUCHER', timeoutMs: 40000 },
-      { key: 'receiptVouchers' as const, xml: receiptVouchersRequest(cfg), node: 'VOUCHER', timeoutMs: 30000 },
-      { key: 'stockItems' as const, xml: stockItemsRequest(cfg), node: 'STOCKITEM', timeoutMs: 25000 },
-      { key: 'stockGroups' as const, xml: stockGroupsRequest(cfg), node: 'STOCKGROUP', timeoutMs: 15000 },
+      // Per-job timeouts reflect observed response sizes on the hosted tunnel.
+      // Ledger master dump is the heaviest (3000+ rows seen) so it gets the
+      // biggest slice. Vouchers come second; stock masters are small.
+      // 65 + 45 + 35 + 15 + 10 + 4 × 1.5s cooldowns ≈ 176s worst-case, but
+      // the wall-clock deadline below ensures we always return within
+      // Supabase's 150s function limit even if every retry fires.
+      { key: 'ledgers' as const, xml: sundryDebtorsRequest(cfg), node: 'LEDGER', timeoutMs: 65000 },
+      { key: 'salesVouchers' as const, xml: salesVouchersRequest(cfg), node: 'VOUCHER', timeoutMs: 45000 },
+      { key: 'receiptVouchers' as const, xml: receiptVouchersRequest(cfg), node: 'VOUCHER', timeoutMs: 35000 },
+      { key: 'stockItems' as const, xml: stockItemsRequest(cfg), node: 'STOCKITEM', timeoutMs: 15000 },
+      { key: 'stockGroups' as const, xml: stockGroupsRequest(cfg), node: 'STOCKGROUP', timeoutMs: 10000 },
     ];
-    const deadline = Date.now() + 130000;
+    const deadline = Date.now() + 140000;
     const data: Record<string, unknown> = {};
     const counts: Record<string, number> = {};
     const errors: Record<string, string> = {};
