@@ -332,12 +332,17 @@ export default function TallySync() {
             {/* Sync Result */}
             {syncResult?.tallyNotRunning && (
               <div className="p-3 rounded-lg border text-sm bg-amber-500/10 border-amber-500/30 text-amber-300 space-y-1">
-                <div className="font-semibold">⚠ TallyPrime doesn't appear to be running</div>
+                <div className="font-semibold">⚠ Every live query timed out this run</div>
                 <div className="text-xs text-amber-200/90">
-                  Every live query timed out or got reset — this usually means no one has an active RemoteApp session on the portal, so <code>:9007</code> has nothing to route to.
+                  Tally's lightweight "test" endpoint works, but the heavier collection queries aren't completing. Most common causes:
                 </div>
+                <ul className="text-xs text-amber-200/80 list-disc list-inside pt-1 space-y-0.5">
+                  <li>Someone's actively using the TallyPrime GUI inside the RemoteApp (opening a report, entering a voucher) — Tally serialises everything, so our XML calls block until they're idle.</li>
+                  <li>The cloud tunnel's idle timer is cutting off queries before Tally starts responding.</li>
+                  <li>No TallyPrime RemoteApp session is open right now.</li>
+                </ul>
                 <div className="text-xs text-amber-200/80 pt-1">
-                  Fix: <a href="http://103.76.213.243/" target="_blank" rel="noreferrer" className="underline underline-offset-2">open the portal</a> → log in → click TallyPrime → wait for the RemoteApp to load → then re-click Sync Now. Or use the <b>Chrome extension</b> which runs inside that portal tab (see <code>extension/README.md</code>).
+                  Fix: wait a few seconds for Tally to idle, then click <b>Sync Now</b> again. Or use the <b>Chrome extension</b> (<code>extension/README.md</code>) — it runs inside the portal tab with the live RemoteApp session and is much more reliable for this tunnel.
                 </div>
               </div>
             )}
