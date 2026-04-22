@@ -5,7 +5,7 @@ import { fmt } from '../../utils/format';
 import { useAuth } from '../../context/AuthContext';
 import {
   TALLY_BACKEND, tallyAvailable, testConnection, syncFromTally,
-  getStatus, getDataSummary, loadFromSnapshot,
+  getStatus, getDataSummary, loadFromSnapshot, getCompanies,
 } from '../../lib/tallyClient';
 import { transformTallyLedgers, transformTallyFull } from '../../lib/tallyTransformer';
 import { saveLiveCustomers, loadLiveCustomers, clearLiveCustomers } from '../../lib/liveData';
@@ -40,6 +40,8 @@ export default function TallySync() {
   const [rangeKey, setRangeKey] = useState('all');
   const [loadingSnapshot, setLoadingSnapshot] = useState(false);
   const [snapshotInfo, setSnapshotInfo] = useState(null);
+  const [activeCompany, setActiveCompany] = useState('');
+  const [knownCompanies, setKnownCompanies] = useState([]);
 
   const available = tallyAvailable();
   const ranges = availableRanges();
@@ -54,7 +56,16 @@ export default function TallySync() {
     if (!available) return;
     getStatus().then(setStatus).catch(() => {});
     getDataSummary().then(setSummary).catch(() => {});
+    refreshCompanies();
   }, [available]);
+
+  async function refreshCompanies() {
+    try {
+      const r = await getCompanies();
+      setKnownCompanies(r?.companies || []);
+      setActiveCompany(r?.activeCompany || '');
+    } catch { /* non-fatal */ }
+  }
 
   const handleTest = async () => {
     if (isDemo) return;
@@ -101,6 +112,7 @@ export default function TallySync() {
       if (s) setStatus(s);
       const sm = await getDataSummary();
       if (sm) setSummary(sm);
+      refreshCompanies();
     } catch (err) {
       setSyncResult({ success: false, error: err.message });
     }
@@ -273,13 +285,18 @@ export default function TallySync() {
                 </p>
               </div>
               <div className="bg-gray-900/50 rounded-lg p-3">
-                <p className="text-xs text-gray-500 mb-1">Company</p>
-                <p className="text-sm text-white">UNITED AGENCIES DISTRIBUTORS LLP</p>
+                <p className="text-xs text-gray-500 mb-1">Company {knownCompanies.length > 1 ? `(of ${knownCompanies.length} in Tally)` : ''}</p>
+                <p className="text-sm text-white">
+                  {activeCompany || (knownCompanies[0]) || 'No company selected yet — click Sync Now to auto-detect from Tally'}
+                </p>
                 <p className="text-xs text-gray-500 mt-0.5">
                   {activeRange.fromDate
                     ? `${activeRange.label}: ${activeRange.fromDate} → ${activeRange.toDate}`
                     : 'All available data (Tally default range)'}
                 </p>
+                {knownCompanies.length > 1 && (
+                  <p className="text-[11px] text-indigo-300/80 mt-1">Switch company from the top-bar dropdown.</p>
+                )}
               </div>
               {status?.cacheAge != null && (
                 <div className="bg-gray-900/50 rounded-lg p-3">
@@ -533,7 +550,8 @@ export default function TallySync() {
                 <p>Configure in your <code className="text-gray-300">.env</code> file:</p>
                 <pre className="mt-2 bg-gray-900/60 rounded p-2 text-gray-300 overflow-x-auto">
 {`TALLY_HOST=your-tally-ip
-TALLY_COMPANY=UNITED AGENCIES DISTRIBUTORS LLP`}
+# TALLY_COMPANY optional — leave blank to use the company you
+# pick in the top-bar switcher (auto-detected on every sync).`}
                 </pre>
               </div>
             </div>
