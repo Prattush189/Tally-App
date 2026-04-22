@@ -14,6 +14,17 @@ function dateFilter(cfg) {
   return parts.join('');
 }
 
+// Voucher queries default to the last 180 days when no range is supplied —
+// pulling all-time history blows past the tunnel's payload ceiling.
+function voucherDateFilter(cfg) {
+  if (cfg.fromDate || cfg.toDate) return dateFilter(cfg);
+  const d = new Date();
+  const to = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+  d.setDate(d.getDate() - 180);
+  const from = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+  return `<SVFROMDATE Type="Date">${from}</SVFROMDATE><SVTODATE Type="Date">${to}</SVTODATE>`;
+}
+
 export function sundryDebtorsRequest(cfg) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <ENVELOPE>
@@ -58,7 +69,7 @@ export function salesVouchersRequest(cfg) {
       <STATICVARIABLES>
         <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
         ${companyFilter(cfg.company)}
-        ${dateFilter(cfg)}
+        ${voucherDateFilter(cfg)}
       </STATICVARIABLES>
       <TDL>
         <TDLMESSAGE>
@@ -76,7 +87,7 @@ export function salesVouchersRequest(cfg) {
             <NATIVEMETHOD>LedgerEntries.List</NATIVEMETHOD>
           </COLLECTION>
         </TDLMESSAGE>
-        <SYSTEM TYPE="Formulae" NAME="IsSalesVoucher">$$IsSales:VoucherTypeName</SYSTEM>
+        <SYSTEM TYPE="Formulae" NAME="IsSalesVoucher">$$IsSales:$VoucherTypeName</SYSTEM>
       </TDL>
     </DESC>
   </BODY>
@@ -92,7 +103,7 @@ export function receiptVouchersRequest(cfg) {
       <STATICVARIABLES>
         <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
         ${companyFilter(cfg.company)}
-        ${dateFilter(cfg)}
+        ${voucherDateFilter(cfg)}
       </STATICVARIABLES>
       <TDL>
         <TDLMESSAGE>
@@ -109,7 +120,7 @@ export function receiptVouchersRequest(cfg) {
             <NATIVEMETHOD>AllLedgerEntries.List</NATIVEMETHOD>
           </COLLECTION>
         </TDLMESSAGE>
-        <SYSTEM TYPE="Formulae" NAME="IsReceiptVoucher">$$IsReceipt:VoucherTypeName</SYSTEM>
+        <SYSTEM TYPE="Formulae" NAME="IsReceiptVoucher">$$IsReceipt:$VoucherTypeName</SYSTEM>
       </TDL>
     </DESC>
   </BODY>

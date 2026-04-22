@@ -65,6 +65,19 @@ function dateFilter(cfg: { fromDate: string; toDate: string }) {
   return parts.join('');
 }
 
+// Voucher queries default to the last 180 days when no range is supplied.
+// Pulling all-time history (years of invoices + line items) regularly blows
+// past the tunnel's payload ceiling and trips "connection closed before
+// message completed". 180 days is enough for churn / aging / DSO.
+function voucherDateFilter(cfg: { fromDate: string; toDate: string }) {
+  if (cfg.fromDate || cfg.toDate) return dateFilter(cfg);
+  const d = new Date();
+  const to = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+  d.setDate(d.getDate() - 180);
+  const from = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+  return `<SVFROMDATE Type="Date">${from}</SVFROMDATE><SVTODATE Type="Date">${to}</SVTODATE>`;
+}
+
 // Accept either a bare "host" / "host:port" or a full URL ("https://host:port/path").
 // Falls back to http://<host> when no scheme is provided.
 function buildTallyUrl(host: string): string {
@@ -197,12 +210,13 @@ function salesVouchersRequest(cfg: { company: string; fromDate: string; toDate: 
       <STATICVARIABLES>
         <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
         ${companyFilter(cfg.company)}
-        ${dateFilter(cfg)}
+        ${voucherDateFilter(cfg)}
       </STATICVARIABLES>
       <TDL>
         <TDLMESSAGE>
           <COLLECTION NAME="B2BIntelSales" ISMODIFY="No">
             <TYPE>Voucher</TYPE>
+            <FILTERS>IsSalesVoucher</FILTERS>
             <NATIVEMETHOD>Date</NATIVEMETHOD>
             <NATIVEMETHOD>VoucherNumber</NATIVEMETHOD>
             <NATIVEMETHOD>VoucherTypeName</NATIVEMETHOD>
@@ -210,11 +224,8 @@ function salesVouchersRequest(cfg: { company: string; fromDate: string; toDate: 
             <NATIVEMETHOD>Amount</NATIVEMETHOD>
             <NATIVEMETHOD>AllLedgerEntries</NATIVEMETHOD>
             <NATIVEMETHOD>AllInventoryEntries</NATIVEMETHOD>
-            <FILTER>B2BIntelSalesFilter</FILTER>
           </COLLECTION>
-          <SYSTEM TYPE="Formulae" NAME="B2BIntelSalesFilter">
-            $VoucherTypeName = "Sales" OR $VoucherTypeName UNDER "Sales"
-          </SYSTEM>
+          <SYSTEM TYPE="Formulae" NAME="IsSalesVoucher">$$IsSales:$VoucherTypeName</SYSTEM>
         </TDLMESSAGE>
       </TDL>
     </DESC>
@@ -238,12 +249,13 @@ function receiptVouchersRequest(cfg: { company: string; fromDate: string; toDate
       <STATICVARIABLES>
         <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
         ${companyFilter(cfg.company)}
-        ${dateFilter(cfg)}
+        ${voucherDateFilter(cfg)}
       </STATICVARIABLES>
       <TDL>
         <TDLMESSAGE>
           <COLLECTION NAME="B2BIntelReceipts" ISMODIFY="No">
             <TYPE>Voucher</TYPE>
+            <FILTERS>IsReceiptVoucher</FILTERS>
             <NATIVEMETHOD>Date</NATIVEMETHOD>
             <NATIVEMETHOD>VoucherNumber</NATIVEMETHOD>
             <NATIVEMETHOD>VoucherTypeName</NATIVEMETHOD>
@@ -251,11 +263,8 @@ function receiptVouchersRequest(cfg: { company: string; fromDate: string; toDate
             <NATIVEMETHOD>Amount</NATIVEMETHOD>
             <NATIVEMETHOD>AllLedgerEntries</NATIVEMETHOD>
             <NATIVEMETHOD>BillAllocations</NATIVEMETHOD>
-            <FILTER>B2BIntelReceiptFilter</FILTER>
           </COLLECTION>
-          <SYSTEM TYPE="Formulae" NAME="B2BIntelReceiptFilter">
-            $VoucherTypeName = "Receipt" OR $VoucherTypeName UNDER "Receipt"
-          </SYSTEM>
+          <SYSTEM TYPE="Formulae" NAME="IsReceiptVoucher">$$IsReceipt:$VoucherTypeName</SYSTEM>
         </TDLMESSAGE>
       </TDL>
     </DESC>

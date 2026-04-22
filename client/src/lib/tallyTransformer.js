@@ -96,11 +96,35 @@ function extractLedgers(tree) {
 function isSundryDebtor(ledger) {
   const parent = readField(ledger, 'PARENT').toLowerCase();
   if (!parent) return false;
-  // Match "Sundry Debtors", anything nested under it ("Sundry Debtors / X"),
-  // and the common synonyms shops use for the same group.
   return parent.includes('sundry debtor')
+    || parent.includes('trade debtor')
+    || parent.includes('sundry debtors')
     || parent === 'debtors'
-    || parent.includes('accounts receivable');
+    || parent.includes('accounts receivable')
+    || parent.includes('account receivable')
+    || parent.includes('customer')
+    || parent.includes('client')
+    || parent.includes('receivable');
+}
+
+// Ledger groups we never want to treat as customers even in fallback mode.
+// When we're guessing (no Sundry-Debtor parent matched), these are the
+// obvious non-debtor buckets to exclude so we don't mix banks / taxes / P&L
+// accounts into the dashboard's customer list.
+const NON_DEBTOR_PARENT_PATTERNS = [
+  'bank', 'cash', 'capital', 'current asset', 'fixed asset',
+  'current liab', 'loan', 'duties', 'tax', 'gst', 'tds', 'tcs',
+  'provision', 'reserve', 'suspense',
+  'income', 'revenue', 'sales account', 'direct income', 'indirect income',
+  'expense', 'direct exp', 'indirect exp', 'purchase',
+  'depreciation', 'branch', 'division',
+  'sundry creditor', 'trade creditor', 'creditor',
+];
+
+function isNotObviousNonDebtor(ledger) {
+  const parent = readField(ledger, 'PARENT').toLowerCase();
+  if (!parent) return true;
+  return !NON_DEBTOR_PARENT_PATTERNS.some((p) => parent.includes(p));
 }
 
 function buildCustomer(ledger, index) {
@@ -513,11 +537,23 @@ export function transformTallyFull(bundle, options = {}) {
     receiptsByParty.set(party, arr);
   }
 
-  // Same debtor-selection logic as the lean transformer.
+  // Same three-tier debtor selection as transformTallyLedgers. See that
+  // function for the rationale — NON_DEBTOR_PARENT_PATTERNS up top is the
+  // filter shared between them.
   const debtors = ledgers.filter(isSundryDebtor);
-  const source = debtors.length > 0
-    ? debtors
-    : ledgers.filter(l => Math.abs(parseAmount(readField(l, 'CLOSINGBALANCE'))) > 0);
+  let source = debtors;
+  let sourceTier = 'debtors';
+  if (!source.length) {
+    source = ledgers.filter((l) =>
+      Math.abs(parseAmount(readField(l, 'CLOSINGBALANCE'))) > 0
+      && isNotObviousNonDebtor(l),
+    );
+    if (source.length) sourceTier = 'non-zero-balance';
+  }
+  if (!source.length) {
+    source = ledgers.filter(isNotObviousNonDebtor);
+    if (source.length) sourceTier = 'non-obvious-non-debtor';
+  }
 
   const window = build12MonthWindow(now);
   const customers = source.map((ledger, index) =>
@@ -527,11 +563,18 @@ export function transformTallyFull(bundle, options = {}) {
     })
   );
 
-  const parents = new Set();
+  // Per-parent counts so the UI can show "Sundry Debtors (75), Bank Accounts
+  // (42), ..." — makes it obvious when the user's Tally uses a non-standard
+  // group name.
+  const parentCounts = {};
   for (const l of ledgers) {
-    const p = readField(l, 'PARENT');
-    if (p) parents.add(p);
+    const p = readField(l, 'PARENT') || '(no parent)';
+    parentCounts[p] = (parentCounts[p] || 0) + 1;
   }
+  const parentsSeen = Object.entries(parentCounts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 20)
+    .map(([name, n]) => `${name} (${n})`);
 
   return {
     customers,
@@ -549,7 +592,8 @@ export function transformTallyFull(bundle, options = {}) {
     diagnostics: {
       filterMatched: debtors.length > 0,
       usedFallback: debtors.length === 0 && source.length > 0,
-      parentsSeen: Array.from(parents).slice(0, 20),
+      sourceTier,
+      parentsSeen,
       coverage: {
         ledgers: ledgers.length,
         salesVouchers: salesVouchers.length,
@@ -566,24 +610,38 @@ export function transformTallyLedgers(rawTree) {
   const ledgers = extractLedgers(rawTree);
   const debtors = ledgers.filter(isSundryDebtor);
 
-  // Fallback — if no ledger has a recognizable Sundry Debtor parent (common
-  // when Tally returns name-only responses or the group is renamed), keep
-  // ledgers that have a non-zero closing balance. They're almost certainly
-  // the accounts we care about; the user can refine later.
-  const source = debtors.length > 0
-    ? debtors
-    : ledgers.filter(l => Math.abs(parseAmount(readField(l, 'CLOSINGBALANCE'))) > 0);
+  // Three-tier fallback: prefer real debtors → any non-zero-balance ledger
+  // that isn't obviously a non-debtor (bank/tax/P&L) → finally any ledger
+  // whose parent looks customer-ish. At least one tier should find something
+  // in a real Tally feed.
+  let source = debtors;
+  let sourceTier = 'debtors';
+  if (!source.length) {
+    source = ledgers.filter((l) =>
+      Math.abs(parseAmount(readField(l, 'CLOSINGBALANCE'))) > 0
+      && isNotObviousNonDebtor(l),
+    );
+    if (source.length) sourceTier = 'non-zero-balance';
+  }
+  if (!source.length) {
+    source = ledgers.filter(isNotObviousNonDebtor);
+    if (source.length) sourceTier = 'non-obvious-non-debtor';
+  }
 
   const customers = source.map(buildCustomer);
 
-  // Unique parent groups found in the feed — useful diagnostic so the UI can
-  // tell the user WHY their filter didn't match (e.g. group is "Trade
-  // Debtors" instead of "Sundry Debtors").
-  const parents = new Set();
+  // Count every parent group so the UI can show "75 in Sundry Debtors, 42 in
+  // Bank Accounts, 18 in Expenses..." — tells the user exactly why the
+  // filter matched nothing (e.g. their debtors sit under "Trade Debtors").
+  const parentCounts = {};
   for (const l of ledgers) {
-    const p = readField(l, 'PARENT');
-    if (p) parents.add(p);
+    const p = readField(l, 'PARENT') || '(no parent)';
+    parentCounts[p] = (parentCounts[p] || 0) + 1;
   }
+  const parentsSeen = Object.entries(parentCounts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 20)
+    .map(([name, n]) => `${name} (${n})`);
 
   // Build a richer sample so we can diagnose attribute-vs-element differences.
   let sampleKeys = [];
@@ -608,7 +666,8 @@ export function transformTallyLedgers(rawTree) {
     diagnostics: {
       filterMatched: debtors.length > 0,
       usedFallback: debtors.length === 0 && source.length > 0,
-      parentsSeen: Array.from(parents).slice(0, 20),
+      sourceTier,
+      parentsSeen,
       sampleKeys,
       sampleLedger: ledgers[0]
         ? {
