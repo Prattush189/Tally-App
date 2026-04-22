@@ -11,9 +11,30 @@ import {
 } from './mockData.js';
 
 function ctx(overrides = {}) {
+  const customers = overrides.customers || defaultCustomers;
+  // When customers come from real Tally data (via overrides), derive the
+  // category universe from them instead of using the mock fixture. Without
+  // this, getGrowth / getOpportunities iterate over 'Electronics, Stationery,
+  // ...' while customer.purchasedCategories carry real Tally stock-group
+  // names → every intersection is empty → both pages render 0 across the
+  // board. Demo accounts still fall back to DEFAULT_CATEGORIES so the
+  // pre-populated experience is unchanged.
+  let CATEGORIES = overrides.CATEGORIES;
+  if (!CATEGORIES) {
+    if (overrides.customers) {
+      const seen = new Set();
+      for (const c of customers) {
+        (c.purchasedCategories || []).forEach((k) => seen.add(k));
+        (c.missedCategories || []).forEach((k) => seen.add(k));
+      }
+      CATEGORIES = seen.size ? Array.from(seen) : DEFAULT_CATEGORIES;
+    } else {
+      CATEGORIES = DEFAULT_CATEGORIES;
+    }
+  }
   return {
-    customers: overrides.customers || defaultCustomers,
-    CATEGORIES: overrides.CATEGORIES || DEFAULT_CATEGORIES,
+    customers,
+    CATEGORIES,
     revenueTrends: overrides.revenueTrends || defaultRevenueTrends,
   };
 }
