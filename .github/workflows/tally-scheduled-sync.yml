@@ -75,11 +75,14 @@ jobs:
           TENANT_KEY: ${{ github.event.inputs.tenant_key || 'default' }}
         run: node sync.mjs
 
-      - name: Upload Playwright trace on failure
+      - name: Upload diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-trace-${{ github.run_id }}
-          path: tools/tally-sync-local/trace-*.zip
+          name: tally-sync-diagnostics-${{ github.run_id }}
+          path: |
+            tools/tally-sync-local/page-*.html
+            tools/tally-sync-local/page-*.png
+            tools/tally-sync-local/trace-*.zip
           if-no-files-found: ignore
           retention-days: 7
