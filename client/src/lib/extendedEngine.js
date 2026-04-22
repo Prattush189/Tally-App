@@ -17,8 +17,69 @@ export function getMap() {
   return { states: generateMapAnalytics(), totalStates: 18 };
 }
 
-export function getToyCategories() {
-  return { categories: generateToyCategoryScores() };
+export function getToyCategories(overrides) {
+  const customers = pickCustomers(overrides);
+  const isReal = overrides && overrides.customers;
+  // If we're on demo data, the fixture categories are the right answer.
+  if (!isReal) return { categories: generateToyCategoryScores(), source: 'demo' };
+
+  // Derive categories directly from Tally stock items (via purchasedCategories
+  // on each customer, which the transformer populated from sale voucher
+  // inventory line items). This is the ACTUAL taxonomy from the user's Tally
+  // file — not the hardcoded toy fixtures we ship for the demo account.
+  const agg = new Map(); // categoryName -> { customers: Set, salesTotal }
+  for (const c of customers) {
+    const cats = c.purchasedCategories || [];
+    const monthly = (c.invoiceHistory || []).reduce((s, m) => s + (m.value || 0), 0);
+    const perCatShare = cats.length ? monthly / cats.length : 0;
+    for (const name of cats) {
+      const e = agg.get(name) || { name, customerIds: new Set(), totalSales: 0 };
+      e.customerIds.add(c.id || c.name);
+      e.totalSales += perCatShare;
+      agg.set(name, e);
+    }
+  }
+
+  if (!agg.size) {
+    // User has Tally data but either no stock items / sale vouchers have
+    // been synced yet, or no customer has any purchasedCategories on file.
+    // The UI needs a clear empty state — don't lie with fake toy names.
+    return {
+      categories: [],
+      source: 'tally-empty',
+      note: 'No category data yet — syncing sales vouchers + stock items will populate this.',
+    };
+  }
+
+  const totalCustomers = customers.length || 1;
+  const categories = Array.from(agg.values())
+    .map((e, i) => {
+      const dealerAdoption = Math.round((e.customerIds.size / totalCustomers) * 100);
+      // Scores derived from what we actually know. avgPrice / margin / returnRate
+      // need line-item detail we don't have, so we leave them at 0 and mark
+      // the data source so UI can hide those columns when source='tally'.
+      const healthScore = Math.min(100, Math.max(0, Math.round(40 + dealerAdoption * 0.6)));
+      return {
+        id: i + 1,
+        name: e.name,
+        avgPrice: 0,
+        margin: 0,
+        seasonality: 'unknown',
+        peakMonths: [],
+        totalSales: Math.round(e.totalSales),
+        dealerAdoption,
+        returnRate: 0,
+        growthRate: 0,
+        competitiveIndex: 50,
+        demandScore: healthScore,
+        healthScore,
+        monthlyData: [],
+        recommendation: healthScore > 70 ? 'Expand' : healthScore > 45 ? 'Maintain' : 'Review',
+      };
+    })
+    .sort((a, b) => b.dealerAdoption - a.dealerAdoption);
+
+  return { categories, source: 'tally' };
 }
 
 export function getForecast() {
