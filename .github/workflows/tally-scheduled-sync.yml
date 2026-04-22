@@ -59,18 +59,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: tools/tally-sync-local/package-lock.json
 
       - name: Install deps
-        # package-lock.json may or may not be committed. If not, fall back to
-        # npm install. Playwright's postinstall pulls Chromium automatically.
-        run: |
-          if [ -f package-lock.json ]; then
-            npm ci
-          else
-            npm install --no-audit --no-fund
-          fi
+        # No lockfile committed — Playwright's postinstall script will fetch
+        # Chromium (~170 MB) on every run. Acceptable at hourly cadence; if
+        # we ever care about CI speed, commit a lockfile + re-enable the
+        # setup-node npm cache (cache: 'npm', cache-dependency-path).
+        run: npm install --no-audit --no-fund
 
       - name: Run sync
         env:
