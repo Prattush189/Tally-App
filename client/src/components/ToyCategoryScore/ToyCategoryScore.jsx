@@ -11,37 +11,23 @@ export default function ToyCategoryScore() {
   const { data, loading } = useExtended('toy-categories');
   if (loading || !data) return <LoadingSpinner />;
 
-  // Empty state — the user is on real Tally data but either stock items
-  // or sale vouchers haven't synced yet, so we have no categories to score.
-  // Showing fake toy category names would be misleading; render an explainer.
-  if (!data.categories.length) {
-    return (
-      <div className="space-y-6">
-        <SectionHeader icon={Star} title="Toy Category Scores" subtitle="Category-level demand scoring from your Tally stock master" />
-        <div className="glass-card p-6 border-l-4 border-amber-500">
-          <div className="flex items-start gap-3">
-            <AlertTriangle size={22} className="text-amber-400 flex-shrink-0 mt-0.5" />
-            <div className="space-y-2">
-              <p className="text-sm font-semibold text-white">No category data yet from Tally</p>
-              <p className="text-xs text-gray-400">
-                {data.note || 'Categories are derived from stock items + sale voucher line items in your Tally file. Sync stockItems and salesVouchers to populate this view.'}
-              </p>
-              <p className="text-xs text-gray-500">
-                Go to <span className="text-indigo-300">Tally Sync</span> → click <b>Sync Now</b>. Once sales vouchers come back without errors, the categories your customers actually buy will appear here.
-              </p>
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   const sorted = [...data.categories].sort((a, b) => b.healthScore - a.healthScore);
+  const isSample = data.source === 'tally-empty';
   const recColors = { Expand: '#22c55e', Maintain: '#f59e0b', Review: '#ef4444' };
 
   return (
     <div className="space-y-6">
       <SectionHeader icon={Star} title="Toy Category Scores" subtitle="Category-level demand scoring, margin analysis & seasonal intelligence" />
+
+      {isSample && (
+        <div className="glass-card p-3 border-l-4 border-amber-500 flex items-start gap-3">
+          <AlertTriangle size={16} className="text-amber-400 flex-shrink-0 mt-0.5" />
+          <div className="text-xs text-gray-300">
+            <span className="font-semibold text-amber-300">Sample categories shown.</span>{' '}
+            {data.note || 'Once Tally sales vouchers sync cleanly, this view will switch to the categories your customers actually buy.'}
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <MetricCard icon={Star} label="Top Category" value={sorted[0]?.name} sub={`Score: ${sorted[0]?.healthScore}`} color="emerald" />

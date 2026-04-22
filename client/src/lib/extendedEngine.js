@@ -41,13 +41,15 @@ export function getToyCategories(overrides) {
   }
 
   if (!agg.size) {
-    // User has Tally data but either no stock items / sale vouchers have
-    // been synced yet, or no customer has any purchasedCategories on file.
-    // The UI needs a clear empty state — don't lie with fake toy names.
+    // User has Tally ledgers but no per-customer purchasedCategories
+    // (sales vouchers haven't synced cleanly yet). Fall back to the demo
+    // fixture so the page isn't blank + stays consistent with the Forecast
+    // Summary (which also uses the fixture). UI shows a 'sample categories'
+    // banner so it's clear these aren't the user's real taxonomy yet.
     return {
-      categories: [],
+      categories: generateToyCategoryScores(),
       source: 'tally-empty',
-      note: 'No category data yet — syncing sales vouchers + stock items will populate this.',
+      note: 'Sample categories shown — once Tally sales vouchers sync cleanly, this view switches to the categories your customers actually buy.',
     };
   }
 
