@@ -101,10 +101,11 @@ async function runSync(btn) {
   const tallyCfg = { company: cfg.company || '', fromDate: '', toDate: '' };
   const allJobs = [
     { key: 'ledgers', label: 'ledgers', xml: Q.sundryDebtorsRequest(tallyCfg) },
-    { key: 'salesVouchers', label: 'sales', xml: Q.salesVouchersRequest(tallyCfg) },
-    { key: 'receiptVouchers', label: 'receipts', xml: Q.receiptVouchersRequest(tallyCfg) },
+    { key: 'accountingGroups', label: 'accounting groups', xml: Q.accountingGroupsRequest(tallyCfg) },
     { key: 'stockItems', label: 'stock items', xml: Q.stockItemsRequest(tallyCfg) },
     { key: 'stockGroups', label: 'stock groups', xml: Q.stockGroupsRequest(tallyCfg) },
+    { key: 'salesVouchers', label: 'sales', xml: Q.salesVouchersRequest(tallyCfg) },
+    { key: 'receiptVouchers', label: 'receipts', xml: Q.receiptVouchersRequest(tallyCfg) },
   ];
 
   // Check the stored snapshot so we can skip collections synced recently

@@ -22,7 +22,7 @@ import 'dotenv/config';
 import { chromium } from 'playwright';
 import { XMLParser } from 'fast-xml-parser';
 import {
-  sundryDebtorsRequest, salesVouchersRequest, receiptVouchersRequest,
+  sundryDebtorsRequest, salesVouchersRequest, receiptVouchersRequest, accountingGroupsRequest,
   stockItemsRequest, stockGroupsRequest, XML_ARRAY_NODES, countNode,
 } from './queries.mjs';
 
@@ -179,10 +179,11 @@ async function main() {
 
     const jobs = [
       { key: 'ledgers', xml: sundryDebtorsRequest(config), node: 'LEDGER' },
-      { key: 'salesVouchers', xml: salesVouchersRequest(config), node: 'VOUCHER' },
-      { key: 'receiptVouchers', xml: receiptVouchersRequest(config), node: 'VOUCHER' },
+      { key: 'accountingGroups', xml: accountingGroupsRequest(config), node: 'GROUP' },
       { key: 'stockItems', xml: stockItemsRequest(config), node: 'STOCKITEM' },
       { key: 'stockGroups', xml: stockGroupsRequest(config), node: 'STOCKGROUP' },
+      { key: 'salesVouchers', xml: salesVouchersRequest(config), node: 'VOUCHER' },
+      { key: 'receiptVouchers', xml: receiptVouchersRequest(config), node: 'VOUCHER' },
     ];
 
     const data = {};

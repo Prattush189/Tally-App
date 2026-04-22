@@ -126,11 +126,32 @@
 </ENVELOPE>`;
   }
 
+  function accountingGroupsRequest(cfg) {
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>B2BIntelGroups</ID></HEADER>
+  <BODY><DESC>
+    <STATICVARIABLES>
+      <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      ${companyFilter(cfg.company)}
+    </STATICVARIABLES>
+    <TDL><TDLMESSAGE>
+      <COLLECTION NAME="B2BIntelGroups" ISMODIFY="No">
+        <TYPE>Group</TYPE>
+        <NATIVEMETHOD>Name</NATIVEMETHOD>
+        <NATIVEMETHOD>Parent</NATIVEMETHOD>
+      </COLLECTION>
+    </TDLMESSAGE></TDL>
+  </DESC></BODY>
+</ENVELOPE>`;
+  }
+
   window.__TALLY_QUERIES = {
     sundryDebtorsRequest,
     salesVouchersRequest,
     receiptVouchersRequest,
     stockItemsRequest,
     stockGroupsRequest,
+    accountingGroupsRequest,
   };
 })();

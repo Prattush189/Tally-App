@@ -103,18 +103,41 @@ function extractAllByKey(tree, nodeName) {
   return acc;
 }
 
-function isSundryDebtor(ledger) {
-  const parent = readField(ledger, 'PARENT').toLowerCase();
-  if (!parent) return false;
-  return parent.includes('sundry debtor')
-    || parent.includes('trade debtor')
-    || parent.includes('sundry debtors')
-    || parent === 'debtors'
-    || parent.includes('accounts receivable')
-    || parent.includes('account receivable')
-    || parent.includes('customer')
-    || parent.includes('client')
-    || parent.includes('receivable');
+// Returns true if `name` is one of the "this is a customer-ish bucket"
+// accounting groups. Matches Sundry Debtors, Trade Debtors, Customer /
+// Client / Receivable variants. All comparisons lowercased by caller.
+function isDebtorGroupName(name) {
+  if (!name) return false;
+  return name.includes('sundry debtor')
+    || name.includes('trade debtor')
+    || name === 'debtors'
+    || name.includes('accounts receivable')
+    || name.includes('account receivable')
+    || name.includes('receivable')
+    || name.includes('customer')
+    || name.includes('client');
+}
+
+// Walks a ledger's parent chain through the accounting groups map and
+// returns true if any ancestor is a debtor group. Handles the common
+// distributor setup where dealers sit under sub-groups like NEW DELHI /
+// HYDERABAD / BANGALORE that themselves sit under Sundry Debtors.
+//
+// groupParentMap: Map<lowerCaseGroupName, lowerCaseParentGroupName>.
+// Empty map → behaves identically to the old single-hop check.
+function isSundryDebtor(ledger, groupParentMap) {
+  let curr = readField(ledger, 'PARENT').toLowerCase();
+  if (!curr) return false;
+  const visited = new Set();
+  let hops = 0;
+  while (curr && !visited.has(curr) && hops < 10) {
+    if (isDebtorGroupName(curr)) return true;
+    visited.add(curr);
+    const next = groupParentMap ? groupParentMap.get(curr) : '';
+    curr = (next || '').toLowerCase();
+    hops += 1;
+  }
+  return false;
 }
 
 // Ledger groups we never want to treat as customers even in fallback mode.
@@ -492,10 +515,22 @@ function buildFullCustomer({
 export function transformTallyFull(bundle, options = {}) {
   const now = options.now instanceof Date ? options.now : new Date();
   const ledgerTree = bundle?.ledgers ?? null;
+  const accountingGroupsTree = bundle?.accountingGroups ?? null;
   const salesTree = bundle?.salesVouchers ?? null;
   const receiptsTree = bundle?.receiptVouchers ?? null;
   const stockItemsTree = bundle?.stockItems ?? null;
   const stockGroupsTree = bundle?.stockGroups ?? null;
+
+  // Build a lowercase name→parent map from the Group master, so every
+  // ledger can walk its ancestry and find "Sundry Debtors" even when the
+  // direct parent is a city/region sub-group. Keys + values both
+  // lowercased so the walker can compare without extra normalization.
+  const groupParentMap = new Map();
+  for (const g of extractAllByKey(accountingGroupsTree, 'GROUP')) {
+    const n = readField(g, 'NAME').toLowerCase();
+    const p = readField(g, 'PARENT').toLowerCase();
+    if (n) groupParentMap.set(n, p);
+  }
 
   const ledgers = extractLedgers(ledgerTree);
   // The edge function now pulls Day Book for both sales and receipts (built-in
@@ -562,8 +597,9 @@ export function transformTallyFull(bundle, options = {}) {
 
   // Same three-tier debtor selection as transformTallyLedgers. See that
   // function for the rationale — NON_DEBTOR_PARENT_PATTERNS up top is the
-  // filter shared between them.
-  const debtors = ledgers.filter(isSundryDebtor);
+  // filter shared between them. groupParentMap lets the filter walk up
+  // the ancestor chain so ledgers under city sub-groups still match.
+  const debtors = ledgers.filter((l) => isSundryDebtor(l, groupParentMap));
   let source = debtors;
   let sourceTier = 'debtors';
   if (!source.length) {
@@ -631,7 +667,10 @@ export function transformTallyFull(bundle, options = {}) {
 
 export function transformTallyLedgers(rawTree) {
   const ledgers = extractLedgers(rawTree);
-  const debtors = ledgers.filter(isSundryDebtor);
+  // Lean-mode transformer doesn't have group master data, so the ancestor
+  // walk degrades to the single-hop parent check. Fine as a fallback; the
+  // full transformer passes a populated groupParentMap.
+  const debtors = ledgers.filter((l) => isSundryDebtor(l, new Map()));
 
   // Three-tier fallback: prefer real debtors → any non-zero-balance ledger
   // that isn't obviously a non-debtor (bank/tax/P&L) → finally any ledger

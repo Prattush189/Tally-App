@@ -41,7 +41,7 @@ const parser = new XMLParser({
   attributeNamePrefix: '_',
   textNodeName: '_text',
   isArray: (name: string) => [
-    'LEDGER', 'VOUCHER', 'STOCKITEM', 'STOCKGROUP', 'BILL', 'BODY', 'COLLECTION',
+    'LEDGER', 'VOUCHER', 'STOCKITEM', 'STOCKGROUP', 'GROUP', 'BILL', 'BODY', 'COLLECTION',
     'COMPANY',
     'ALLINVENTORYENTRIES.LIST', 'INVENTORYENTRIES.LIST',
     'ALLLEDGERENTRIES.LIST', 'LEDGERENTRIES.LIST',
@@ -271,6 +271,31 @@ function stockItemsRequest(cfg: { company: string }) {
 </ENVELOPE>`;
 }
 
+// Accounting Group masters. Distinct from Stock Groups — these are the
+// hierarchy that organises ledgers (Sundry Debtors > NEW DELHI > Dealer-X).
+// We need the Name→Parent map so the transformer can walk each ledger's
+// ancestry and detect "is this ledger somewhere under Sundry Debtors?",
+// even when the direct parent is a city/region sub-group.
+function accountingGroupsRequest(cfg: { company: string }) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>B2BIntelGroups</ID></HEADER>
+  <BODY><DESC>
+    <STATICVARIABLES>
+      <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      ${companyFilter(cfg.company)}
+    </STATICVARIABLES>
+    <TDL><TDLMESSAGE>
+      <COLLECTION NAME="B2BIntelGroups" ISMODIFY="No">
+        <TYPE>Group</TYPE>
+        <NATIVEMETHOD>Name</NATIVEMETHOD>
+        <NATIVEMETHOD>Parent</NATIVEMETHOD>
+      </COLLECTION>
+    </TDLMESSAGE></TDL>
+  </DESC></BODY>
+</ENVELOPE>`;
+}
+
 function stockGroupsRequest(cfg: { company: string }) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <ENVELOPE>
@@ -421,6 +446,7 @@ async function mergeSnapshotFromBody(
   if (body.rawXml && typeof body.rawXml === 'object') {
     const nodePerKey: Record<string, string> = {
       ledgers: 'LEDGER',
+      accountingGroups: 'GROUP',
       salesVouchers: 'VOUCHER',
       receiptVouchers: 'VOUCHER',
       stockItems: 'STOCKITEM',
@@ -942,6 +968,10 @@ Deno.serve(async (req) => {
       // before erroring, chewing the wall-clock budget and forcing stocks
       // to abort on retries.
       { key: 'ledgers' as const, xml: sundryDebtorsRequest(queryCfg), node: 'LEDGER', timeoutMs: 65000 },
+      // accountingGroups is small (~500 rows for a typical distributor),
+      // cheap to fetch, and required for the transformer's ancestor-chain
+      // walk when ledgers are sub-grouped by city/region under Sundry Debtors.
+      { key: 'accountingGroups' as const, xml: accountingGroupsRequest(queryCfg), node: 'GROUP', timeoutMs: 15000 },
       { key: 'stockItems' as const, xml: stockItemsRequest(queryCfg), node: 'STOCKITEM', timeoutMs: 20000 },
       { key: 'stockGroups' as const, xml: stockGroupsRequest(queryCfg), node: 'STOCKGROUP', timeoutMs: 12000 },
       { key: 'salesVouchers' as const, xml: salesVouchersRequest(queryCfg), node: 'VOUCHER', timeoutMs: 25000 },

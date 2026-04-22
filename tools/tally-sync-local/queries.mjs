@@ -126,8 +126,28 @@ export function stockGroupsRequest(cfg) {
 </ENVELOPE>`;
 }
 
+export function accountingGroupsRequest(cfg) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>B2BIntelGroups</ID></HEADER>
+  <BODY><DESC>
+    <STATICVARIABLES>
+      <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      ${companyFilter(cfg.company)}
+    </STATICVARIABLES>
+    <TDL><TDLMESSAGE>
+      <COLLECTION NAME="B2BIntelGroups" ISMODIFY="No">
+        <TYPE>Group</TYPE>
+        <NATIVEMETHOD>Name</NATIVEMETHOD>
+        <NATIVEMETHOD>Parent</NATIVEMETHOD>
+      </COLLECTION>
+    </TDLMESSAGE></TDL>
+  </DESC></BODY>
+</ENVELOPE>`;
+}
+
 export const XML_ARRAY_NODES = new Set([
-  'LEDGER', 'VOUCHER', 'STOCKITEM', 'STOCKGROUP', 'BILL', 'BODY', 'COLLECTION',
+  'LEDGER', 'VOUCHER', 'STOCKITEM', 'STOCKGROUP', 'GROUP', 'BILL', 'BODY', 'COLLECTION',
   'ALLINVENTORYENTRIES.LIST', 'INVENTORYENTRIES.LIST',
   'ALLLEDGERENTRIES.LIST', 'LEDGERENTRIES.LIST',
   'BILLALLOCATIONS.LIST', 'BATCHALLOCATIONS.LIST',
