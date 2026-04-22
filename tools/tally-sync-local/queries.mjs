@@ -79,9 +79,6 @@ export function salesVouchersRequest(cfg) {
             <NATIVEMETHOD>PartyLedgerName</NATIVEMETHOD>
             <NATIVEMETHOD>Amount</NATIVEMETHOD>
             <NATIVEMETHOD>Reference</NATIVEMETHOD>
-            <NATIVEMETHOD>Narration</NATIVEMETHOD>
-            <NATIVEMETHOD>AllInventoryEntries.List</NATIVEMETHOD>
-            <NATIVEMETHOD>LedgerEntries.List</NATIVEMETHOD>
           </COLLECTION>
         </TDLMESSAGE>
         <SYSTEM TYPE="Formulae" NAME="IsSalesVoucher">$$IsSales:$VoucherTypeName</SYSTEM>
@@ -113,8 +110,6 @@ export function receiptVouchersRequest(cfg) {
             <NATIVEMETHOD>PartyLedgerName</NATIVEMETHOD>
             <NATIVEMETHOD>Amount</NATIVEMETHOD>
             <NATIVEMETHOD>Reference</NATIVEMETHOD>
-            <NATIVEMETHOD>Narration</NATIVEMETHOD>
-            <NATIVEMETHOD>AllLedgerEntries.List</NATIVEMETHOD>
           </COLLECTION>
         </TDLMESSAGE>
         <SYSTEM TYPE="Formulae" NAME="IsReceiptVoucher">$$IsReceipt:$VoucherTypeName</SYSTEM>

@@ -222,8 +222,6 @@ function salesVouchersRequest(cfg: { company: string; fromDate: string; toDate: 
             <NATIVEMETHOD>VoucherTypeName</NATIVEMETHOD>
             <NATIVEMETHOD>PartyLedgerName</NATIVEMETHOD>
             <NATIVEMETHOD>Amount</NATIVEMETHOD>
-            <NATIVEMETHOD>AllLedgerEntries</NATIVEMETHOD>
-            <NATIVEMETHOD>AllInventoryEntries</NATIVEMETHOD>
           </COLLECTION>
           <SYSTEM TYPE="Formulae" NAME="IsSalesVoucher">$$IsSales:$VoucherTypeName</SYSTEM>
         </TDLMESSAGE>
@@ -261,8 +259,6 @@ function receiptVouchersRequest(cfg: { company: string; fromDate: string; toDate
             <NATIVEMETHOD>VoucherTypeName</NATIVEMETHOD>
             <NATIVEMETHOD>PartyLedgerName</NATIVEMETHOD>
             <NATIVEMETHOD>Amount</NATIVEMETHOD>
-            <NATIVEMETHOD>AllLedgerEntries</NATIVEMETHOD>
-            <NATIVEMETHOD>BillAllocations</NATIVEMETHOD>
           </COLLECTION>
           <SYSTEM TYPE="Formulae" NAME="IsReceiptVoucher">$$IsReceipt:$VoucherTypeName</SYSTEM>
         </TDLMESSAGE>
