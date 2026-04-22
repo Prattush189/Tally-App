@@ -15,6 +15,18 @@
 const TALLY_URL = 'http://103.76.213.243:9007/';
 const STORAGE_KEY = 'tallyDashboardSyncConfig';
 
+// Per-collection freshness window. Mirrors COLLECTION_TTL_MS in the edge
+// function — when we read get-snapshot back, we skip any collection synced
+// more recently than this (and with no error). Master data (ledgers, stock)
+// rarely changes, so 30 min; vouchers turn over daily, 10 min.
+const COLLECTION_TTL_MS = {
+  ledgers: 30 * 60_000,
+  salesVouchers: 10 * 60_000,
+  receiptVouchers: 10 * 60_000,
+  stockItems: 30 * 60_000,
+  stockGroups: 30 * 60_000,
+};
+
 const Q = window.__TALLY_QUERIES;
 
 function loadConfig() {
@@ -87,13 +99,58 @@ async function runSync(btn) {
   }
 
   const tallyCfg = { company: cfg.company || '', fromDate: '', toDate: '' };
-  const jobs = [
+  const allJobs = [
     { key: 'ledgers', label: 'ledgers', xml: Q.sundryDebtorsRequest(tallyCfg) },
     { key: 'salesVouchers', label: 'sales', xml: Q.salesVouchersRequest(tallyCfg) },
     { key: 'receiptVouchers', label: 'receipts', xml: Q.receiptVouchersRequest(tallyCfg) },
     { key: 'stockItems', label: 'stock items', xml: Q.stockItemsRequest(tallyCfg) },
     { key: 'stockGroups', label: 'stock groups', xml: Q.stockGroupsRequest(tallyCfg) },
   ];
+
+  // Check the stored snapshot so we can skip collections synced recently
+  // with no error. Force-resync if the auto-sync path called us (assumes
+  // fresh Tally activation after a manual click).
+  btn.textContent = '⏳ Checking what to sync…';
+  const endpoint = `${cfg.supabaseUrl.replace(/\/+$/, '')}/functions/v1/tally`;
+  const tenantKey = cfg.tenantKey || 'default';
+  let collectionMeta = {};
+  try {
+    const statusRes = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': cfg.supabaseAnonKey,
+        'Authorization': `Bearer ${cfg.supabaseAnonKey}`,
+      },
+      body: JSON.stringify({ action: 'get-snapshot', tenantKey }),
+    });
+    const statusBody = await statusRes.json();
+    collectionMeta = statusBody?.collectionMeta || {};
+  } catch { /* non-fatal — just won't skip anything */ }
+
+  const jobs = [];
+  const skipped = {};
+  const now = Date.now();
+  for (const job of allJobs) {
+    const meta = collectionMeta[job.key];
+    if (meta?.updated_at && !meta.error) {
+      const ageMs = now - new Date(meta.updated_at).getTime();
+      const ttl = COLLECTION_TTL_MS[job.key] ?? 30 * 60_000;
+      if (ageMs < ttl) {
+        skipped[job.key] = Math.round(ageMs / 60_000);
+        continue;
+      }
+    }
+    jobs.push(job);
+  }
+
+  if (!jobs.length) {
+    toast(`Everything is fresh — nothing to sync. (Skipped: ${Object.entries(skipped).map(([k, m]) => `${k} ${m}m old`).join(', ')})`, 'info');
+    btn.disabled = false;
+    delete btn.dataset.busy;
+    btn.textContent = '↻ Sync to Dashboard';
+    return;
+  }
 
   const rawXml = {};
   const errors = {};
@@ -110,11 +167,9 @@ async function runSync(btn) {
   }
 
   btn.textContent = '⏳ Uploading to dashboard…';
-  const tenantKey = cfg.tenantKey || 'default';
-  const ingestUrl = `${cfg.supabaseUrl.replace(/\/+$/, '')}/functions/v1/tally`;
   let result;
   try {
-    const res = await fetch(ingestUrl, {
+    const res = await fetch(endpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -148,7 +203,8 @@ async function runSync(btn) {
     .map(([k, v]) => `${v} ${k}`)
     .join(' · ') || 'snapshot stored';
   const errCount = Object.keys(result?.errors || {}).length;
-  toast(`✓ Synced · ${parts}${errCount ? ` · ${errCount} collection error(s)` : ''}`, errCount ? 'warn' : 'ok');
+  const skipNote = Object.keys(skipped).length ? ` · kept ${Object.keys(skipped).length} fresh` : '';
+  toast(`✓ Synced · ${parts}${skipNote}${errCount ? ` · ${errCount} collection error(s)` : ''}`, errCount ? 'warn' : 'ok');
 
   btn.disabled = false;
   delete btn.dataset.busy;

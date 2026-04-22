@@ -383,6 +383,133 @@ function sundryDebtorsRequest(cfg: { company: string; fromDate: string; toDate: 
 </ENVELOPE>`;
 }
 
+// Per-collection freshness window for the sync-full skipFresh flag. Vouchers
+// turn over fast (new invoices daily), so a tight 10-min TTL. Master data
+// (ledgers, stock items, stock groups) changes rarely — 30 min keeps the
+// tunnel from re-pulling MBs of XML that didn't change.
+const COLLECTION_TTL_MS: Record<string, number> = {
+  ledgers: 30 * 60_000,
+  salesVouchers: 10 * 60_000,
+  receiptVouchers: 10 * 60_000,
+  stockItems: 30 * 60_000,
+  stockGroups: 30 * 60_000,
+};
+
+// Merge a new sync result into the existing tally_snapshots row. Idempotent
+// — collections not included in `incoming.data` retain their prior values
+// (which is how "next sync continues from where last one left off" works:
+// a partial failure ingest only overwrites the collections it has fresh
+// data for, not the entire row).
+async function mergeSnapshotIntoTable(
+  db: ReturnType<typeof createClient>,
+  tenantKey: string,
+  incoming: {
+    data?: Record<string, unknown>;
+    counts?: Record<string, number>;
+    errors?: Record<string, string>;
+    source?: string;
+  },
+) {
+  const { data: existing } = await db
+    .from('tally_snapshots')
+    .select('data, counts, errors, collection_meta')
+    .eq('tenant_key', tenantKey)
+    .maybeSingle();
+
+  const data = { ...(existing?.data as Record<string, unknown> || {}) };
+  const counts = { ...(existing?.counts as Record<string, number> || {}) };
+  const errors = { ...(existing?.errors as Record<string, string> || {}) };
+  const meta = { ...(existing?.collection_meta as Record<string, unknown> || {}) };
+  const nowIso = new Date().toISOString();
+
+  if (incoming.data) {
+    for (const [key, value] of Object.entries(incoming.data)) {
+      if (value == null) continue; // skip explicit nulls (failed collection)
+      data[key] = value;
+      if (incoming.counts && key in incoming.counts) counts[key] = incoming.counts[key];
+      delete errors[key]; // success clears prior error
+      meta[key] = {
+        updated_at: nowIso,
+        count: (incoming.counts?.[key]) ?? counts[key] ?? 0,
+        error: null,
+      };
+    }
+  }
+
+  if (incoming.errors) {
+    for (const [key, err] of Object.entries(incoming.errors)) {
+      if (!err) continue;
+      errors[key] = err;
+      meta[key] = {
+        updated_at: (meta[key] as Record<string, unknown>)?.updated_at ?? null,
+        count: counts[key] ?? 0,
+        error: err,
+      };
+    }
+  }
+
+  const { error } = await db.from('tally_snapshots').upsert({
+    tenant_key: tenantKey,
+    data,
+    counts,
+    errors,
+    source: incoming.source || 'unknown',
+    collection_meta: meta,
+    updated_at: nowIso,
+  }, { onConflict: 'tenant_key' });
+
+  return { error, data, counts, errors, collectionMeta: meta };
+}
+
+// Wraps mergeSnapshotIntoTable with the ingest-action body parsing (supports
+// both data: {parsed} and rawXml: {stringMap}).
+async function mergeSnapshotFromBody(
+  db: ReturnType<typeof createClient>,
+  tenantKey: string,
+  body: Record<string, unknown>,
+) {
+  let data = body.data as Record<string, unknown> | undefined;
+  const counts: Record<string, number> = (body.counts && typeof body.counts === 'object')
+    ? { ...(body.counts as Record<string, number>) } : {};
+  const errors: Record<string, string> = (body.errors && typeof body.errors === 'object')
+    ? { ...(body.errors as Record<string, string>) } : {};
+
+  if (body.rawXml && typeof body.rawXml === 'object') {
+    const nodePerKey: Record<string, string> = {
+      ledgers: 'LEDGER',
+      salesVouchers: 'VOUCHER',
+      receiptVouchers: 'VOUCHER',
+      stockItems: 'STOCKITEM',
+      stockGroups: 'STOCKGROUP',
+    };
+    const parsed: Record<string, unknown> = {};
+    for (const [key, xml] of Object.entries(body.rawXml as Record<string, unknown>)) {
+      if (typeof xml !== 'string' || !xml) {
+        errors[key] = 'Empty or non-string payload';
+        continue;
+      }
+      try {
+        const node = parser.parse(xml);
+        parsed[key] = node;
+        counts[key] = counts[key] ?? countNode(node, nodePerKey[key] || 'LEDGER');
+      } catch (err) {
+        errors[key] = err instanceof Error ? err.message : String(err);
+      }
+    }
+    data = parsed;
+  }
+
+  if (!data || typeof data !== 'object') {
+    return { error: 'ingest requires a "data" object or "rawXml" string map' };
+  }
+
+  const source = (body.source as string) || 'local-playwright';
+  const { error, counts: outCounts, errors: outErrors, collectionMeta } =
+    await mergeSnapshotIntoTable(db, tenantKey, { data, counts, errors, source });
+  if (error) return { error: `Failed to persist snapshot: ${error.message}` };
+  return { result: { counts: outCounts, errors: outErrors, collectionMeta } };
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
@@ -575,67 +702,19 @@ Deno.serve(async (req) => {
     }
 
     if (action === 'ingest') {
-      // Two shapes accepted:
-      //   1. body.data = { ledgers: {...parsed...}, salesVouchers: {...}, ... }
-      //      (what the Playwright local tool sends — already parsed.)
-      //   2. body.rawXml = { ledgers: '<ENVELOPE>...</ENVELOPE>', ... }
-      //      (what the Chrome extension sends — parsed server-side so the
-      //      extension stays free of XML-parser dependencies.)
-      let data = body.data;
-      let counts = (body.counts && typeof body.counts === 'object') ? { ...body.counts } : {};
-      const errors = (body.errors && typeof body.errors === 'object') ? { ...body.errors } : {};
-      if (body.rawXml && typeof body.rawXml === 'object') {
-        const nodePerKey: Record<string, string> = {
-          ledgers: 'LEDGER',
-          salesVouchers: 'VOUCHER',
-          receiptVouchers: 'VOUCHER',
-          stockItems: 'STOCKITEM',
-          stockGroups: 'STOCKGROUP',
-        };
-        const parsed: Record<string, unknown> = {};
-        for (const [key, xml] of Object.entries(body.rawXml as Record<string, unknown>)) {
-          if (typeof xml !== 'string' || !xml) {
-            errors[key] = 'Empty or non-string payload';
-            continue;
-          }
-          try {
-            const node = parser.parse(xml);
-            parsed[key] = node;
-            counts[key] = counts[key] ?? countNode(node, nodePerKey[key] || 'LEDGER');
-          } catch (err) {
-            errors[key] = err instanceof Error ? err.message : String(err);
-          }
-        }
-        data = parsed;
-      }
-      if (!data || typeof data !== 'object') {
-        return new Response(JSON.stringify({
-          connected: false,
-          error: 'ingest requires a "data" object or "rawXml" string map',
-        }), { status: 400, headers: jsonHeaders });
-      }
-      const source = (body.source as string) || 'local-playwright';
-      const { error } = await db.from('tally_snapshots').upsert({
-        tenant_key: tenantKey,
-        data,
-        counts,
-        errors,
-        source,
-        updated_at: new Date().toISOString(),
-      }, { onConflict: 'tenant_key' });
+      const { result, error } = await mergeSnapshotFromBody(db, tenantKey, body);
       if (error) {
-        return new Response(JSON.stringify({
-          connected: false,
-          error: `Failed to persist snapshot: ${error.message}`,
-        }), { status: 500, headers: jsonHeaders });
+        return new Response(JSON.stringify({ connected: false, error }), {
+          status: 500, headers: jsonHeaders,
+        });
       }
-      return new Response(JSON.stringify({ connected: true, action, tenantKey, counts, errors }), { headers: jsonHeaders });
+      return new Response(JSON.stringify({ connected: true, action, tenantKey, ...result }), { headers: jsonHeaders });
     }
 
     // get-snapshot
     const { data: row, error } = await db
       .from('tally_snapshots')
-      .select('data, counts, errors, source, updated_at')
+      .select('data, counts, errors, source, updated_at, collection_meta')
       .eq('tenant_key', tenantKey)
       .maybeSingle();
     if (error) {
@@ -659,6 +738,7 @@ Deno.serve(async (req) => {
       data: row.data,
       source: row.source,
       updatedAt: row.updated_at,
+      collectionMeta: row.collection_meta || {},
     }), { headers: jsonHeaders });
   }
 
@@ -668,22 +748,53 @@ Deno.serve(async (req) => {
     // once is what makes them drop the whole session. Trade faster wall clock
     // for reliability.
     //
-    // Cumulative deadline of ~130s keeps us under Supabase's 150s function
-    // timeout. If we blow the budget we stop queuing further jobs and return
-    // what we have, with the skipped ones marked as errors.
-    const jobs = [
-      // Per-job timeouts reflect observed response sizes on the hosted tunnel.
-      // Ledger master dump is the heaviest (3000+ rows seen) so it gets the
-      // biggest slice. Vouchers come second; stock masters are small.
-      // 65 + 45 + 35 + 15 + 10 + 4 × 1.5s cooldowns ≈ 176s worst-case, but
-      // the wall-clock deadline below ensures we always return within
-      // Supabase's 150s function limit even if every retry fires.
+    // skipFresh (default true) reads the persisted tally_snapshots row and
+    // skips any collection synced within COLLECTION_TTL_MS that didn't
+    // error. That's how "don't re-sync the same things" + "continue from
+    // where the last run left off" both work: on a healthy refresh only
+    // stale / errored collections hit Tally; after a partial failure the
+    // fresh ones keep their data and the retry budgets go to what actually
+    // needs it.
+    const skipFresh = body.skipFresh !== false;
+    const allJobs = [
       { key: 'ledgers' as const, xml: sundryDebtorsRequest(cfg), node: 'LEDGER', timeoutMs: 65000 },
       { key: 'salesVouchers' as const, xml: salesVouchersRequest(cfg), node: 'VOUCHER', timeoutMs: 45000 },
       { key: 'receiptVouchers' as const, xml: receiptVouchersRequest(cfg), node: 'VOUCHER', timeoutMs: 35000 },
       { key: 'stockItems' as const, xml: stockItemsRequest(cfg), node: 'STOCKITEM', timeoutMs: 15000 },
       { key: 'stockGroups' as const, xml: stockGroupsRequest(cfg), node: 'STOCKGROUP', timeoutMs: 10000 },
     ];
+
+    // Decide which collections to actually fetch. We can only persist +
+    // skip-fresh if Supabase service role env is set; without it we fall
+    // back to the original always-fetch-all behaviour.
+    const dbUrl = Deno.env.get('SUPABASE_URL') || '';
+    const dbRole = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
+    const db = (dbUrl && dbRole) ? createClient(dbUrl, dbRole, { auth: { persistSession: false } }) : null;
+
+    const skipped: Record<string, { reason: string; updatedAt: string }> = {};
+    let jobs = allJobs;
+    let existingMeta: Record<string, { updated_at?: string; error?: string | null }> = {};
+    if (db && skipFresh) {
+      const { data: existing } = await db
+        .from('tally_snapshots')
+        .select('collection_meta')
+        .eq('tenant_key', tenantKey)
+        .maybeSingle();
+      existingMeta = (existing?.collection_meta as typeof existingMeta) || {};
+      const now = Date.now();
+      jobs = allJobs.filter((j) => {
+        const meta = existingMeta[j.key];
+        if (!meta?.updated_at || meta.error) return true;
+        const ageMs = now - new Date(meta.updated_at).getTime();
+        const ttl = COLLECTION_TTL_MS[j.key] ?? 30 * 60_000;
+        if (ageMs < ttl) {
+          skipped[j.key] = { reason: `fresh (${Math.round(ageMs / 60_000)} min old, ttl ${Math.round(ttl / 60_000)} min)`, updatedAt: meta.updated_at };
+          return false;
+        }
+        return true;
+      });
+    }
+
     const deadline = Date.now() + 140000;
     const data: Record<string, unknown> = {};
     const counts: Record<string, number> = {};
@@ -735,12 +846,49 @@ Deno.serve(async (req) => {
         anyConnected = true;
       }
     }
+
+    // Persist into tally_snapshots so the same sync-full call hydrates every
+    // browser + dashboard, not just the tab that ran it. mergeSnapshotIntoTable
+    // is idempotent — null entries (failed collections) are skipped, fresh
+    // errors update meta, succeeded collections overwrite prior data.
+    let mergedResponse: {
+      counts: Record<string, number>;
+      errors: Record<string, string>;
+      data: Record<string, unknown>;
+      collectionMeta: Record<string, unknown>;
+    } | null = null;
+    if (db && (anyConnected || Object.keys(errors).length)) {
+      const { error: mergeErr, counts: mergedCounts, errors: mergedErrors, data: mergedData, collectionMeta } =
+        await mergeSnapshotIntoTable(db, tenantKey, {
+          data,
+          counts,
+          errors,
+          source: 'sync-full',
+        });
+      if (mergeErr) {
+        errors['__persist__'] = `Failed to persist snapshot: ${mergeErr.message}`;
+      } else {
+        mergedResponse = {
+          counts: mergedCounts as Record<string, number>,
+          errors: mergedErrors as Record<string, string>,
+          data: mergedData as Record<string, unknown>,
+          collectionMeta: collectionMeta as Record<string, unknown>,
+        };
+      }
+    }
+
     return new Response(JSON.stringify({
       connected: anyConnected,
       action,
-      counts,
-      data,
-      errors,
+      // Return the MERGED bundle when we could persist, so the browser sees
+      // every collection that exists in the table (fresh + just-synced) —
+      // not just the ones we fetched this invocation.
+      counts: mergedResponse?.counts ?? counts,
+      data: mergedResponse?.data ?? data,
+      errors: mergedResponse?.errors ?? errors,
+      collectionMeta: mergedResponse?.collectionMeta ?? {},
+      skipped,
+      fetched: jobs.map((j) => j.key),
     }), { headers: jsonHeaders });
   }
 
