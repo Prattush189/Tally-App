@@ -498,8 +498,33 @@ export function transformTallyFull(bundle, options = {}) {
   const stockGroupsTree = bundle?.stockGroups ?? null;
 
   const ledgers = extractLedgers(ledgerTree);
-  const salesVouchers = extractCollection(salesTree, 'VOUCHER');
-  const receiptVouchers = extractCollection(receiptsTree, 'VOUCHER');
+  // The edge function now pulls Day Book for both sales and receipts (built-in
+  // Tally report, much more tunnel-friendly than custom TDL). Day Book
+  // contains every voucher type mixed — sales, receipts, payments, journals,
+  // contra, etc. Split client-side by VoucherTypeName. $$IsSales /
+  // $$IsReceipt classify by class so we match on voucher-type names that
+  // contain "sales" / "receipt" as a loose class hint + fall back to the
+  // common literal types users create in Tally.
+  const allVouchers = [
+    ...extractCollection(salesTree, 'VOUCHER'),
+    ...extractCollection(receiptsTree, 'VOUCHER'),
+  ];
+  const seenKeys = new Set();
+  const dedupedVouchers = [];
+  for (const v of allVouchers) {
+    const key = `${readField(v, 'DATE')}|${readField(v, 'VOUCHERNUMBER')}|${readField(v, 'VOUCHERTYPENAME')}`;
+    if (seenKeys.has(key)) continue;
+    seenKeys.add(key);
+    dedupedVouchers.push(v);
+  }
+  const salesVouchers = dedupedVouchers.filter((v) => {
+    const t = readField(v, 'VOUCHERTYPENAME').toLowerCase();
+    return t === 'sales' || t.includes('sales') || t.includes('invoice') || t.includes('tax invoice');
+  });
+  const receiptVouchers = dedupedVouchers.filter((v) => {
+    const t = readField(v, 'VOUCHERTYPENAME').toLowerCase();
+    return t === 'receipt' || t.includes('receipt');
+  });
   const stockItems = extractCollection(stockItemsTree, 'STOCKITEM');
   const stockGroups = extractCollection(stockGroupsTree, 'STOCKGROUP');
 

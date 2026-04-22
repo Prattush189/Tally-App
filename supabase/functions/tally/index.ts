@@ -126,6 +126,34 @@ function reportRequest(reportId: string, company: string) {
 </ENVELOPE>`;
 }
 
+// Built-in Tally report with optional date range. Used for everything
+// except the single-row test ping — it's more tunnel-friendly than custom
+// TDL COLLECTION queries (Tally hits pre-compiled code paths, no TDL
+// compile step, less vulnerable to the tunnel's idle timer).
+function reportWithDates(reportId: string, cfg: { company: string; fromDate: string; toDate: string }) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Data</TYPE><ID>${reportId}</ID></HEADER>
+  <BODY><DESC><STATICVARIABLES>
+    <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+    ${companyFilter(cfg.company)}
+    ${dateFilter(cfg)}
+  </STATICVARIABLES></DESC></BODY>
+</ENVELOPE>`;
+}
+
+function reportWithVoucherDates(reportId: string, cfg: { company: string; fromDate: string; toDate: string }) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Data</TYPE><ID>${reportId}</ID></HEADER>
+  <BODY><DESC><STATICVARIABLES>
+    <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+    ${companyFilter(cfg.company)}
+    ${voucherDateFilter(cfg)}
+  </STATICVARIABLES></DESC></BODY>
+</ENVELOPE>`;
+}
+
 // Walk the parsed Tally XML response and count the most common record types.
 // The response shape varies: ENVELOPE.BODY.DATA.COLLECTION.LEDGER, or nested
 // directly under ENVELOPE.BODY, or inside a RESPONSE wrapper. We just dig for
@@ -192,191 +220,32 @@ function countNode(tree: unknown, target: string): number {
   return total;
 }
 
-// Sales vouchers — line items included (AllInventoryEntries) so the client
-// transformer can derive SKU / category penetration per dealer. Filter to
-// VoucherType = Sales (or nested under) via a formula system, the way the
-// Express connector does it. Heavier than the ledger query; bumped timeout.
+// Switched from custom <TYPE>Collection</TYPE> + <TDL> blocks to Tally's
+// built-in <TYPE>Data</TYPE> reports. Built-in reports hit pre-compiled
+// code paths inside Tally — no TDL compile on every request, much smaller
+// XML payload we send, and the tunnel's idle timer is far less likely to
+// fire before Tally starts responding. Field names in the output differ
+// from our old collections, but extractAllByKey in the transformer walks
+// for LEDGER / VOUCHER / STOCKITEM / STOCKGROUP at any depth, so it keeps
+// working across both shapes.
 function salesVouchersRequest(cfg: { company: string; fromDate: string; toDate: string }) {
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<ENVELOPE>
-  <HEADER>
-    <VERSION>1</VERSION>
-    <TALLYREQUEST>Export</TALLYREQUEST>
-    <TYPE>Collection</TYPE>
-    <ID>B2BIntelSales</ID>
-  </HEADER>
-  <BODY>
-    <DESC>
-      <STATICVARIABLES>
-        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-        ${companyFilter(cfg.company)}
-        ${voucherDateFilter(cfg)}
-      </STATICVARIABLES>
-      <TDL>
-        <TDLMESSAGE>
-          <COLLECTION NAME="B2BIntelSales" ISMODIFY="No">
-            <TYPE>Voucher</TYPE>
-            <FILTERS>IsSalesVoucher</FILTERS>
-            <NATIVEMETHOD>Date</NATIVEMETHOD>
-            <NATIVEMETHOD>VoucherNumber</NATIVEMETHOD>
-            <NATIVEMETHOD>VoucherTypeName</NATIVEMETHOD>
-            <NATIVEMETHOD>PartyLedgerName</NATIVEMETHOD>
-            <NATIVEMETHOD>Amount</NATIVEMETHOD>
-          </COLLECTION>
-          <SYSTEM TYPE="Formulae" NAME="IsSalesVoucher">$$IsSales:$VoucherTypeName</SYSTEM>
-        </TDLMESSAGE>
-      </TDL>
-    </DESC>
-  </BODY>
-</ENVELOPE>`;
+  return reportWithVoucherDates('Day Book', cfg);
 }
 
-// Receipt vouchers — BillAllocations included so we can derive DSO and
-// on-time/late payment history per bill.
 function receiptVouchersRequest(cfg: { company: string; fromDate: string; toDate: string }) {
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<ENVELOPE>
-  <HEADER>
-    <VERSION>1</VERSION>
-    <TALLYREQUEST>Export</TALLYREQUEST>
-    <TYPE>Collection</TYPE>
-    <ID>B2BIntelReceipts</ID>
-  </HEADER>
-  <BODY>
-    <DESC>
-      <STATICVARIABLES>
-        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-        ${companyFilter(cfg.company)}
-        ${voucherDateFilter(cfg)}
-      </STATICVARIABLES>
-      <TDL>
-        <TDLMESSAGE>
-          <COLLECTION NAME="B2BIntelReceipts" ISMODIFY="No">
-            <TYPE>Voucher</TYPE>
-            <FILTERS>IsReceiptVoucher</FILTERS>
-            <NATIVEMETHOD>Date</NATIVEMETHOD>
-            <NATIVEMETHOD>VoucherNumber</NATIVEMETHOD>
-            <NATIVEMETHOD>VoucherTypeName</NATIVEMETHOD>
-            <NATIVEMETHOD>PartyLedgerName</NATIVEMETHOD>
-            <NATIVEMETHOD>Amount</NATIVEMETHOD>
-          </COLLECTION>
-          <SYSTEM TYPE="Formulae" NAME="IsReceiptVoucher">$$IsReceipt:$VoucherTypeName</SYSTEM>
-        </TDLMESSAGE>
-      </TDL>
-    </DESC>
-  </BODY>
-</ENVELOPE>`;
+  return reportWithVoucherDates('Day Book', cfg);
 }
 
-// Stock items — SKU master. Parent / Category build the category lookup used
-// for SKU and category penetration on the dealer side.
 function stockItemsRequest(cfg: { company: string }) {
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<ENVELOPE>
-  <HEADER>
-    <VERSION>1</VERSION>
-    <TALLYREQUEST>Export</TALLYREQUEST>
-    <TYPE>Collection</TYPE>
-    <ID>B2BIntelStockItems</ID>
-  </HEADER>
-  <BODY>
-    <DESC>
-      <STATICVARIABLES>
-        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-        ${companyFilter(cfg.company)}
-      </STATICVARIABLES>
-      <TDL>
-        <TDLMESSAGE>
-          <COLLECTION NAME="B2BIntelStockItems" ISMODIFY="No">
-            <TYPE>StockItem</TYPE>
-            <NATIVEMETHOD>Name</NATIVEMETHOD>
-            <NATIVEMETHOD>Parent</NATIVEMETHOD>
-            <NATIVEMETHOD>Category</NATIVEMETHOD>
-            <NATIVEMETHOD>BaseUnits</NATIVEMETHOD>
-            <NATIVEMETHOD>OpeningBalance</NATIVEMETHOD>
-            <NATIVEMETHOD>ClosingBalance</NATIVEMETHOD>
-            <NATIVEMETHOD>ClosingRate</NATIVEMETHOD>
-            <NATIVEMETHOD>ClosingValue</NATIVEMETHOD>
-            <NATIVEMETHOD>HSNCode</NATIVEMETHOD>
-            <NATIVEMETHOD>GSTApplicable</NATIVEMETHOD>
-          </COLLECTION>
-        </TDLMESSAGE>
-      </TDL>
-    </DESC>
-  </BODY>
-</ENVELOPE>`;
+  return reportRequest('Stock Summary', cfg.company);
 }
 
-// Stock groups — category master used as denominator for catPenetration.
 function stockGroupsRequest(cfg: { company: string }) {
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<ENVELOPE>
-  <HEADER>
-    <VERSION>1</VERSION>
-    <TALLYREQUEST>Export</TALLYREQUEST>
-    <TYPE>Collection</TYPE>
-    <ID>B2BIntelStockGroups</ID>
-  </HEADER>
-  <BODY>
-    <DESC>
-      <STATICVARIABLES>
-        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-        ${companyFilter(cfg.company)}
-      </STATICVARIABLES>
-      <TDL>
-        <TDLMESSAGE>
-          <COLLECTION NAME="B2BIntelStockGroups" ISMODIFY="No">
-            <TYPE>StockGroup</TYPE>
-            <NATIVEMETHOD>Name</NATIVEMETHOD>
-            <NATIVEMETHOD>Parent</NATIVEMETHOD>
-          </COLLECTION>
-        </TDLMESSAGE>
-      </TDL>
-    </DESC>
-  </BODY>
-</ENVELOPE>`;
+  return reportRequest('List of Stock Groups', cfg.company);
 }
 
-// Sync query — custom TDL collection with explicit NATIVEMETHOD per field.
-// Tally honours NATIVEMETHOD reliably across versions; <FETCHLIST> is not
-// always respected on a bare built-in collection. Filter to Sundry Debtors
-// happens client-side so we don't trigger the heavier UNDER-clause query
-// that drops the connection on shared hosts.
 function sundryDebtorsRequest(cfg: { company: string; fromDate: string; toDate: string }) {
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<ENVELOPE>
-  <HEADER>
-    <VERSION>1</VERSION>
-    <TALLYREQUEST>Export</TALLYREQUEST>
-    <TYPE>Collection</TYPE>
-    <ID>B2BIntelLedgers</ID>
-  </HEADER>
-  <BODY>
-    <DESC>
-      <STATICVARIABLES>
-        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-        ${companyFilter(cfg.company)}
-        ${dateFilter(cfg)}
-      </STATICVARIABLES>
-      <TDL>
-        <TDLMESSAGE>
-          <COLLECTION NAME="B2BIntelLedgers" ISMODIFY="No">
-            <TYPE>Ledger</TYPE>
-            <NATIVEMETHOD>Name</NATIVEMETHOD>
-            <NATIVEMETHOD>Parent</NATIVEMETHOD>
-            <NATIVEMETHOD>ClosingBalance</NATIVEMETHOD>
-            <NATIVEMETHOD>OpeningBalance</NATIVEMETHOD>
-            <NATIVEMETHOD>CreditLimit</NATIVEMETHOD>
-            <NATIVEMETHOD>CreditPeriod</NATIVEMETHOD>
-            <NATIVEMETHOD>PartyGSTIN</NATIVEMETHOD>
-            <NATIVEMETHOD>LedStateName</NATIVEMETHOD>
-            <NATIVEMETHOD>Address</NATIVEMETHOD>
-          </COLLECTION>
-        </TDLMESSAGE>
-      </TDL>
-    </DESC>
-  </BODY>
-</ENVELOPE>`;
+  return reportWithDates('List of Accounts', cfg);
 }
 
 // Per-collection freshness window for the sync-full skipFresh flag. Vouchers

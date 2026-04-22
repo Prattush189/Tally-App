@@ -1,7 +1,9 @@
-// Tally XML collection definitions. Duplicated from
-// supabase/functions/tally/index.ts because Deno and Node import semantics
-// don't overlap — one source of truth lives in the edge function, and this
-// file is a straight mirror. When you change one, change both.
+// Tally XML query builders. Mirror of supabase/functions/tally/index.ts —
+// when you change one, change both. All queries now use built-in Tally
+// <TYPE>Data</TYPE> report IDs instead of custom TDL collections. Built-in
+// reports are pre-compiled inside Tally, so they (a) return faster, (b)
+// send a tiny XML request body, and (c) don't block on the tunnel's idle
+// timer the way custom TDL compile does.
 
 export function companyFilter(company) {
   return company ? `<SVCURRENTCOMPANY>${company}</SVCURRENTCOMPANY>` : '';
@@ -25,154 +27,36 @@ function voucherDateFilter(cfg) {
   return `<SVFROMDATE Type="Date">${from}</SVFROMDATE><SVTODATE Type="Date">${to}</SVTODATE>`;
 }
 
-export function sundryDebtorsRequest(cfg) {
+function reportRequest(reportId, cfg) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <ENVELOPE>
-  <HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>B2BIntelDebtors</ID></HEADER>
-  <BODY>
-    <DESC>
-      <STATICVARIABLES>
-        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-        ${companyFilter(cfg.company)}
-        ${dateFilter(cfg)}
-      </STATICVARIABLES>
-      <TDL>
-        <TDLMESSAGE>
-          <COLLECTION NAME="B2BIntelDebtors" ISMODIFY="No">
-            <TYPE>Ledger</TYPE>
-            <NATIVEMETHOD>Name</NATIVEMETHOD>
-            <NATIVEMETHOD>Parent</NATIVEMETHOD>
-            <NATIVEMETHOD>OpeningBalance</NATIVEMETHOD>
-            <NATIVEMETHOD>ClosingBalance</NATIVEMETHOD>
-            <NATIVEMETHOD>PartyGSTIN</NATIVEMETHOD>
-            <NATIVEMETHOD>LedStateName</NATIVEMETHOD>
-            <NATIVEMETHOD>CreditPeriod</NATIVEMETHOD>
-            <NATIVEMETHOD>CreditLimit</NATIVEMETHOD>
-            <NATIVEMETHOD>Address</NATIVEMETHOD>
-          </COLLECTION>
-        </TDLMESSAGE>
-      </TDL>
-    </DESC>
-  </BODY>
+  <HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Data</TYPE><ID>${reportId}</ID></HEADER>
+  <BODY><DESC><STATICVARIABLES>
+    <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+    ${companyFilter(cfg.company)}
+    ${cfg.vouchers ? voucherDateFilter(cfg) : dateFilter(cfg)}
+  </STATICVARIABLES></DESC></BODY>
 </ENVELOPE>`;
+}
+
+export function sundryDebtorsRequest(cfg) {
+  return reportRequest('List of Accounts', cfg);
 }
 
 export function salesVouchersRequest(cfg) {
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<ENVELOPE>
-  <HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>B2BIntelSales</ID></HEADER>
-  <BODY>
-    <DESC>
-      <STATICVARIABLES>
-        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-        ${companyFilter(cfg.company)}
-        ${voucherDateFilter(cfg)}
-      </STATICVARIABLES>
-      <TDL>
-        <TDLMESSAGE>
-          <COLLECTION NAME="B2BIntelSales" ISMODIFY="No">
-            <TYPE>Voucher</TYPE>
-            <FILTERS>IsSalesVoucher</FILTERS>
-            <NATIVEMETHOD>Date</NATIVEMETHOD>
-            <NATIVEMETHOD>VoucherNumber</NATIVEMETHOD>
-            <NATIVEMETHOD>VoucherTypeName</NATIVEMETHOD>
-            <NATIVEMETHOD>PartyLedgerName</NATIVEMETHOD>
-            <NATIVEMETHOD>Amount</NATIVEMETHOD>
-            <NATIVEMETHOD>Reference</NATIVEMETHOD>
-          </COLLECTION>
-        </TDLMESSAGE>
-        <SYSTEM TYPE="Formulae" NAME="IsSalesVoucher">$$IsSales:$VoucherTypeName</SYSTEM>
-      </TDL>
-    </DESC>
-  </BODY>
-</ENVELOPE>`;
+  return reportRequest('Day Book', { ...cfg, vouchers: true });
 }
 
 export function receiptVouchersRequest(cfg) {
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<ENVELOPE>
-  <HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>B2BIntelReceipts</ID></HEADER>
-  <BODY>
-    <DESC>
-      <STATICVARIABLES>
-        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-        ${companyFilter(cfg.company)}
-        ${voucherDateFilter(cfg)}
-      </STATICVARIABLES>
-      <TDL>
-        <TDLMESSAGE>
-          <COLLECTION NAME="B2BIntelReceipts" ISMODIFY="No">
-            <TYPE>Voucher</TYPE>
-            <FILTERS>IsReceiptVoucher</FILTERS>
-            <NATIVEMETHOD>Date</NATIVEMETHOD>
-            <NATIVEMETHOD>VoucherNumber</NATIVEMETHOD>
-            <NATIVEMETHOD>VoucherTypeName</NATIVEMETHOD>
-            <NATIVEMETHOD>PartyLedgerName</NATIVEMETHOD>
-            <NATIVEMETHOD>Amount</NATIVEMETHOD>
-            <NATIVEMETHOD>Reference</NATIVEMETHOD>
-          </COLLECTION>
-        </TDLMESSAGE>
-        <SYSTEM TYPE="Formulae" NAME="IsReceiptVoucher">$$IsReceipt:$VoucherTypeName</SYSTEM>
-      </TDL>
-    </DESC>
-  </BODY>
-</ENVELOPE>`;
+  return reportRequest('Day Book', { ...cfg, vouchers: true });
 }
 
 export function stockItemsRequest(cfg) {
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<ENVELOPE>
-  <HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>B2BIntelStockItems</ID></HEADER>
-  <BODY>
-    <DESC>
-      <STATICVARIABLES>
-        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-        ${companyFilter(cfg.company)}
-      </STATICVARIABLES>
-      <TDL>
-        <TDLMESSAGE>
-          <COLLECTION NAME="B2BIntelStockItems" ISMODIFY="No">
-            <TYPE>StockItem</TYPE>
-            <NATIVEMETHOD>Name</NATIVEMETHOD>
-            <NATIVEMETHOD>Parent</NATIVEMETHOD>
-            <NATIVEMETHOD>Category</NATIVEMETHOD>
-            <NATIVEMETHOD>BaseUnits</NATIVEMETHOD>
-            <NATIVEMETHOD>OpeningBalance</NATIVEMETHOD>
-            <NATIVEMETHOD>ClosingBalance</NATIVEMETHOD>
-            <NATIVEMETHOD>ClosingRate</NATIVEMETHOD>
-            <NATIVEMETHOD>ClosingValue</NATIVEMETHOD>
-            <NATIVEMETHOD>HSNCode</NATIVEMETHOD>
-            <NATIVEMETHOD>GSTApplicable</NATIVEMETHOD>
-          </COLLECTION>
-        </TDLMESSAGE>
-      </TDL>
-    </DESC>
-  </BODY>
-</ENVELOPE>`;
+  return reportRequest('Stock Summary', { company: cfg.company });
 }
 
 export function stockGroupsRequest(cfg) {
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<ENVELOPE>
-  <HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>B2BIntelStockGroups</ID></HEADER>
-  <BODY>
-    <DESC>
-      <STATICVARIABLES>
-        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-        ${companyFilter(cfg.company)}
-      </STATICVARIABLES>
-      <TDL>
-        <TDLMESSAGE>
-          <COLLECTION NAME="B2BIntelStockGroups" ISMODIFY="No">
-            <TYPE>StockGroup</TYPE>
-            <NATIVEMETHOD>Name</NATIVEMETHOD>
-            <NATIVEMETHOD>Parent</NATIVEMETHOD>
-          </COLLECTION>
-        </TDLMESSAGE>
-      </TDL>
-    </DESC>
-  </BODY>
-</ENVELOPE>`;
+  return reportRequest('List of Stock Groups', { company: cfg.company });
 }
 
 export const XML_ARRAY_NODES = new Set([
