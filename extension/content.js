@@ -176,3 +176,34 @@ const mo = new MutationObserver(() => {
   if (!document.getElementById('__tally_sync_btn')) injectButton();
 });
 mo.observe(document.body, { childList: true, subtree: true });
+
+// Auto-sync watchdog: poll :9007 every 5s. When TallyPrime starts responding,
+// fire the sync automatically so the user doesn't have to click the button.
+// Debounced to once per 2 min — prevents hammering Tally if the page stays
+// open all day, and stops us from re-syncing after the user closes + reopens
+// the RemoteApp session within that window.
+const AUTO_COOLDOWN_MS = 120000;
+let lastAutoAt = 0;
+let autoInFlight = false;
+
+async function autoSyncIfReady() {
+  if (autoInFlight) return;
+  if (Date.now() - lastAutoAt < AUTO_COOLDOWN_MS) return;
+  autoInFlight = true;
+  try {
+    // Cheap probe — if it fails we just try again in 5s.
+    await probeTally();
+    lastAutoAt = Date.now();
+    const btn = document.getElementById('__tally_sync_btn');
+    if (btn && !btn.dataset.busy) {
+      toast('TallyPrime detected — syncing automatically…', 'info');
+      await runSync(btn);
+    }
+  } catch {
+    // Tally not up yet (user hasn't clicked TallyPrime). That's normal.
+  } finally {
+    autoInFlight = false;
+  }
+}
+
+setInterval(autoSyncIfReady, 5000);

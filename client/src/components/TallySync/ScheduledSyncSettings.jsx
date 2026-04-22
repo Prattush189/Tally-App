@@ -123,15 +123,17 @@ export default function ScheduledSyncSettings() {
     } finally { setSaving(false); }
   };
 
-  const handleTrigger = async () => {
-    if (!syncToken) { setMsg({ error: 'Sync token required' }); return; }
-    setTriggering(true); setMsg(null);
-    try {
-      const r = await triggerSyncNow(syncToken);
-      setMsg({ ok: r?.message || 'Sync queued. Check back in ~2 min.' });
-    } catch (err) {
-      setMsg({ error: err.message });
-    } finally { setTriggering(false); }
+  // "Sync Now" opens the Tally portal in a new tab. If the extension is
+  // installed, its content script auto-runs the sync the moment it sees
+  // Tally responding on :9007 (after the user logs in + clicks TallyPrime).
+  // No headless workflow dispatch — that path requires AI vision, which
+  // isn't wired in yet.
+  const handleTrigger = () => {
+    const url = form.portalUrl || status?.configPreview?.portalUrl || 'http://103.76.213.243/';
+    window.open(url, '_blank', 'noopener');
+    setMsg({ ok: extState.present
+      ? 'Portal opened in a new tab. Log in and click TallyPrime — the extension will auto-sync once Tally starts responding.'
+      : 'Portal opened in a new tab. Install the Chrome extension (see extension/README.md) for one-click sync. Without it you\'ll need to run `npm run sync:headed` locally.' });
   };
 
   const snap = status?.snapshot;
@@ -289,11 +291,11 @@ export default function ScheduledSyncSettings() {
               <button
                 type="button"
                 onClick={handleTrigger}
-                disabled={triggering || !syncToken || !configured}
-                title={!configured ? 'Save configuration first' : 'Dispatches a GitHub Actions run immediately'}
-                className={`flex-1 min-w-[10rem] py-2.5 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed ${triggering ? 'bg-cyan-500/50 cursor-wait' : 'bg-cyan-600 hover:bg-cyan-500'} text-white`}
+                disabled={!configured}
+                title={!configured ? 'Save configuration first' : 'Opens the Tally portal in a new tab — extension auto-syncs when TallyPrime launches'}
+                className="flex-1 min-w-[10rem] py-2.5 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed bg-cyan-600 hover:bg-cyan-500 text-white"
               >
-                <Play size={14} />{triggering ? 'Triggering...' : 'Trigger Sync Now'}
+                <ExternalLink size={14} />Open Portal → Sync
               </button>
             </div>
 
