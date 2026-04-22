@@ -71,6 +71,20 @@ export async function syncFromTally(config = {}) {
       const counts = data?.counts || {};
       const bundle = data?.data || {};
       const errors = data?.errors || {};
+      // Cache discovered companies in localStorage as a fallback for the
+      // top-bar switcher: if tally_companies migration hasn't been applied,
+      // the get-companies action returns empty, but this cache lets the
+      // switcher still populate. Sync response is the source of truth
+      // after every run.
+      if (Array.isArray(data?.discoveredCompanies) && data.discoveredCompanies.length) {
+        try {
+          localStorage.setItem('b2b_tally_companies_cache', JSON.stringify({
+            companies: data.discoveredCompanies,
+            activeCompany: data.activeCompany || data.discoveredCompanies[0],
+            at: Date.now(),
+          }));
+        } catch { /* quota / private mode */ }
+      }
       // Detect the "Tally isn't running right now" pattern: every collection
       // we actually tried to fetch this run aborted (no one had an active
       // TallyPrime RemoteApp session so :9007 didn't route anywhere). We
@@ -143,16 +157,30 @@ export async function triggerSyncNow(syncToken, tenantKey = 'default') {
   return supabaseInvoke('trigger-sync', { syncToken, tenantKey });
 }
 
-// List of Tally companies the current sync can see. Reads the cache on
-// Supabase; does NOT re-probe Tally. Use listCompaniesFromTally to force a
-// fresh probe (token-gated).
+// List of Tally companies the current sync can see. Prefers the server cache
+// (tally_companies table); falls back to the localStorage cache populated by
+// the last syncFromTally() response, so the switcher still works when the
+// migration hasn't been applied yet.
 export async function getCompanies(tenantKey = 'default') {
   if (TALLY_BACKEND !== 'supabase') return { companies: [], activeCompany: '' };
   try {
-    return await supabaseInvoke('get-companies', { tenantKey });
-  } catch (err) {
-    return { companies: [], activeCompany: '', error: err.message };
-  }
+    const r = await supabaseInvoke('get-companies', { tenantKey });
+    if (r?.companies?.length) return r;
+  } catch { /* fall through to localStorage */ }
+  try {
+    const raw = localStorage.getItem('b2b_tally_companies_cache');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed.companies) && parsed.companies.length) {
+        return {
+          companies: parsed.companies,
+          activeCompany: parsed.activeCompany || parsed.companies[0],
+          source: 'local-cache',
+        };
+      }
+    }
+  } catch { /* ignore */ }
+  return { companies: [], activeCompany: '' };
 }
 
 // Probe Tally's 'List of Companies' and cache the result. Normally called

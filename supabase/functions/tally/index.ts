@@ -813,6 +813,8 @@ Deno.serve(async (req) => {
     // If body.company is empty, use the stored active_company as the sync
     // target so the user's chosen company drives every collection query.
     let activeCompany = cfg.company || company;
+    let discoveredCompanies: string[] = [];
+    let discoveryError: string | null = null;
     if (db) {
       try {
         const probeXml = reportRequest('List of Companies', '');
@@ -839,28 +841,36 @@ Deno.serve(async (req) => {
           }
         };
         walk(parsed);
-        const companies = Array.from(seen).sort();
-        if (companies.length) {
-          const { data: prior } = await db
-            .from('tally_companies')
-            .select('active_company')
-            .eq('tenant_key', tenantKey)
-            .maybeSingle();
-          // First company becomes active if nothing else is set yet, so
-          // the user sees data without having to pick.
-          const nextActive = prior?.active_company
-            && companies.includes(prior.active_company)
-              ? prior.active_company
-              : companies[0];
-          await db.from('tally_companies').upsert({
-            tenant_key: tenantKey,
-            companies,
-            active_company: nextActive,
-            updated_at: new Date().toISOString(),
-          }, { onConflict: 'tenant_key' });
-          if (!activeCompany) activeCompany = nextActive;
+        discoveredCompanies = Array.from(seen).sort();
+        if (discoveredCompanies.length) {
+          // Try to persist into tally_companies. If the table doesn't exist
+          // (migration hasn't been applied yet), catch the error and keep
+          // going — we still return the list in the response so the UI can
+          // display the switcher via localStorage fallback.
+          try {
+            const { data: prior } = await db
+              .from('tally_companies')
+              .select('active_company')
+              .eq('tenant_key', tenantKey)
+              .maybeSingle();
+            const nextActive = prior?.active_company
+              && discoveredCompanies.includes(prior.active_company)
+                ? prior.active_company
+                : discoveredCompanies[0];
+            await db.from('tally_companies').upsert({
+              tenant_key: tenantKey,
+              companies: discoveredCompanies,
+              active_company: nextActive,
+              updated_at: new Date().toISOString(),
+            }, { onConflict: 'tenant_key' });
+            if (!activeCompany) activeCompany = nextActive;
+          } catch (dbErr) {
+            discoveryError = dbErr instanceof Error ? dbErr.message : String(dbErr);
+            if (!activeCompany) activeCompany = discoveredCompanies[0];
+          }
         }
-      } catch {
+      } catch (err) {
+        discoveryError = err instanceof Error ? err.message : String(err);
         // Discovery failure is non-fatal — fall back to cfg.company / empty.
       }
     }
@@ -1000,6 +1010,11 @@ Deno.serve(async (req) => {
       skipped,
       fetched: jobs.map((j) => j.key),
       activeCompany,
+      // Always return the discovered companies list — even if we couldn't
+      // persist it to tally_companies (e.g. migration not applied yet) the
+      // client can still cache it in localStorage and populate the switcher.
+      discoveredCompanies,
+      discoveryError,
     }), { headers: jsonHeaders });
   }
 
