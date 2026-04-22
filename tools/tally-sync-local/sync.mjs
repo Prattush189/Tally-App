@@ -63,109 +63,25 @@ function log(stage, msg) {
   console.log(`[${ts}] ${stage}: ${msg}`);
 }
 
-// Click TallyPrime in the portal's launcher. Portal DOM isn't documented, so
-// we layer four strategies and whichever hits first wins. On failure we dump
-// the rendered HTML + a screenshot to /tmp so the workflow can upload them
-// as artifacts for selector tuning.
+// We don't try to auto-click TallyPrime anymore — the HOB RemoteApp launcher
+// DOM is fragile and the click step is slated to move to AI vision later.
+// In headed mode we just wait for the human to click and keep polling :9007.
+// In headless mode we fail fast with a clear message (can't un-stick a cron
+// run without a human or AI vision).
 async function clickTallyPrime(page) {
-  // The launcher is a JS-rendered Remote App list — give hydration a beat.
   await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-  await page.waitForTimeout(2000);
-
-  // Strategy 1: Playwright's text locators. Matches text nodes anywhere in
-  // the tree, handles partial matches, clicks the tightest enclosing element.
-  for (const text of ['TallyPrime', 'Tally Prime', 'TALLY PRIME']) {
+  if (!HEADED) {
+    // Still dump diagnostics so when AI vision arrives we have reference
+    // artifacts from the same page.
     try {
-      const loc = page.getByText(text, { exact: false }).first();
-      if (await loc.count() > 0) {
-        await loc.click({ timeout: 5000 });
-        log('launcher', `clicked via getByText("${text}")`);
-        return true;
-      }
-    } catch { /* try next */ }
+      const fs = await import('node:fs/promises');
+      await fs.writeFile('page-launcher.html', await page.content(), 'utf8');
+      await page.screenshot({ path: 'page-launcher.png', fullPage: true });
+    } catch { /* non-fatal */ }
+    return false;
   }
-
-  // Strategy 2: alt / title / aria attributes (common for icon buttons).
-  const attrSelectors = [
-    'img[alt*="Tally" i]',
-    '[title*="Tally" i]',
-    '[aria-label*="Tally" i]',
-    '[data-app*="Tally" i]',
-  ];
-  for (const sel of attrSelectors) {
-    try {
-      const el = await page.$(sel);
-      if (el) {
-        log('launcher', `clicked via attribute selector: ${sel}`);
-        await el.click();
-        return true;
-      }
-    } catch { /* try next */ }
-  }
-
-  // Strategy 3: raw XPath — case-insensitive text contains.
-  const xpaths = [
-    "//*[contains(translate(normalize-space(text()), 'TALYPRIME ', 'talyprime '), 'tallyprime')]",
-    "//*[contains(translate(normalize-space(text()), 'TALYPRIME ', 'talyprime '), 'tally prime')]",
-  ];
-  for (const xp of xpaths) {
-    try {
-      const el = await page.$(`xpath=${xp}`);
-      if (el) {
-        log('launcher', `clicked via xpath`);
-        await el.click();
-        return true;
-      }
-    } catch { /* try next */ }
-  }
-
-  // Strategy 4: brute-force DOM walk inside the page. Looks for any small
-  // element whose text/alt/title contains "tally" and clicks the first hit.
-  // Skips big containers so we don't click the whole page body.
-  const clicked = await page.evaluate(() => {
-    const all = Array.from(document.querySelectorAll('*'));
-    for (const el of all) {
-      if (el.children.length > 10) continue;
-      const haystack = [
-        el.textContent || '',
-        el.getAttribute?.('alt') || '',
-        el.getAttribute?.('title') || '',
-        el.getAttribute?.('aria-label') || '',
-      ].join(' ').toLowerCase();
-      if (haystack.includes('tallyprime') || haystack.includes('tally prime')) {
-        // Walk up to find a clickable ancestor (a, button, [onclick], role=button).
-        let target = el;
-        while (target && target !== document.body) {
-          const tag = target.tagName?.toLowerCase();
-          if (tag === 'a' || tag === 'button' || target.hasAttribute?.('onclick') || target.getAttribute?.('role') === 'button') {
-            target.click();
-            return target.outerHTML.slice(0, 200);
-          }
-          target = target.parentElement;
-        }
-        // Fallback — click the text node's parent.
-        el.click();
-        return el.outerHTML.slice(0, 200);
-      }
-    }
-    return null;
-  });
-  if (clicked) {
-    log('launcher', `clicked via DOM walk: ${clicked}`);
-    return true;
-  }
-
-  // All strategies failed. Dump diagnostics for the workflow to upload.
-  try {
-    const fs = await import('node:fs/promises');
-    const html = await page.content();
-    await fs.writeFile('page-launcher.html', html, 'utf8');
-    await page.screenshot({ path: 'page-launcher.png', fullPage: true });
-    log('launcher', 'wrote page-launcher.html + .png (check workflow artifacts)');
-  } catch (err) {
-    log('launcher', `failed to write diagnostic dump: ${err.message}`);
-  }
-  return false;
+  log('launcher', '▶ please click the TallyPrime icon in the browser window — the script will keep polling :9007 and resume automatically');
+  return true;
 }
 
 async function waitForTally(page, tallyUrl, timeoutMs = 120000) {
@@ -242,16 +158,16 @@ async function main() {
     await page.goto(`${portalUrl}/software/html5.html`, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
     const clicked = await clickTallyPrime(page);
-    if (!clicked) {
-      if (HEADED) {
-        log('launcher', 'Could not find TallyPrime button — leaving browser open so you can click it manually. Script will keep polling :9007.');
-      } else {
-        throw new Error('TallyPrime launcher element not found. Re-run with HEADED=1 to inspect the portal DOM.');
-      }
+    if (!clicked && !HEADED) {
+      throw new Error('Launcher click requires a human — run locally with `npm run sync:headed` (AI-vision auto-click is planned).');
     }
 
-    log('tally', 'waiting for :9007 to accept XML');
-    await waitForTally(page, tallyUrl, 180000);
+    // Generous budget in headed mode — the human might take a minute to find
+    // the browser tab and click. 6 min ceiling keeps a broken session from
+    // hanging indefinitely.
+    const waitMs = HEADED ? 360000 : 180000;
+    log('tally', `waiting for :9007 to accept XML (up to ${Math.round(waitMs / 1000)}s)`);
+    await waitForTally(page, tallyUrl, waitMs);
     log('tally', 'reachable — running collection queries');
 
     const parser = new XMLParser({

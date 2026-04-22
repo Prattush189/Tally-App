@@ -124,10 +124,13 @@ export default function ScheduledSyncSettings() {
 
       {expanded && (
         <div className="space-y-4 pt-2">
-          <div className="bg-cyan-500/5 border border-cyan-500/20 rounded-lg p-4 text-xs text-gray-300 space-y-1">
-            <p className="font-semibold text-cyan-300 flex items-center gap-2"><ShieldCheck size={14} /> How this works</p>
+          <div className="bg-amber-500/5 border border-amber-500/20 rounded-lg p-4 text-xs text-gray-300 space-y-2">
+            <p className="font-semibold text-amber-300 flex items-center gap-2"><AlertTriangle size={14} /> Scheduled sync is parked until AI-vision auto-click</p>
             <p>
-              A scheduled GitHub Actions run logs into your Tally portal with these creds every hour, pulls the 5 collections, and pushes a snapshot to Supabase. Your browser never touches Tally directly. Edit any field below and click Save; the next run picks it up automatically.
+              The portal's TallyPrime launcher button can't be reliably clicked by a headless script — the DOM varies and there's no accessible selector. Today's flow: run <code className="text-cyan-300">npm run sync:headed</code> from the tools/tally-sync-local folder on your Mac, click TallyPrime when the browser appears, and the script uploads the snapshot to Supabase.
+            </p>
+            <p>
+              The creds you save here are already wired up — once AI vision is in, the hourly cron turns on automatically and this card becomes the only place to edit them.
             </p>
           </div>
 

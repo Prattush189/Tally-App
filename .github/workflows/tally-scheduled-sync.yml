@@ -20,9 +20,11 @@ on:
         description: 'Tenant slug (matches tally_portal_config row)'
         required: false
         default: 'default'
-  schedule:
-    # Hourly, at minute 7 to stay out of the way of the top-of-hour rush.
-    - cron: '7 * * * *'
+  # Hourly cron is disabled until the TallyPrime launcher click can happen
+  # without a human in the loop. Until then, runs would just fail with
+  # "Launcher click requires a human". Re-enable once AI-vision click is in.
+  # schedule:
+  #   - cron: '7 * * * *'
 
 concurrency:
   # Serialise runs per tenant — if a cron tick lands on a manual trigger,
