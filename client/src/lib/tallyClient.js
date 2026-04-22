@@ -150,14 +150,16 @@ export async function getCompanies(tenantKey = 'default') {
   }
 }
 
-// Probe Tally's 'List of Companies' and cache the result. Admin-only.
-export async function listCompaniesFromTally(syncToken, tenantKey = 'default') {
-  return supabaseInvoke('list-companies', { syncToken, tenantKey });
+// Probe Tally's 'List of Companies' and cache the result. Normally called
+// automatically at the start of every sync-full, so manual callers are rare.
+export async function listCompaniesFromTally(_unused, tenantKey = 'default') {
+  return supabaseInvoke('list-companies', { tenantKey });
 }
 
-// Persist which company dashboards read from. Admin-only.
-export async function setActiveCompany(syncToken, companyName, tenantKey = 'default') {
-  return supabaseInvoke('set-active-company', { syncToken, tenantKey, company: companyName });
+// Persist which company dashboards read from. Anon-safe — every app user
+// can switch and all their teammates follow on next page load.
+export async function setActiveCompany(_unused, companyName, tenantKey = 'default') {
+  return supabaseInvoke('set-active-company', { tenantKey, company: companyName });
 }
 
 // Load the most recent snapshot stored by the local Playwright sync tool.

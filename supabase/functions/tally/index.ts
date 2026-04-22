@@ -472,9 +472,13 @@ Deno.serve(async (req) => {
     // Token-gated actions: anything that reads creds or mutates state requires
     // LOCAL_SYNC_TOKEN. get-snapshot + get-status are read-only (same trust
     // level as /sync-full) and pass through with just the project anon key.
+    // Company list + active-company selection are not token-gated: the
+    // company list comes from Tally itself (not our secrets), active_company
+    // is a UI-state pointer into existing rows. Callers with the anon key
+    // may freely list / read / switch; the write surface is limited to this
+    // one pointer field. Matches the access level of sync-full / get-snapshot.
     const gatedActions = new Set([
       'get-config', 'save-config', 'ingest', 'trigger-sync',
-      'list-companies', 'set-active-company',
     ]);
     if (gatedActions.has(action)) {
       const required = Deno.env.get('LOCAL_SYNC_TOKEN') || '';
@@ -789,24 +793,6 @@ Deno.serve(async (req) => {
     // fresh ones keep their data and the retry budgets go to what actually
     // needs it.
     const skipFresh = body.skipFresh !== false;
-    const allJobs = [
-      // Order matters: lock in the reliable small collections FIRST so
-      // dashboards always have master data, then try the flaky voucher
-      // queries last. Voucher failures on this tunnel historically took
-      // their full timeout before erroring, chewing the wall-clock budget
-      // and forcing stock items / groups to abort on retries. Running
-      // stocks before vouchers gives them uncontested budget.
-      //
-      // Tighter voucher timeouts: every sync so far has failed voucher
-      // queries mid-response or signal-aborted. No point waiting 45s for
-      // a query that never succeeds — 25s / 20s still covers the happy
-      // path if the tunnel recovers, and frees ~35s for stocks + retries.
-      { key: 'ledgers' as const, xml: sundryDebtorsRequest(cfg), node: 'LEDGER', timeoutMs: 65000 },
-      { key: 'stockItems' as const, xml: stockItemsRequest(cfg), node: 'STOCKITEM', timeoutMs: 20000 },
-      { key: 'stockGroups' as const, xml: stockGroupsRequest(cfg), node: 'STOCKGROUP', timeoutMs: 12000 },
-      { key: 'salesVouchers' as const, xml: salesVouchersRequest(cfg), node: 'VOUCHER', timeoutMs: 25000 },
-      { key: 'receiptVouchers' as const, xml: receiptVouchersRequest(cfg), node: 'VOUCHER', timeoutMs: 20000 },
-    ];
 
     // Decide which collections to actually fetch. We can only persist +
     // skip-fresh if Supabase service role env is set; without it we fall
@@ -814,6 +800,71 @@ Deno.serve(async (req) => {
     const dbUrl = Deno.env.get('SUPABASE_URL') || '';
     const dbRole = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
     const db = (dbUrl && dbRole) ? createClient(dbUrl, dbRole, { auth: { persistSession: false } }) : null;
+
+    // Auto-detect companies at the start of every sync (~1-2s, cheap report).
+    // Keeps the top-bar switcher populated without a manual "Detect" click.
+    // If body.company is empty, use the stored active_company as the sync
+    // target so the user's chosen company drives every collection query.
+    let activeCompany = cfg.company || company;
+    if (db) {
+      try {
+        const probeXml = reportRequest('List of Companies', '');
+        const parsed = await tallyRequest(probeXml, cfg, 15000);
+        const seen = new Set<string>();
+        const walk = (node: unknown) => {
+          if (!node) return;
+          if (Array.isArray(node)) { node.forEach(walk); return; }
+          if (typeof node !== 'object') return;
+          for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+            if (key.toUpperCase() === 'COMPANY') {
+              const rec = value as Record<string, unknown>;
+              const name = (rec?._NAME as string) || (rec?.NAME as string);
+              if (typeof name === 'string' && name.trim()) seen.add(name.trim());
+            }
+            walk(value);
+          }
+        };
+        walk(parsed);
+        const companies = Array.from(seen).sort();
+        if (companies.length) {
+          const { data: prior } = await db
+            .from('tally_companies')
+            .select('active_company')
+            .eq('tenant_key', tenantKey)
+            .maybeSingle();
+          // First company becomes active if nothing else is set yet, so
+          // the user sees data without having to pick.
+          const nextActive = prior?.active_company
+            && companies.includes(prior.active_company)
+              ? prior.active_company
+              : companies[0];
+          await db.from('tally_companies').upsert({
+            tenant_key: tenantKey,
+            companies,
+            active_company: nextActive,
+            updated_at: new Date().toISOString(),
+          }, { onConflict: 'tenant_key' });
+          if (!activeCompany) activeCompany = nextActive;
+        }
+      } catch {
+        // Discovery failure is non-fatal — fall back to cfg.company / empty.
+      }
+    }
+
+    // Build the job list after company discovery so every query's
+    // SVCURRENTCOMPANY points at the resolved activeCompany.
+    const queryCfg = { ...cfg, company: activeCompany };
+    const allJobs = [
+      // Reliable small collections first, flaky voucher queries last. Voucher
+      // failures on this tunnel historically burned their whole timeout
+      // before erroring, chewing the wall-clock budget and forcing stocks
+      // to abort on retries.
+      { key: 'ledgers' as const, xml: sundryDebtorsRequest(queryCfg), node: 'LEDGER', timeoutMs: 65000 },
+      { key: 'stockItems' as const, xml: stockItemsRequest(queryCfg), node: 'STOCKITEM', timeoutMs: 20000 },
+      { key: 'stockGroups' as const, xml: stockGroupsRequest(queryCfg), node: 'STOCKGROUP', timeoutMs: 12000 },
+      { key: 'salesVouchers' as const, xml: salesVouchersRequest(queryCfg), node: 'VOUCHER', timeoutMs: 25000 },
+      { key: 'receiptVouchers' as const, xml: receiptVouchersRequest(queryCfg), node: 'VOUCHER', timeoutMs: 20000 },
+    ];
 
     const skipped: Record<string, { reason: string; updatedAt: string }> = {};
     let jobs = allJobs;
@@ -823,7 +874,7 @@ Deno.serve(async (req) => {
         .from('tally_snapshots')
         .select('collection_meta')
         .eq('tenant_key', tenantKey)
-        .eq('company', cfg.company || company)
+        .eq('company', activeCompany)
         .maybeSingle();
       existingMeta = (existing?.collection_meta as typeof existingMeta) || {};
       const now = Date.now();
@@ -904,7 +955,7 @@ Deno.serve(async (req) => {
     } | null = null;
     if (db && (anyConnected || Object.keys(errors).length)) {
       const { error: mergeErr, counts: mergedCounts, errors: mergedErrors, data: mergedData, collectionMeta } =
-        await mergeSnapshotIntoTable(db, tenantKey, cfg.company || company, {
+        await mergeSnapshotIntoTable(db, tenantKey, activeCompany, {
           data,
           counts,
           errors,
@@ -934,6 +985,7 @@ Deno.serve(async (req) => {
       collectionMeta: mergedResponse?.collectionMeta ?? {},
       skipped,
       fetched: jobs.map((j) => j.key),
+      activeCompany,
     }), { headers: jsonHeaders });
   }
 

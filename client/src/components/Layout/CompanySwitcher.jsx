@@ -4,12 +4,10 @@ import { getCompanies, setActiveCompany } from '../../lib/tallyClient';
 import { useAuth } from '../../context/AuthContext';
 
 // Top-bar dropdown for picking which Tally company the dashboards show.
-// Reads the cached list from tally_companies (populated by "Detect
-// companies" in the admin settings). Persisting the active company is
-// token-gated; anyone without the sync token sees the current choice but
-// can't change it — we hide the dropdown entirely in that case.
-
-const SYNC_TOKEN_KEY = 'b2b_tally_sync_token';
+// Reads the cached list from tally_companies (populated automatically at
+// the start of every sync-full run — no manual "Detect" step). Switching
+// is anon-safe now; anyone with the app open can change the active
+// company and everyone else's dashboards follow on next load.
 
 export default function CompanySwitcher() {
   const { isDemo } = useAuth();
@@ -27,6 +25,10 @@ export default function CompanySwitcher() {
   useEffect(() => {
     if (isDemo) return;
     refresh();
+    // Re-poll every minute so a sync that discovers new companies surfaces
+    // without a page reload.
+    const t = setInterval(refresh, 60_000);
+    return () => clearInterval(t);
   }, [isDemo]);
 
   useEffect(() => {
@@ -36,14 +38,12 @@ export default function CompanySwitcher() {
     return () => window.removeEventListener('click', close);
   }, [open]);
 
-  const syncToken = localStorage.getItem(SYNC_TOKEN_KEY) || '';
-  const canSwitch = Boolean(syncToken);
-
   async function choose(name) {
-    if (!canSwitch || saving) return;
+    if (saving || name === active) { setOpen(false); return; }
     setSaving(true);
     try {
-      await setActiveCompany(syncToken, name);
+      // set-active-company is no longer token-gated; anon key is enough.
+      await setActiveCompany('', name);
       setActive(name);
       setOpen(false);
       // Reload so every dashboard fetches the new active company.
@@ -63,13 +63,12 @@ export default function CompanySwitcher() {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        disabled={!canSwitch}
-        title={canSwitch ? 'Switch Tally company' : 'Paste the admin sync token in TallySync → Scheduled Sync to enable switching'}
-        className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gray-800/60 border border-gray-700/50 text-sm text-gray-200 hover:border-indigo-500/40 disabled:cursor-not-allowed disabled:opacity-60"
+        title="Switch Tally company — each company has its own snapshot"
+        className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gray-800/60 border border-gray-700/50 text-sm text-gray-200 hover:border-indigo-500/40"
       >
         <Building2 size={14} className="text-indigo-400" />
-        <span className="max-w-[16rem] truncate">{active || '(no company selected)'}</span>
-        {canSwitch && <ChevronDown size={12} className={`text-gray-500 transition-transform ${open ? 'rotate-180' : ''}`} />}
+        <span className="max-w-[16rem] truncate">{active || '(pick a company)'}</span>
+        <ChevronDown size={12} className={`text-gray-500 transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
       {open && (
         <div className="absolute right-0 top-full mt-1 bg-gray-900 border border-gray-700/60 rounded-lg shadow-xl min-w-[20rem] max-h-80 overflow-auto z-50">

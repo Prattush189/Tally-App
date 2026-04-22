@@ -10,7 +10,6 @@ import {
 import { transformTallyLedgers, transformTallyFull } from '../../lib/tallyTransformer';
 import { saveLiveCustomers, loadLiveCustomers, clearLiveCustomers } from '../../lib/liveData';
 import { availableRanges, rangeByKey } from '../../utils/dateRange';
-import ScheduledSyncSettings from './ScheduledSyncSettings';
 
 const TALLY_CONFIG_KEY = 'b2b_tally_config';
 
@@ -234,8 +233,6 @@ export default function TallySync() {
           </div>
         </div>
       )}
-
-      {!isDemo && <ScheduledSyncSettings />}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Left: Actions */}
