@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Cloud, Play, Save, ChevronDown, ChevronRight, AlertTriangle, Chrome, Check, ExternalLink } from 'lucide-react';
-import { getSyncStatus, saveSyncConfig, triggerSyncNow } from '../../lib/tallyClient';
+import { Cloud, Play, Save, ChevronDown, ChevronRight, AlertTriangle, Chrome, Check, ExternalLink, Building2 } from 'lucide-react';
+import { getSyncStatus, saveSyncConfig, triggerSyncNow, listCompaniesFromTally, getCompanies, setActiveCompany } from '../../lib/tallyClient';
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from '../../utils/supabase';
 
 // Cache the admin sync token in localStorage so the admin doesn't have to
@@ -49,6 +49,9 @@ export default function ScheduledSyncSettings() {
   // message on load, then a 'configSaved' ack after we push config to it.
   const [extState, setExtState] = useState({ present: false, version: null, savedAt: null });
   const [extPushing, setExtPushing] = useState(false);
+  const [companies, setCompanies] = useState([]);
+  const [activeCompany, setActiveCompanyState] = useState('');
+  const [detecting, setDetecting] = useState(false);
 
   async function refreshStatus() {
     const s = await getSyncStatus();
@@ -68,6 +71,42 @@ export default function ScheduledSyncSettings() {
     const t = setInterval(refreshStatus, 60_000);
     return () => clearInterval(t);
   }, []);
+
+  // Load cached companies list whenever the card opens.
+  useEffect(() => {
+    if (!expanded) return;
+    (async () => {
+      const r = await getCompanies();
+      setCompanies(r.companies || []);
+      setActiveCompanyState(r.activeCompany || '');
+    })();
+  }, [expanded]);
+
+  async function handleDetect() {
+    if (!syncToken) { setMsg({ error: 'Sync token required' }); return; }
+    setDetecting(true); setMsg(null);
+    try {
+      const r = await listCompaniesFromTally(syncToken);
+      const list = r?.companies || [];
+      setCompanies(list);
+      setMsg({ ok: list.length
+        ? `Found ${list.length} compan${list.length === 1 ? 'y' : 'ies'} on Tally. Pick one as active below — it\'ll drive every dashboard.`
+        : 'Tally replied but no companies found. Make sure TallyPrime is running and a company is loaded.' });
+    } catch (err) {
+      setMsg({ error: err.message });
+    } finally { setDetecting(false); }
+  }
+
+  async function handlePickActive(name) {
+    if (!syncToken || !name) return;
+    try {
+      await setActiveCompany(syncToken, name);
+      setActiveCompanyState(name);
+      setMsg({ ok: `Active company set to ${name}. Dashboards will refresh on next load.` });
+    } catch (err) {
+      setMsg({ error: err.message });
+    }
+  }
 
   // Extension bridge — listens for 'ready' and 'configSaved' posts from
   // extension/bridge.js content script (only runs if the extension is
@@ -218,6 +257,48 @@ export default function ScheduledSyncSettings() {
               <li><b>Local CLI fallback:</b> <code className="text-cyan-300">npm run sync:headed</code> from <code className="text-cyan-300">tools/tally-sync-local/</code> — opens a browser, you click TallyPrime, it uploads.</li>
               <li><b>Scheduled cron (parked):</b> the workflow is wired up but dormant until AI vision can click TallyPrime headlessly. The creds you save below will drive it automatically once vision lands.</li>
             </ul>
+          </div>
+
+          <div className="glass-card p-4 border border-indigo-500/20 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Building2 size={14} className="text-indigo-400" />
+                <h4 className="text-sm font-semibold text-white">Tally companies</h4>
+              </div>
+              <button
+                type="button"
+                onClick={handleDetect}
+                disabled={detecting || !syncToken}
+                className={`px-3 py-1 rounded-md text-xs font-semibold border disabled:opacity-40 disabled:cursor-not-allowed ${detecting ? 'border-gray-600 text-gray-500' : 'border-indigo-500/40 text-indigo-300 hover:bg-indigo-500/10'}`}
+              >
+                {detecting ? 'Detecting…' : 'Detect companies'}
+              </button>
+            </div>
+            {companies.length ? (
+              <div className="space-y-1">
+                {companies.map((name) => {
+                  const isActive = name === activeCompany;
+                  return (
+                    <button
+                      key={name}
+                      type="button"
+                      onClick={() => handlePickActive(name)}
+                      className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs text-left border ${isActive ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200' : 'border-gray-700/40 text-gray-300 hover:bg-gray-800/40'}`}
+                    >
+                      <span className="truncate pr-3">{name}</span>
+                      {isActive && <Check size={14} className="text-emerald-400 flex-shrink-0" />}
+                    </button>
+                  );
+                })}
+                <p className="text-[11px] text-gray-500 pt-1">
+                  Active company is what every dashboard reads + what the top-bar switcher points at. Each company keeps its own snapshot — switching doesn't re-sync.
+                </p>
+              </div>
+            ) : (
+              <p className="text-xs text-gray-400">
+                No companies detected yet. Click <b>Detect companies</b> above — it hits Tally's "List of Companies" report and caches the result so the top-bar switcher + dashboards know what's available.
+              </p>
+            )}
           </div>
 
           <form onSubmit={handleSave} className="space-y-3">

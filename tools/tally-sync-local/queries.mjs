@@ -51,12 +51,55 @@ export function receiptVouchersRequest(cfg) {
   return reportRequest('Day Book', { ...cfg, vouchers: true });
 }
 
+// Stock items / groups: custom COLLECTION. Built-in Stock Summary returns
+// hierarchical summary rows, not flat STOCKITEM[] — observed returning 1
+// row instead of 803. Custom collection gets the flat array we need.
 export function stockItemsRequest(cfg) {
-  return reportRequest('Stock Summary', { company: cfg.company });
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>B2BIntelStockItems</ID></HEADER>
+  <BODY><DESC>
+    <STATICVARIABLES>
+      <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      ${companyFilter(cfg.company)}
+    </STATICVARIABLES>
+    <TDL><TDLMESSAGE>
+      <COLLECTION NAME="B2BIntelStockItems" ISMODIFY="No">
+        <TYPE>StockItem</TYPE>
+        <NATIVEMETHOD>Name</NATIVEMETHOD>
+        <NATIVEMETHOD>Parent</NATIVEMETHOD>
+        <NATIVEMETHOD>Category</NATIVEMETHOD>
+        <NATIVEMETHOD>BaseUnits</NATIVEMETHOD>
+        <NATIVEMETHOD>OpeningBalance</NATIVEMETHOD>
+        <NATIVEMETHOD>ClosingBalance</NATIVEMETHOD>
+        <NATIVEMETHOD>ClosingRate</NATIVEMETHOD>
+        <NATIVEMETHOD>ClosingValue</NATIVEMETHOD>
+        <NATIVEMETHOD>HSNCode</NATIVEMETHOD>
+        <NATIVEMETHOD>GSTApplicable</NATIVEMETHOD>
+      </COLLECTION>
+    </TDLMESSAGE></TDL>
+  </DESC></BODY>
+</ENVELOPE>`;
 }
 
 export function stockGroupsRequest(cfg) {
-  return reportRequest('List of Stock Groups', { company: cfg.company });
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>B2BIntelStockGroups</ID></HEADER>
+  <BODY><DESC>
+    <STATICVARIABLES>
+      <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      ${companyFilter(cfg.company)}
+    </STATICVARIABLES>
+    <TDL><TDLMESSAGE>
+      <COLLECTION NAME="B2BIntelStockGroups" ISMODIFY="No">
+        <TYPE>StockGroup</TYPE>
+        <NATIVEMETHOD>Name</NATIVEMETHOD>
+        <NATIVEMETHOD>Parent</NATIVEMETHOD>
+      </COLLECTION>
+    </TDLMESSAGE></TDL>
+  </DESC></BODY>
+</ENVELOPE>`;
 }
 
 export const XML_ARRAY_NODES = new Set([

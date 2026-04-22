@@ -236,12 +236,58 @@ function receiptVouchersRequest(cfg: { company: string; fromDate: string; toDate
   return reportWithVoucherDates('Day Book', cfg);
 }
 
+// Stock items / groups stay on our custom COLLECTION queries — empirically
+// the built-in 'Stock Summary' report returns a hierarchical summary (one
+// row per group, not per item) and 'List of Stock Groups' came back with a
+// single entry on the user's Tally. Custom COLLECTION reliably returns
+// the flat STOCKITEM[] / STOCKGROUP[] arrays the transformer expects (803
+// items + 52 groups in production).
 function stockItemsRequest(cfg: { company: string }) {
-  return reportRequest('Stock Summary', cfg.company);
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>B2BIntelStockItems</ID></HEADER>
+  <BODY><DESC>
+    <STATICVARIABLES>
+      <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      ${companyFilter(cfg.company)}
+    </STATICVARIABLES>
+    <TDL><TDLMESSAGE>
+      <COLLECTION NAME="B2BIntelStockItems" ISMODIFY="No">
+        <TYPE>StockItem</TYPE>
+        <NATIVEMETHOD>Name</NATIVEMETHOD>
+        <NATIVEMETHOD>Parent</NATIVEMETHOD>
+        <NATIVEMETHOD>Category</NATIVEMETHOD>
+        <NATIVEMETHOD>BaseUnits</NATIVEMETHOD>
+        <NATIVEMETHOD>OpeningBalance</NATIVEMETHOD>
+        <NATIVEMETHOD>ClosingBalance</NATIVEMETHOD>
+        <NATIVEMETHOD>ClosingRate</NATIVEMETHOD>
+        <NATIVEMETHOD>ClosingValue</NATIVEMETHOD>
+        <NATIVEMETHOD>HSNCode</NATIVEMETHOD>
+        <NATIVEMETHOD>GSTApplicable</NATIVEMETHOD>
+      </COLLECTION>
+    </TDLMESSAGE></TDL>
+  </DESC></BODY>
+</ENVELOPE>`;
 }
 
 function stockGroupsRequest(cfg: { company: string }) {
-  return reportRequest('List of Stock Groups', cfg.company);
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>B2BIntelStockGroups</ID></HEADER>
+  <BODY><DESC>
+    <STATICVARIABLES>
+      <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      ${companyFilter(cfg.company)}
+    </STATICVARIABLES>
+    <TDL><TDLMESSAGE>
+      <COLLECTION NAME="B2BIntelStockGroups" ISMODIFY="No">
+        <TYPE>StockGroup</TYPE>
+        <NATIVEMETHOD>Name</NATIVEMETHOD>
+        <NATIVEMETHOD>Parent</NATIVEMETHOD>
+      </COLLECTION>
+    </TDLMESSAGE></TDL>
+  </DESC></BODY>
+</ENVELOPE>`;
 }
 
 function sundryDebtorsRequest(cfg: { company: string; fromDate: string; toDate: string }) {
@@ -268,6 +314,7 @@ const COLLECTION_TTL_MS: Record<string, number> = {
 async function mergeSnapshotIntoTable(
   db: ReturnType<typeof createClient>,
   tenantKey: string,
+  company: string,
   incoming: {
     data?: Record<string, unknown>;
     counts?: Record<string, number>;
@@ -279,6 +326,7 @@ async function mergeSnapshotIntoTable(
     .from('tally_snapshots')
     .select('data, counts, errors, collection_meta')
     .eq('tenant_key', tenantKey)
+    .eq('company', company)
     .maybeSingle();
 
   const data = { ...(existing?.data as Record<string, unknown> || {}) };
@@ -315,13 +363,14 @@ async function mergeSnapshotIntoTable(
 
   const { error } = await db.from('tally_snapshots').upsert({
     tenant_key: tenantKey,
+    company,
     data,
     counts,
     errors,
     source: incoming.source || 'unknown',
     collection_meta: meta,
     updated_at: nowIso,
-  }, { onConflict: 'tenant_key' });
+  }, { onConflict: 'tenant_key,company' });
 
   return { error, data, counts, errors, collectionMeta: meta };
 }
@@ -331,6 +380,7 @@ async function mergeSnapshotIntoTable(
 async function mergeSnapshotFromBody(
   db: ReturnType<typeof createClient>,
   tenantKey: string,
+  company: string,
   body: Record<string, unknown>,
 ) {
   let data = body.data as Record<string, unknown> | undefined;
@@ -370,7 +420,7 @@ async function mergeSnapshotFromBody(
 
   const source = (body.source as string) || 'local-playwright';
   const { error, counts: outCounts, errors: outErrors, collectionMeta } =
-    await mergeSnapshotIntoTable(db, tenantKey, { data, counts, errors, source });
+    await mergeSnapshotIntoTable(db, tenantKey, company, { data, counts, errors, source });
   if (error) return { error: `Failed to persist snapshot: ${error.message}` };
   return { result: { counts: outCounts, errors: outErrors, collectionMeta } };
 }
@@ -394,6 +444,11 @@ Deno.serve(async (req) => {
   const action = (body.action as string) || 'test';
   const cfg = resolveConfig(body as TallyConfig);
   const tenantKey = (body.tenantKey as string) || 'default';
+  // `company` is the second half of the compound key on tally_snapshots.
+  // Callers that don't send one (legacy clients, single-company tenants)
+  // get an empty string which matches the migration's default; fresh
+  // multi-company callers pass the explicit Tally company name.
+  const company = typeof body.company === 'string' ? body.company : '';
 
   // Snapshot + portal-config actions. These are for the scheduled GitHub
   // Actions sync (get-config + ingest), the web dashboards reading the most
@@ -401,6 +456,7 @@ Deno.serve(async (req) => {
   // syncs from the UI (save-config + trigger-sync + get-status).
   const dbActions = new Set([
     'get-config', 'save-config', 'ingest', 'get-snapshot', 'get-status', 'trigger-sync',
+    'list-companies', 'get-companies', 'set-active-company',
   ]);
   if (dbActions.has(action)) {
     const supabaseUrl = Deno.env.get('SUPABASE_URL') || '';
@@ -416,7 +472,10 @@ Deno.serve(async (req) => {
     // Token-gated actions: anything that reads creds or mutates state requires
     // LOCAL_SYNC_TOKEN. get-snapshot + get-status are read-only (same trust
     // level as /sync-full) and pass through with just the project anon key.
-    const gatedActions = new Set(['get-config', 'save-config', 'ingest', 'trigger-sync']);
+    const gatedActions = new Set([
+      'get-config', 'save-config', 'ingest', 'trigger-sync',
+      'list-companies', 'set-active-company',
+    ]);
     if (gatedActions.has(action)) {
       const required = Deno.env.get('LOCAL_SYNC_TOKEN') || '';
       const provided = (body.syncToken as string) || '';
@@ -536,10 +595,17 @@ Deno.serve(async (req) => {
     if (action === 'get-status') {
       // Dashboard polls this to show "last synced / next run" info without
       // leaking creds. Anon-key callers are fine — no secrets returned.
+      const { data: cos } = await db
+        .from('tally_companies')
+        .select('active_company')
+        .eq('tenant_key', tenantKey)
+        .maybeSingle();
+      const activeCompany = company || cos?.active_company || '';
       const { data: snap } = await db
         .from('tally_snapshots')
-        .select('counts, errors, source, updated_at')
+        .select('counts, errors, source, updated_at, company')
         .eq('tenant_key', tenantKey)
+        .eq('company', activeCompany)
         .maybeSingle();
       const { data: cfg } = await db
         .from('tally_portal_config')
@@ -567,7 +633,7 @@ Deno.serve(async (req) => {
     }
 
     if (action === 'ingest') {
-      const { result, error } = await mergeSnapshotFromBody(db, tenantKey, body);
+      const { result, error } = await mergeSnapshotFromBody(db, tenantKey, company, body);
       if (error) {
         return new Response(JSON.stringify({ connected: false, error }), {
           status: 500, headers: jsonHeaders,
@@ -576,11 +642,113 @@ Deno.serve(async (req) => {
       return new Response(JSON.stringify({ connected: true, action, tenantKey, ...result }), { headers: jsonHeaders });
     }
 
+    // list-companies: probe Tally's built-in "List of Companies" report,
+    // extract the company names, cache them in tally_companies, and return
+    // the list. Token-gated because it's the Tally-hits-the-wire action.
+    // Typical flow: admin clicks "Detect companies" in the settings card →
+    // UI calls this → dropdown populates. The cached list is then served
+    // by get-companies (anon-safe) so every dashboard load doesn't re-ping
+    // Tally for the same master data.
+    if (action === 'list-companies') {
+      const xml = reportRequest('List of Companies', cfg.company || '');
+      let companies: string[] = [];
+      try {
+        const parsed = await tallyRequest(xml, cfg, 20000);
+        // Walk the parsed XML for every COMPANYNAME or NAME attribute on a
+        // COMPANY node. Tally's List of Companies puts the name at
+        // COMPANY.@_NAME in attribute form, so we check both the text node
+        // and the attribute-prefixed variant.
+        const seen = new Set<string>();
+        const walk = (node: unknown) => {
+          if (!node) return;
+          if (Array.isArray(node)) { node.forEach(walk); return; }
+          if (typeof node !== 'object') return;
+          for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+            const k = key.toUpperCase();
+            if (k === 'COMPANY' || k === 'COMPANIES') {
+              // Company nodes — look at both the @_NAME attribute (fast-xml-parser
+              // prefixes attrs with '_' in our config) and a nested NAME child.
+              const rec = value as Record<string, unknown>;
+              const name = (rec?._NAME as string) || (rec?.NAME as string);
+              if (typeof name === 'string' && name.trim()) seen.add(name.trim());
+              walk(value);
+            } else {
+              walk(value);
+            }
+          }
+        };
+        walk(parsed);
+        companies = Array.from(seen).sort();
+      } catch (err) {
+        return new Response(JSON.stringify({
+          connected: false,
+          error: `List of Companies failed: ${err instanceof Error ? err.message : String(err)}`,
+        }), { status: 500, headers: jsonHeaders });
+      }
+      if (companies.length) {
+        await db.from('tally_companies').upsert({
+          tenant_key: tenantKey,
+          companies,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: 'tenant_key' });
+      }
+      return new Response(JSON.stringify({ connected: true, action, companies }), { headers: jsonHeaders });
+    }
+
+    // get-companies: read-only, returns cached companies list + the current
+    // active_company. Anon-safe (no creds).
+    if (action === 'get-companies') {
+      const { data: row } = await db
+        .from('tally_companies')
+        .select('companies, active_company, updated_at')
+        .eq('tenant_key', tenantKey)
+        .maybeSingle();
+      return new Response(JSON.stringify({
+        connected: true,
+        action,
+        companies: (row?.companies as string[]) || [],
+        activeCompany: row?.active_company || '',
+        updatedAt: row?.updated_at || null,
+      }), { headers: jsonHeaders });
+    }
+
+    // set-active-company: admin picks which company dashboards read from.
+    // Dashboards call get-snapshot without an explicit company → it
+    // resolves to active_company here.
+    if (action === 'set-active-company') {
+      const next = (body.company as string) || '';
+      const { error } = await db.from('tally_companies').upsert({
+        tenant_key: tenantKey,
+        active_company: next,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'tenant_key' });
+      if (error) {
+        return new Response(JSON.stringify({
+          connected: false,
+          error: `Failed to set active company: ${error.message}`,
+        }), { status: 500, headers: jsonHeaders });
+      }
+      return new Response(JSON.stringify({ connected: true, action, activeCompany: next }), { headers: jsonHeaders });
+    }
+
     // get-snapshot
+    // Resolve which company to read: explicit body.company > active_company
+    // saved in tally_companies > empty string (back-compat with the single-
+    // company row that existed before the compound-PK migration).
+    let snapshotCompany = company;
+    if (!snapshotCompany) {
+      const { data: cos } = await db
+        .from('tally_companies')
+        .select('active_company')
+        .eq('tenant_key', tenantKey)
+        .maybeSingle();
+      snapshotCompany = cos?.active_company || '';
+    }
     const { data: row, error } = await db
       .from('tally_snapshots')
-      .select('data, counts, errors, source, updated_at, collection_meta')
+      .select('data, counts, errors, source, updated_at, collection_meta, company')
       .eq('tenant_key', tenantKey)
+      .eq('company', snapshotCompany)
       .maybeSingle();
     if (error) {
       return new Response(JSON.stringify({
@@ -655,6 +823,7 @@ Deno.serve(async (req) => {
         .from('tally_snapshots')
         .select('collection_meta')
         .eq('tenant_key', tenantKey)
+        .eq('company', cfg.company || company)
         .maybeSingle();
       existingMeta = (existing?.collection_meta as typeof existingMeta) || {};
       const now = Date.now();
@@ -735,7 +904,7 @@ Deno.serve(async (req) => {
     } | null = null;
     if (db && (anyConnected || Object.keys(errors).length)) {
       const { error: mergeErr, counts: mergedCounts, errors: mergedErrors, data: mergedData, collectionMeta } =
-        await mergeSnapshotIntoTable(db, tenantKey, {
+        await mergeSnapshotIntoTable(db, tenantKey, cfg.company || company, {
           data,
           counts,
           errors,

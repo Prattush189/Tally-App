@@ -138,13 +138,40 @@ export async function triggerSyncNow(syncToken, tenantKey = 'default') {
   return supabaseInvoke('trigger-sync', { syncToken, tenantKey });
 }
 
+// List of Tally companies the current sync can see. Reads the cache on
+// Supabase; does NOT re-probe Tally. Use listCompaniesFromTally to force a
+// fresh probe (token-gated).
+export async function getCompanies(tenantKey = 'default') {
+  if (TALLY_BACKEND !== 'supabase') return { companies: [], activeCompany: '' };
+  try {
+    return await supabaseInvoke('get-companies', { tenantKey });
+  } catch (err) {
+    return { companies: [], activeCompany: '', error: err.message };
+  }
+}
+
+// Probe Tally's 'List of Companies' and cache the result. Admin-only.
+export async function listCompaniesFromTally(syncToken, tenantKey = 'default') {
+  return supabaseInvoke('list-companies', { syncToken, tenantKey });
+}
+
+// Persist which company dashboards read from. Admin-only.
+export async function setActiveCompany(syncToken, companyName, tenantKey = 'default') {
+  return supabaseInvoke('set-active-company', { syncToken, tenantKey, company: companyName });
+}
+
 // Load the most recent snapshot stored by the local Playwright sync tool.
 // Returns the same shape as a successful syncFromTally() so TallySync can
 // feed the result into transformTallyFull without branching.
-export async function loadFromSnapshot(tenantKey = 'default') {
+export async function loadFromSnapshot(tenantKey = 'default', company) {
   if (TALLY_BACKEND !== 'supabase') return null;
   try {
-    const data = await supabaseInvoke('get-snapshot', { tenantKey });
+    // Omitting company lets the edge function fall back to
+    // tally_companies.active_company — the single source of truth for
+    // which snapshot dashboards read.
+    const body = { tenantKey };
+    if (company) body.company = company;
+    const data = await supabaseInvoke('get-snapshot', body);
     if (!data?.connected) return { success: false, error: data?.error || 'No snapshot available' };
     const counts = data?.counts || {};
     return {

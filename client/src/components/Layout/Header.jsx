@@ -2,6 +2,7 @@ import { Search, Bell, RefreshCw, Clock } from 'lucide-react';
 import { NAV_ITEMS } from './Sidebar';
 import { useAuth } from '../../context/AuthContext';
 import { loadLiveCustomers } from '../../lib/liveData';
+import CompanySwitcher from './CompanySwitcher';
 
 function timeAgo(iso) {
   if (!iso) return '';
@@ -41,6 +42,7 @@ export default function Header({ active, searchQuery, onSearchChange, onRefresh,
             className="bg-gray-800/60 border border-gray-700/50 rounded-lg pl-9 pr-4 py-1.5 text-sm text-gray-300 placeholder-gray-500 focus:outline-none focus:border-indigo-500 w-56 transition-colors"
           />
         </div>
+        <CompanySwitcher />
         <button onClick={onRefresh} className="p-2 rounded-lg text-gray-400 hover:text-white hover:bg-gray-800/50 transition-all" title="Refresh data">
           <RefreshCw size={16} className={syncing ? 'animate-spin' : ''} />
         </button>
