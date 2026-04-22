@@ -330,6 +330,17 @@ export default function TallySync() {
             )}
 
             {/* Sync Result */}
+            {syncResult?.tallyNotRunning && (
+              <div className="p-3 rounded-lg border text-sm bg-amber-500/10 border-amber-500/30 text-amber-300 space-y-1">
+                <div className="font-semibold">⚠ TallyPrime doesn't appear to be running</div>
+                <div className="text-xs text-amber-200/90">
+                  Every live query timed out or got reset — this usually means no one has an active RemoteApp session on the portal, so <code>:9007</code> has nothing to route to.
+                </div>
+                <div className="text-xs text-amber-200/80 pt-1">
+                  Fix: <a href="http://103.76.213.243/" target="_blank" rel="noreferrer" className="underline underline-offset-2">open the portal</a> → log in → click TallyPrime → wait for the RemoteApp to load → then re-click Sync Now. Or use the <b>Chrome extension</b> which runs inside that portal tab (see <code>extension/README.md</code>).
+                </div>
+              </div>
+            )}
             {syncResult && (
               <div className={`p-3 rounded-lg border text-sm ${syncResult.success ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' : 'bg-red-500/10 border-red-500/20 text-red-400'}`}>
                 {syncResult.success ? (

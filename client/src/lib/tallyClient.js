@@ -65,17 +65,27 @@ export async function syncFromTally(config = {}) {
       const data = await supabaseInvoke('sync-full', config);
       const counts = data?.counts || {};
       const bundle = data?.data || {};
+      const errors = data?.errors || {};
+      // Detect the "Tally isn't running right now" pattern: every collection
+      // we actually tried to fetch this run aborted (no one had an active
+      // TallyPrime RemoteApp session so :9007 didn't route anywhere). We
+      // flag it so the UI can render an actionable banner instead of a wall
+      // of "signal has been aborted" messages.
+      const fetched = data?.fetched || [];
+      const abortedAll = fetched.length > 0
+        && fetched.every((key) => /aborted|connection closed|network error/i.test(String(errors[key] || '')));
       return {
         success: Boolean(data?.connected),
         error: data?.error,
         partial: false,
         mode: 'full',
+        tallyNotRunning: abortedAll,
         ledgers: counts.ledgers || 0,
         salesVouchers: counts.salesVouchers || 0,
         receiptVouchers: counts.receiptVouchers || 0,
         stockItems: counts.stockItems || 0,
         stockGroups: counts.stockGroups || 0,
-        collectionErrors: data?.errors || {},
+        collectionErrors: errors,
         raw: bundle,
       };
     } catch (fullErr) {
