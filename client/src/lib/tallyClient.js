@@ -106,6 +106,10 @@ export async function syncFromTally(config = {}) {
         stockGroups: counts.stockGroups || 0,
         collectionErrors: errors,
         raw: bundle,
+        discoveredCompanies: data?.discoveredCompanies || [],
+        activeCompany: data?.activeCompany,
+        discoveryError: data?.discoveryError,
+        discoveryRawSample: data?.discoveryRawSample,
       };
     } catch (fullErr) {
       const data = await supabaseInvoke('sync', config);

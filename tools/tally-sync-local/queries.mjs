@@ -40,7 +40,31 @@ function reportRequest(reportId, cfg) {
 }
 
 export function sundryDebtorsRequest(cfg) {
-  return reportRequest('List of Accounts', cfg);
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>B2BIntelLedgers</ID></HEADER>
+  <BODY><DESC>
+    <STATICVARIABLES>
+      <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      ${companyFilter(cfg.company)}
+      ${dateFilter(cfg)}
+    </STATICVARIABLES>
+    <TDL><TDLMESSAGE>
+      <COLLECTION NAME="B2BIntelLedgers" ISMODIFY="No">
+        <TYPE>Ledger</TYPE>
+        <NATIVEMETHOD>Name</NATIVEMETHOD>
+        <NATIVEMETHOD>Parent</NATIVEMETHOD>
+        <NATIVEMETHOD>ClosingBalance</NATIVEMETHOD>
+        <NATIVEMETHOD>OpeningBalance</NATIVEMETHOD>
+        <NATIVEMETHOD>CreditLimit</NATIVEMETHOD>
+        <NATIVEMETHOD>CreditPeriod</NATIVEMETHOD>
+        <NATIVEMETHOD>PartyGSTIN</NATIVEMETHOD>
+        <NATIVEMETHOD>LedStateName</NATIVEMETHOD>
+        <NATIVEMETHOD>Address</NATIVEMETHOD>
+      </COLLECTION>
+    </TDLMESSAGE></TDL>
+  </DESC></BODY>
+</ENVELOPE>`;
 }
 
 export function salesVouchersRequest(cfg) {

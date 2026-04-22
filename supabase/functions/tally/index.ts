@@ -291,8 +291,36 @@ function stockGroupsRequest(cfg: { company: string }) {
 </ENVELOPE>`;
 }
 
+// Custom COLLECTION (not 'List of Accounts' built-in report) — the built-in
+// returns a hierarchical structure where each ledger's group is implicit in
+// its XML parent, not exposed as a PARENT field. Our isSundryDebtor filter
+// needs a flat PARENT string per ledger, so we use NATIVEMETHOD explicitly.
 function sundryDebtorsRequest(cfg: { company: string; fromDate: string; toDate: string }) {
-  return reportWithDates('List of Accounts', cfg);
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>B2BIntelLedgers</ID></HEADER>
+  <BODY><DESC>
+    <STATICVARIABLES>
+      <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      ${companyFilter(cfg.company)}
+      ${dateFilter(cfg)}
+    </STATICVARIABLES>
+    <TDL><TDLMESSAGE>
+      <COLLECTION NAME="B2BIntelLedgers" ISMODIFY="No">
+        <TYPE>Ledger</TYPE>
+        <NATIVEMETHOD>Name</NATIVEMETHOD>
+        <NATIVEMETHOD>Parent</NATIVEMETHOD>
+        <NATIVEMETHOD>ClosingBalance</NATIVEMETHOD>
+        <NATIVEMETHOD>OpeningBalance</NATIVEMETHOD>
+        <NATIVEMETHOD>CreditLimit</NATIVEMETHOD>
+        <NATIVEMETHOD>CreditPeriod</NATIVEMETHOD>
+        <NATIVEMETHOD>PartyGSTIN</NATIVEMETHOD>
+        <NATIVEMETHOD>LedStateName</NATIVEMETHOD>
+        <NATIVEMETHOD>Address</NATIVEMETHOD>
+      </COLLECTION>
+    </TDLMESSAGE></TDL>
+  </DESC></BODY>
+</ENVELOPE>`;
 }
 
 // Per-collection freshness window for the sync-full skipFresh flag. Vouchers
@@ -679,8 +707,18 @@ Deno.serve(async (req) => {
               for (const item of items) {
                 if (!item || typeof item !== 'object') continue;
                 const rec = item as Record<string, unknown>;
-                const name = (rec?._NAME as string) || (rec?.NAME as string);
-                if (typeof name === 'string' && name.trim()) seen.add(name.trim());
+                const raw = rec?._NAME ?? rec?.NAME;
+                // Unwrap text-node wrappers: NAME might be "Foo" OR
+                // { _text: "Foo" } OR { "#text": "Foo" } depending on
+                // Tally's XML shape. Check all three.
+                let name: string | undefined;
+                if (typeof raw === 'string') name = raw;
+                else if (raw && typeof raw === 'object') {
+                  const r = raw as Record<string, unknown>;
+                  if (typeof r._text === 'string') name = r._text;
+                  else if (typeof r['#text'] === 'string') name = r['#text'] as string;
+                }
+                if (name && name.trim()) seen.add(name.trim());
               }
               walk(value);
             } else {
@@ -815,10 +853,20 @@ Deno.serve(async (req) => {
     let activeCompany = cfg.company || company;
     let discoveredCompanies: string[] = [];
     let discoveryError: string | null = null;
+    // When detection succeeds but the parser finds no companies, keep a
+    // short dump of the raw XML so we can diagnose unexpected Tally shapes
+    // (which differ by TallyPrime version). Truncated to 1500 chars.
+    let discoveryRawSample: string | null = null;
     if (db) {
       try {
         const probeXml = reportRequest('List of Companies', '');
+        // Snag the raw text too — if the parser finds nothing below, we
+        // include a truncated slice in the response so we can see what
+        // Tally actually sent us and fix the shape.
         const parsed = await tallyRequest(probeXml, cfg, 15000);
+        try {
+          discoveryRawSample = JSON.stringify(parsed).slice(0, 1500);
+        } catch { /* ignore */ }
         const seen = new Set<string>();
         const walk = (node: unknown) => {
           if (!node) return;
@@ -833,8 +881,18 @@ Deno.serve(async (req) => {
               for (const item of items) {
                 if (!item || typeof item !== 'object') continue;
                 const rec = item as Record<string, unknown>;
-                const name = (rec?._NAME as string) || (rec?.NAME as string);
-                if (typeof name === 'string' && name.trim()) seen.add(name.trim());
+                const raw = rec?._NAME ?? rec?.NAME;
+                // Unwrap text-node wrappers: NAME might be "Foo" OR
+                // { _text: "Foo" } OR { "#text": "Foo" } depending on
+                // Tally's XML shape. Check all three.
+                let name: string | undefined;
+                if (typeof raw === 'string') name = raw;
+                else if (raw && typeof raw === 'object') {
+                  const r = raw as Record<string, unknown>;
+                  if (typeof r._text === 'string') name = r._text;
+                  else if (typeof r['#text'] === 'string') name = r['#text'] as string;
+                }
+                if (name && name.trim()) seen.add(name.trim());
               }
             }
             walk(value);
@@ -1015,6 +1073,9 @@ Deno.serve(async (req) => {
       // client can still cache it in localStorage and populate the switcher.
       discoveredCompanies,
       discoveryError,
+      // Only included when we got a response but parsed 0 companies —
+      // helps diagnose which Tally XML shape this version returns.
+      discoveryRawSample: (discoveredCompanies.length === 0 && !discoveryError) ? discoveryRawSample : null,
     }), { headers: jsonHeaders });
   }
 

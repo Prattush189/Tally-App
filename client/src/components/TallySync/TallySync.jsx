@@ -387,6 +387,26 @@ export default function TallySync() {
                         Full sync unavailable{syncResult.fullError ? ` (${syncResult.fullError})` : ''} — fell back to ledger-only. Sales history / SKU penetration will stay at zero until the full sync succeeds.
                       </div>
                     )}
+                    {syncResult.discoveredCompanies && (
+                      <div className="text-xs pt-1">
+                        {syncResult.discoveredCompanies.length > 0 ? (
+                          <div className="text-cyan-300/80">
+                            Detected {syncResult.discoveredCompanies.length} company{syncResult.discoveredCompanies.length === 1 ? '' : 'ies'}: {syncResult.discoveredCompanies.join(', ')}. Active: <b>{syncResult.activeCompany || '(none)'}</b>.
+                          </div>
+                        ) : syncResult.discoveryError ? (
+                          <div className="text-amber-300/80">
+                            Company auto-detect failed: {syncResult.discoveryError}
+                          </div>
+                        ) : syncResult.discoveryRawSample ? (
+                          <div className="text-amber-300/80 space-y-1">
+                            <div>Tally responded to List of Companies but the parser found 0 companies. Raw sample:</div>
+                            <pre className="text-[10px] text-gray-400 font-mono break-all whitespace-pre-wrap bg-gray-900/40 rounded p-2 max-h-32 overflow-auto">
+                              {syncResult.discoveryRawSample}
+                            </pre>
+                          </div>
+                        ) : null}
+                      </div>
+                    )}
                     {syncResult.collectionErrors && Object.keys(syncResult.collectionErrors).length > 0 && (
                       <div className="text-xs text-amber-300/80 pt-1 space-y-0.5">
                         {Object.entries(syncResult.collectionErrors).map(([col, msg]) => (
@@ -402,12 +422,14 @@ export default function TallySync() {
                     {syncResult.transformError && (
                       <div className="text-xs text-red-300/80 pt-1">Transform warning: {syncResult.transformError}</div>
                     )}
-                    {syncResult.diagnostics && !syncResult.diagnostics.filterMatched && (
+                    {syncResult.diagnostics && syncResult.dealersStored != null && (
                       <div className="text-xs text-amber-300/80 pt-1 space-y-1">
                         <div>
-                          {syncResult.diagnostics.usedFallback
-                            ? `No "Sundry Debtors" group found — falling back to ledgers with non-zero balances (${syncResult.dealersStored}).`
-                            : 'No ledgers matched and no balances found — dashboards will stay empty.'}
+                          {syncResult.diagnostics.filterMatched
+                            ? `Matched ${syncResult.dealersStored} Sundry Debtor ledgers out of ${syncResult.ledgers || '?'} total.`
+                            : syncResult.diagnostics.usedFallback
+                              ? `No "Sundry Debtors" group matched — falling back to ledgers with non-zero balances (${syncResult.dealersStored}).`
+                              : 'No ledgers matched and no balances found — dashboards will stay empty.'}
                         </div>
                         {syncResult.diagnostics.parentsSeen?.length > 0 && (
                           <div className="text-[11px] text-gray-400">
