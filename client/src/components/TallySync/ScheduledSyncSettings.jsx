@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Cloud, Play, Save, ShieldCheck, ChevronDown, ChevronRight, AlertTriangle } from 'lucide-react';
+import { Cloud, Play, Save, ChevronDown, ChevronRight, AlertTriangle, Chrome, Check, ExternalLink } from 'lucide-react';
 import { getSyncStatus, saveSyncConfig, triggerSyncNow } from '../../lib/tallyClient';
+import { SUPABASE_URL, SUPABASE_ANON_KEY } from '../../utils/supabase';
 
 // Cache the admin sync token in localStorage so the admin doesn't have to
 // paste it every time. XSS exposure is acceptable in this single-tenant
@@ -44,6 +45,10 @@ export default function ScheduledSyncSettings() {
   const [saving, setSaving] = useState(false);
   const [triggering, setTriggering] = useState(false);
   const [msg, setMsg] = useState(null);
+  // Extension bridge state. Extension's content script posts a 'ready'
+  // message on load, then a 'configSaved' ack after we push config to it.
+  const [extState, setExtState] = useState({ present: false, version: null, savedAt: null });
+  const [extPushing, setExtPushing] = useState(false);
 
   async function refreshStatus() {
     const s = await getSyncStatus();
@@ -63,6 +68,46 @@ export default function ScheduledSyncSettings() {
     const t = setInterval(refreshStatus, 60_000);
     return () => clearInterval(t);
   }, []);
+
+  // Extension bridge — listens for 'ready' and 'configSaved' posts from
+  // extension/bridge.js content script (only runs if the extension is
+  // installed on this origin).
+  useEffect(() => {
+    const handler = (e) => {
+      if (e.source !== window) return;
+      const d = e.data;
+      if (!d || d.source !== 'tally-extension') return;
+      if (d.event === 'ready' || d.event === 'pong') {
+        setExtState((s) => ({ ...s, present: true, version: d.version }));
+      }
+      if (d.event === 'configSaved') {
+        setExtState((s) => ({ ...s, present: true, savedAt: new Date().toISOString() }));
+        setExtPushing(false);
+      }
+    };
+    window.addEventListener('message', handler);
+    // Ping in case the extension loaded before this effect attached.
+    window.postMessage({ source: 'tally-dashboard', type: 'ping' }, '*');
+    return () => window.removeEventListener('message', handler);
+  }, []);
+
+  const pushConfigToExtension = () => {
+    if (!extState.present) return;
+    setExtPushing(true);
+    window.postMessage({
+      source: 'tally-dashboard',
+      type: 'setConfig',
+      config: {
+        supabaseUrl: SUPABASE_URL,
+        supabaseAnonKey: SUPABASE_ANON_KEY,
+        syncToken,
+        company: form.company || status?.configPreview?.company || '',
+        tenantKey: 'default',
+      },
+    }, '*');
+    // Safety timeout in case the extension never acks
+    setTimeout(() => setExtPushing(false), 5000);
+  };
 
   const handleSave = async (e) => {
     e?.preventDefault?.();
@@ -124,6 +169,43 @@ export default function ScheduledSyncSettings() {
 
       {expanded && (
         <div className="space-y-4 pt-2">
+          {/* Extension status card — one-click configure if installed */}
+          {extState.present ? (
+            <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-lg p-4 text-xs text-gray-300 space-y-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-start gap-2">
+                  <Chrome size={16} className="text-emerald-300 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-semibold text-emerald-300">Chrome extension detected{extState.version ? ` (v${extState.version})` : ''}</p>
+                    <p className="text-gray-300 mt-0.5">Push this app's Supabase creds + sync token to the extension so you don't have to paste them in its popup.</p>
+                    {extState.savedAt && (
+                      <p className="text-emerald-400/80 mt-1 flex items-center gap-1"><Check size={12} /> Config synced to extension at {new Date(extState.savedAt).toLocaleTimeString()}</p>
+                    )}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={pushConfigToExtension}
+                  disabled={extPushing || !syncToken}
+                  title={!syncToken ? 'Paste the sync token below first' : 'Send supabase URL + anon key + sync token + company to the extension'}
+                  className={`flex-shrink-0 px-3 py-1.5 rounded-lg text-xs font-semibold border disabled:opacity-40 disabled:cursor-not-allowed ${extPushing ? 'border-gray-600 text-gray-500' : 'border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10'}`}
+                >
+                  {extPushing ? 'Pushing…' : 'Configure extension'}
+                </button>
+              </div>
+              <p className="text-[11px] text-gray-400">
+                Next step: open <a href="http://103.76.213.243/" target="_blank" rel="noreferrer" className="text-emerald-300 underline underline-offset-2 inline-flex items-center gap-1">the Tally portal <ExternalLink size={10} /></a>, log in, click TallyPrime, then click the <b>↻ Sync to Dashboard</b> button the extension injects.
+              </p>
+            </div>
+          ) : (
+            <div className="bg-gray-800/40 border border-gray-700/50 rounded-lg p-4 text-xs text-gray-300 space-y-1">
+              <p className="font-semibold text-gray-200 flex items-center gap-2"><Chrome size={14} /> Chrome extension not detected</p>
+              <p>
+                Install the <code className="text-cyan-300">extension/</code> folder as an unpacked Chrome extension (one-time). See <code className="text-cyan-300">extension/README.md</code>. Once installed and this page reloaded, a "Configure extension" button will appear here to push config automatically.
+              </p>
+            </div>
+          )}
+
           <div className="bg-amber-500/5 border border-amber-500/20 rounded-lg p-4 text-xs text-gray-300 space-y-2">
             <p className="font-semibold text-amber-300 flex items-center gap-2"><AlertTriangle size={14} /> How syncs happen today</p>
             <p>

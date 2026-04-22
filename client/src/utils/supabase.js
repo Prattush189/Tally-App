@@ -13,8 +13,11 @@ import { createClient } from '@supabase/supabase-js';
 const DEFAULT_SUPABASE_URL = 'https://vqusztwxrjokjgkiebem.supabase.co';
 const DEFAULT_SUPABASE_ANON_KEY = 'sb_publishable_xjz2L_v44mY3WCCGq3caug_K4NXsMHW';
 
-const url = import.meta.env.VITE_SUPABASE_URL || DEFAULT_SUPABASE_URL;
-const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || DEFAULT_SUPABASE_ANON_KEY;
+export const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || DEFAULT_SUPABASE_URL;
+export const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || DEFAULT_SUPABASE_ANON_KEY;
+
+const url = SUPABASE_URL;
+const anonKey = SUPABASE_ANON_KEY;
 
 export const HAS_SUPABASE = Boolean(url && anonKey);
 

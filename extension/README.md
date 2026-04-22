@@ -25,7 +25,14 @@ Flow:
 
 ## Configure (one-time, per browser)
 
-1. Click the extension's toolbar icon → a small settings popup opens
+**Option A — auto-configure from the dashboard (recommended):**
+1. Open the B2B Intelligence dashboard → **TallySync** page → **Scheduled Sync (Cloud)** card
+2. Paste the sync token once in the admin token field (if not already there)
+3. A green "Chrome extension detected" banner appears with a **Configure extension** button — click it
+4. The dashboard pushes its Supabase URL, anon key, sync token, and company to the extension. Done.
+
+**Option B — manual, via the extension popup:**
+1. Click the extension's toolbar icon → settings popup opens
 2. Fill in:
    - **Supabase URL** — `https://vqusztwxrjokjgkiebem.supabase.co`
    - **Supabase anon key** — from https://supabase.com/dashboard/project/vqusztwxrjokjgkiebem/settings/api (anon public)
@@ -35,6 +42,12 @@ Flow:
 3. Click **Save**
 
 Config lives in `chrome.storage.local` — not synced to any cloud.
+
+### How auto-configure works
+
+The extension's `bridge.js` content script runs on the dashboard's origins (`prattush189.github.io` + `localhost` + `127.0.0.1` in dev). It listens for `window.postMessage` events whose `source` field is `tally-dashboard`. The dashboard sends a `setConfig` message containing everything except nothing already on the page won't know (the sync token still comes from the admin's paste). The extension stores it in `chrome.storage.local` — same place the manual popup writes to. Both flows produce identical state.
+
+If you fork and host the dashboard elsewhere, add your origin to `extension/manifest.json` → `content_scripts[1].matches` and reload the extension.
 
 ## Using it
 
