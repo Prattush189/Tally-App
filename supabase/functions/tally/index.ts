@@ -753,11 +753,22 @@ Deno.serve(async (req) => {
     // needs it.
     const skipFresh = body.skipFresh !== false;
     const allJobs = [
+      // Order matters: lock in the reliable small collections FIRST so
+      // dashboards always have master data, then try the flaky voucher
+      // queries last. Voucher failures on this tunnel historically took
+      // their full timeout before erroring, chewing the wall-clock budget
+      // and forcing stock items / groups to abort on retries. Running
+      // stocks before vouchers gives them uncontested budget.
+      //
+      // Tighter voucher timeouts: every sync so far has failed voucher
+      // queries mid-response or signal-aborted. No point waiting 45s for
+      // a query that never succeeds — 25s / 20s still covers the happy
+      // path if the tunnel recovers, and frees ~35s for stocks + retries.
       { key: 'ledgers' as const, xml: sundryDebtorsRequest(cfg), node: 'LEDGER', timeoutMs: 65000 },
-      { key: 'salesVouchers' as const, xml: salesVouchersRequest(cfg), node: 'VOUCHER', timeoutMs: 45000 },
-      { key: 'receiptVouchers' as const, xml: receiptVouchersRequest(cfg), node: 'VOUCHER', timeoutMs: 35000 },
-      { key: 'stockItems' as const, xml: stockItemsRequest(cfg), node: 'STOCKITEM', timeoutMs: 15000 },
-      { key: 'stockGroups' as const, xml: stockGroupsRequest(cfg), node: 'STOCKGROUP', timeoutMs: 10000 },
+      { key: 'stockItems' as const, xml: stockItemsRequest(cfg), node: 'STOCKITEM', timeoutMs: 20000 },
+      { key: 'stockGroups' as const, xml: stockGroupsRequest(cfg), node: 'STOCKGROUP', timeoutMs: 12000 },
+      { key: 'salesVouchers' as const, xml: salesVouchersRequest(cfg), node: 'VOUCHER', timeoutMs: 25000 },
+      { key: 'receiptVouchers' as const, xml: receiptVouchersRequest(cfg), node: 'VOUCHER', timeoutMs: 20000 },
     ];
 
     // Decide which collections to actually fetch. We can only persist +
