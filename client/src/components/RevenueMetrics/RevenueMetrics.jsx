@@ -1,14 +1,19 @@
+import { useState } from 'react';
 import { DollarSign, TrendingUp, Activity, Users } from 'lucide-react';
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import MetricCard from '../common/MetricCard';
 import SectionHeader from '../common/SectionHeader';
 import LoadingSpinner from '../common/LoadingSpinner';
+import TimeGranularityToggle, { aggregateSeries } from '../common/TimeGranularityToggle';
 import { useAnalytics } from '../../hooks/useAnalytics';
 import { fmt, TOOLTIP_STYLE, CHART_COLORS } from '../../utils/format';
 
 export default function RevenueMetrics() {
   const { data, loading } = useAnalytics('revenue');
+  const [granularity, setGranularity] = useState('month');
   if (loading || !data) return <LoadingSpinner />;
+  const trendSeries = aggregateSeries(data.revenueTrends, granularity);
+  const trendLabel = granularity === 'month' ? '12 Months' : granularity === 'quarter' ? 'Quarterly' : 'Yearly';
 
   return (
     <div className="space-y-6">
@@ -23,9 +28,12 @@ export default function RevenueMetrics() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="glass-card p-5">
-          <h3 className="text-sm font-semibold text-gray-300 mb-4">NRR & GRR Trend (12 Months)</h3>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-sm font-semibold text-gray-300">NRR & GRR Trend ({trendLabel})</h3>
+            <TimeGranularityToggle value={granularity} onChange={setGranularity} size="xs" />
+          </div>
           <ResponsiveContainer width="100%" height={280}>
-            <LineChart data={data.revenueTrends}>
+            <LineChart data={trendSeries}>
               <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
               <XAxis dataKey="month" tick={{ fill: '#9ca3af', fontSize: 11 }} />
               <YAxis tick={{ fill: '#9ca3af', fontSize: 12 }} domain={[80, 130]} />

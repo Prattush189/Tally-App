@@ -1,14 +1,19 @@
+import { useState } from 'react';
 import { BarChart3, Users, DollarSign, AlertTriangle, ShieldAlert, Package, TrendingUp, Target } from 'lucide-react';
 import { AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import MetricCard from '../common/MetricCard';
 import SectionHeader from '../common/SectionHeader';
 import LoadingSpinner from '../common/LoadingSpinner';
+import TimeGranularityToggle, { aggregateSeries } from '../common/TimeGranularityToggle';
 import { useAnalytics } from '../../hooks/useAnalytics';
 import { fmt, RISK_COLORS, TOOLTIP_STYLE } from '../../utils/format';
 
 export default function Overview() {
   const { data, loading } = useAnalytics('overview');
+  const [granularity, setGranularity] = useState('month');
   if (loading || !data) return <LoadingSpinner />;
+  const trendSeries = aggregateSeries(data.revenueTrends, granularity);
+  const trendLabel = granularity === 'month' ? '12 Months' : granularity === 'quarter' ? 'Quarterly' : 'Yearly';
 
   return (
     <div className="space-y-6">
@@ -30,22 +35,33 @@ export default function Overview() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="glass-card p-5">
-          <h3 className="text-sm font-semibold text-gray-300 mb-4">Revenue Trend (12 Months)</h3>
-          <ResponsiveContainer width="100%" height={280}>
-            <AreaChart data={data.revenueTrends}>
-              <defs>
-                <linearGradient id="revGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#6366f1" stopOpacity={0.3} />
-                  <stop offset="95%" stopColor="#6366f1" stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-              <XAxis dataKey="month" tick={{ fill: '#9ca3af', fontSize: 11 }} />
-              <YAxis tick={{ fill: '#9ca3af', fontSize: 11 }} tickFormatter={v => fmt(v)} />
-              <Tooltip contentStyle={TOOLTIP_STYLE} formatter={v => fmt(v)} />
-              <Area type="monotone" dataKey="revenue" stroke="#6366f1" fill="url(#revGrad)" strokeWidth={2} />
-            </AreaChart>
-          </ResponsiveContainer>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-sm font-semibold text-gray-300">Revenue Trend ({trendLabel})</h3>
+            <TimeGranularityToggle value={granularity} onChange={setGranularity} size="xs" />
+          </div>
+          {granularity === 'year' && trendSeries.length <= 1 ? (
+            <div className="h-[280px] flex flex-col items-center justify-center gap-3">
+              <p className="text-xs text-gray-500">Full-year total</p>
+              <p className="text-4xl font-bold text-white">{fmt(trendSeries[0]?.revenue || 0)}</p>
+              <p className="text-xs text-gray-500">Across the last 12 months of invoice data</p>
+            </div>
+          ) : (
+            <ResponsiveContainer width="100%" height={280}>
+              <AreaChart data={trendSeries}>
+                <defs>
+                  <linearGradient id="revGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#6366f1" stopOpacity={0.3} />
+                    <stop offset="95%" stopColor="#6366f1" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                <XAxis dataKey="month" tick={{ fill: '#9ca3af', fontSize: 11 }} />
+                <YAxis tick={{ fill: '#9ca3af', fontSize: 11 }} tickFormatter={v => fmt(v)} />
+                <Tooltip contentStyle={TOOLTIP_STYLE} formatter={v => fmt(v)} />
+                <Area type="monotone" dataKey="revenue" stroke="#6366f1" fill="url(#revGrad)" strokeWidth={2} />
+              </AreaChart>
+            </ResponsiveContainer>
+          )}
         </div>
 
         <div className="glass-card p-5">
