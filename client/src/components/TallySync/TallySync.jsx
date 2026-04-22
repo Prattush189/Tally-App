@@ -436,6 +436,18 @@ export default function TallySync() {
                             Parent groups in feed: {syncResult.diagnostics.parentsSeen.join(', ') || '(none)'}
                           </div>
                         )}
+                        {syncResult.diagnostics.accountingGroupCount != null && (
+                          <div className="text-[11px] text-gray-400">
+                            Accounting groups fetched: <span className={syncResult.diagnostics.accountingGroupCount > 0 ? 'text-emerald-300' : 'text-red-300'}>{syncResult.diagnostics.accountingGroupCount}</span>
+                            {' · '}
+                            parent map entries: <span className={syncResult.diagnostics.groupMapSize > 0 ? 'text-emerald-300' : 'text-red-300'}>{syncResult.diagnostics.groupMapSize}</span>
+                          </div>
+                        )}
+                        {syncResult.diagnostics.sampleGroupHops?.length > 0 && (
+                          <div className="text-[11px] text-gray-400">
+                            Sample chains: {syncResult.diagnostics.sampleGroupHops.map((c, i) => <div key={i} className="font-mono">{c}</div>)}
+                          </div>
+                        )}
                         {syncResult.diagnostics.sampleKeys?.length > 0 && (
                           <div className="text-[11px] text-gray-400">
                             Fields on first ledger: {syncResult.diagnostics.sampleKeys.join(', ')}

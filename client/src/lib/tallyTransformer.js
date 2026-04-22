@@ -125,6 +125,33 @@ function isDebtorGroupName(name) {
 //
 // groupParentMap: Map<lowerCaseGroupName, lowerCaseParentGroupName>.
 // Empty map → behaves identically to the old single-hop check.
+// Diagnostic helper — for the first N ledgers, returns the full parent
+// chain the walker will see. Surfaces into the UI so we can instantly
+// spot "group master isn't populated" vs "group master is there but
+// doesn't include the city sub-groups" vs "chain works correctly".
+function sampleGroupHops(ledgers, groupParentMap, count) {
+  const samples = [];
+  const sampled = new Set();
+  for (const l of ledgers) {
+    if (samples.length >= count) break;
+    const start = readField(l, 'PARENT');
+    if (!start || sampled.has(start)) continue;
+    sampled.add(start);
+    const chain = [start];
+    let curr = start.toLowerCase();
+    const seen = new Set([curr]);
+    while (chain.length < 8) {
+      const next = groupParentMap.get(curr) || '';
+      if (!next || seen.has(next)) break;
+      chain.push(next);
+      seen.add(next);
+      curr = next;
+    }
+    samples.push(chain.join(' → '));
+  }
+  return samples;
+}
+
 function isSundryDebtor(ledger, groupParentMap) {
   let curr = readField(ledger, 'PARENT').toLowerCase();
   if (!curr) return false;
@@ -526,7 +553,9 @@ export function transformTallyFull(bundle, options = {}) {
   // direct parent is a city/region sub-group. Keys + values both
   // lowercased so the walker can compare without extra normalization.
   const groupParentMap = new Map();
+  let accountingGroupCount = 0;
   for (const g of extractAllByKey(accountingGroupsTree, 'GROUP')) {
+    accountingGroupCount += 1;
     const n = readField(g, 'NAME').toLowerCase();
     const p = readField(g, 'PARENT').toLowerCase();
     if (n) groupParentMap.set(n, p);
@@ -653,6 +682,9 @@ export function transformTallyFull(bundle, options = {}) {
       usedFallback: debtors.length === 0 && source.length > 0,
       sourceTier,
       parentsSeen,
+      accountingGroupCount,
+      groupMapSize: groupParentMap.size,
+      sampleGroupHops: sampleGroupHops(ledgers, groupParentMap, 5),
       coverage: {
         ledgers: ledgers.length,
         salesVouchers: salesVouchers.length,
