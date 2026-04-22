@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Tally Dashboard Sync</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <h1>Tally Dashboard Sync</h1>
+  <p class="hint">
+    One-time setup. Once saved, open the Tally cloud portal, log in, click TallyPrime, then click the <b>Sync to Dashboard</b> button that appears bottom-right.
+  </p>
+  <form id="cfg">
+    <label>
+      Supabase URL
+      <input type="text" id="supabaseUrl" placeholder="https://vqusztwxrjokjgkiebem.supabase.co" required>
+    </label>
+    <label>
+      Supabase anon key
+      <input type="password" id="supabaseAnonKey" placeholder="eyJhbGciOi..." required>
+      <span class="subtitle">Project API keys → anon public</span>
+    </label>
+    <label>
+      Sync token
+      <input type="password" id="syncToken" placeholder="Matches LOCAL_SYNC_TOKEN in Supabase" required>
+    </label>
+    <label>
+      Tally company (inside portal)
+      <input type="text" id="company" placeholder="UNITED AGENCIES DISTRIBUTORS LLP">
+    </label>
+    <label>
+      Tenant key
+      <input type="text" id="tenantKey" placeholder="default" value="default">
+      <span class="subtitle">Leave as 'default' unless you're syncing multiple companies.</span>
+    </label>
+    <button type="submit">Save</button>
+  </form>
+  <div id="status"></div>
+  <script src="popup.js"></script>
+</body>
+</html>

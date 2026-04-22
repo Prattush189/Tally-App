@@ -125,13 +125,15 @@ export default function ScheduledSyncSettings() {
       {expanded && (
         <div className="space-y-4 pt-2">
           <div className="bg-amber-500/5 border border-amber-500/20 rounded-lg p-4 text-xs text-gray-300 space-y-2">
-            <p className="font-semibold text-amber-300 flex items-center gap-2"><AlertTriangle size={14} /> Scheduled sync is parked until AI-vision auto-click</p>
+            <p className="font-semibold text-amber-300 flex items-center gap-2"><AlertTriangle size={14} /> How syncs happen today</p>
             <p>
-              The portal's TallyPrime launcher button can't be reliably clicked by a headless script — the DOM varies and there's no accessible selector. Today's flow: run <code className="text-cyan-300">npm run sync:headed</code> from the tools/tally-sync-local folder on your Mac, click TallyPrime when the browser appears, and the script uploads the snapshot to Supabase.
+              Browsers block cross-origin fetches to the Tally server from this web app — so the sync has to originate from something with elevated permissions. The cleanest option:
             </p>
-            <p>
-              The creds you save here are already wired up — once AI vision is in, the hourly cron turns on automatically and this card becomes the only place to edit them.
-            </p>
+            <ul className="list-disc list-inside space-y-1 pl-1">
+              <li><b className="text-cyan-300">Chrome extension (recommended):</b> install once from the <code className="text-cyan-300">extension/</code> folder, and a <i>Sync to Dashboard</i> button appears on the Tally portal page. Click TallyPrime + click Sync → data flows.</li>
+              <li><b>Local CLI fallback:</b> <code className="text-cyan-300">npm run sync:headed</code> from <code className="text-cyan-300">tools/tally-sync-local/</code> — opens a browser, you click TallyPrime, it uploads.</li>
+              <li><b>Scheduled cron (parked):</b> the workflow is wired up but dormant until AI vision can click TallyPrime headlessly. The creds you save below will drive it automatically once vision lands.</li>
+            </ul>
           </div>
 
           <form onSubmit={handleSave} className="space-y-3">

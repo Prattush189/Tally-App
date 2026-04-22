@@ -566,15 +566,45 @@ Deno.serve(async (req) => {
     }
 
     if (action === 'ingest') {
-      const data = body.data;
+      // Two shapes accepted:
+      //   1. body.data = { ledgers: {...parsed...}, salesVouchers: {...}, ... }
+      //      (what the Playwright local tool sends — already parsed.)
+      //   2. body.rawXml = { ledgers: '<ENVELOPE>...</ENVELOPE>', ... }
+      //      (what the Chrome extension sends — parsed server-side so the
+      //      extension stays free of XML-parser dependencies.)
+      let data = body.data;
+      let counts = (body.counts && typeof body.counts === 'object') ? { ...body.counts } : {};
+      const errors = (body.errors && typeof body.errors === 'object') ? { ...body.errors } : {};
+      if (body.rawXml && typeof body.rawXml === 'object') {
+        const nodePerKey: Record<string, string> = {
+          ledgers: 'LEDGER',
+          salesVouchers: 'VOUCHER',
+          receiptVouchers: 'VOUCHER',
+          stockItems: 'STOCKITEM',
+          stockGroups: 'STOCKGROUP',
+        };
+        const parsed: Record<string, unknown> = {};
+        for (const [key, xml] of Object.entries(body.rawXml as Record<string, unknown>)) {
+          if (typeof xml !== 'string' || !xml) {
+            errors[key] = 'Empty or non-string payload';
+            continue;
+          }
+          try {
+            const node = parser.parse(xml);
+            parsed[key] = node;
+            counts[key] = counts[key] ?? countNode(node, nodePerKey[key] || 'LEDGER');
+          } catch (err) {
+            errors[key] = err instanceof Error ? err.message : String(err);
+          }
+        }
+        data = parsed;
+      }
       if (!data || typeof data !== 'object') {
         return new Response(JSON.stringify({
           connected: false,
-          error: 'ingest requires a "data" object with the parsed Tally collections',
+          error: 'ingest requires a "data" object or "rawXml" string map',
         }), { status: 400, headers: jsonHeaders });
       }
-      const counts = (body.counts && typeof body.counts === 'object') ? body.counts : {};
-      const errors = (body.errors && typeof body.errors === 'object') ? body.errors : {};
       const source = (body.source as string) || 'local-playwright';
       const { error } = await db.from('tally_snapshots').upsert({
         tenant_key: tenantKey,
@@ -590,7 +620,7 @@ Deno.serve(async (req) => {
           error: `Failed to persist snapshot: ${error.message}`,
         }), { status: 500, headers: jsonHeaders });
       }
-      return new Response(JSON.stringify({ connected: true, action, tenantKey }), { headers: jsonHeaders });
+      return new Response(JSON.stringify({ connected: true, action, tenantKey, counts, errors }), { headers: jsonHeaders });
     }
 
     // get-snapshot

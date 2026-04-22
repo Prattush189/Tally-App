@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Tally Dashboard Sync",
+  "version": "1.0.0",
+  "description": "One-click sync of TallyPrime data to the B2B Intelligence dashboard. Injects a Sync button on the Tally cloud portal page.",
+  "host_permissions": [
+    "http://103.76.213.243/*",
+    "https://*.supabase.co/*"
+  ],
+  "permissions": ["storage"],
+  "content_scripts": [
+    {
+      "matches": ["http://103.76.213.243/*"],
+      "js": ["queries.js", "content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Tally Dashboard Sync"
+  }
+}
