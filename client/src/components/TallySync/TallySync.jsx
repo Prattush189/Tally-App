@@ -654,7 +654,20 @@ export default function TallySync() {
                       </div>
                     )}
                   </div>
-                ) : `✗ Sync failed: ${syncResult.error}`}
+                ) : (
+                  <div className="space-y-1">
+                    <div>✗ Sync failed: {syncResult.error || 'see progress panel above for per-step details.'}</div>
+                    {syncResult.collectionErrors && Object.keys(syncResult.collectionErrors).length > 0 && (
+                      <div className="text-xs text-red-200/80 pt-1 space-y-0.5">
+                        {Object.entries(syncResult.collectionErrors).map(([col, msg]) => (
+                          <div key={col}>
+                            <span className="font-semibold">{col}</span>: {String(msg)}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
             {liveSnapshot && !isDemo && (

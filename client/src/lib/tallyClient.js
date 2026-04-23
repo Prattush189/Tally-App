@@ -116,9 +116,29 @@ export async function syncFromTally(config = {}) {
       const fetched = data?.fetched || [];
       const abortedAll = fetched.length > 0
         && fetched.every((key) => /aborted|connection closed|network error/i.test(String(errors[key] || '')));
+      const success = Boolean(data?.connected);
+      // Edge function doesn't always set a top-level `error` when sync-full
+      // only partially fails — all collections might have their own entries
+      // in `errors` while the aggregate field stays null. Synthesize one so
+      // the UI never ends up rendering "Sync failed: undefined".
+      let resolvedError = data?.error || null;
+      if (!success && !resolvedError) {
+        if (abortedAll) {
+          resolvedError = 'Every live query timed out — the Tally RemoteApp session is probably not active on :9007.';
+        } else if (data?.discoveryError) {
+          resolvedError = `Could not reach Tally: ${data.discoveryError}`;
+        } else {
+          const firstErr = Object.entries(errors).find(([, v]) => v)?.[1];
+          if (firstErr) {
+            resolvedError = `Sync failed: ${firstErr}${Object.keys(errors).length > 1 ? ` (+${Object.keys(errors).length - 1} more)` : ''}`;
+          } else {
+            resolvedError = 'Sync did not return any data. Check that Tally is running and the credentials are correct.';
+          }
+        }
+      }
       return {
-        success: Boolean(data?.connected),
-        error: data?.error,
+        success,
+        error: resolvedError,
         partial: false,
         mode: 'full',
         tallyNotRunning: abortedAll,
