@@ -157,19 +157,26 @@ export async function syncFromTally(config = {}) {
         diagnostics: data?.diagnostics || null,
       };
     } catch (fullErr) {
-      const data = await supabaseInvoke('sync', config);
-      const counts = data?.counts || {};
+      // sync-full itself threw (client/network level — supabase-js couldn't
+      // reach the edge function, or the edge function returned a non-2xx).
+      // Don't silently fall back to the lean 'sync' action: it usually fails
+      // the same way and the fallback error ("The signal has been aborted")
+      // was confusing the user with no per-step context. Instead we return
+      // a single well-formed error object so handleSync's snapshot-fallback
+      // path kicks in cleanly.
+      const raw = fullErr instanceof Error ? fullErr.message : String(fullErr);
+      const aborted = /aborted|network error|fetch failed|timeout/i.test(raw);
+      const error = aborted
+        ? 'Sync request timed out before the edge function could finish. Usually means the Tally RemoteApp session on :9007 is not active, or the portal auto-login took too long. Check the Tally / Portal credentials and try again.'
+        : `Edge function call failed: ${raw}`;
       return {
-        success: Boolean(data?.connected),
-        error: data?.error,
+        success: false,
+        error,
         partial: true,
-        mode: 'lean',
-        fullError: fullErr instanceof Error ? fullErr.message : String(fullErr),
-        ledgers: counts.ledgers || 0,
-        vouchers: counts.vouchers || 0,
-        stockItems: counts.stockItems || 0,
-        groups: counts.groups || 0,
-        raw: data?.data,
+        mode: 'full',
+        fullError: raw,
+        collectionErrors: {},
+        tallyNotRunning: aborted,
       };
     }
   }

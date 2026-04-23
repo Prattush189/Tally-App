@@ -51,16 +51,15 @@ function StepRow({ step, status, detail }) {
 
 export default function SyncProgress({ active, result }) {
   // Wall-clock driver. While active=true we bump `elapsed` on a setInterval
-  // so the optimistic step advances. When the response lands, `result`
-  // tells us the real fetched/errors and we snap the UI to the truth.
+  // so the optimistic step advances. When the response lands we stop the
+  // timer but KEEP the final elapsed value — resetting it to 0 on !active
+  // made the reconciled panel display "0s · 100%" which was misleading.
   const [elapsed, setElapsed] = useState(0);
-  const [startedAt, setStartedAt] = useState(null);
 
   useEffect(() => {
-    if (!active) { setElapsed(0); setStartedAt(null); return; }
-    const t0 = Date.now();
-    setStartedAt(t0);
+    if (!active) return; // keep prior elapsed value so the post-run header stays honest
     setElapsed(0);
+    const t0 = Date.now();
     const id = setInterval(() => setElapsed(Date.now() - t0), 250);
     return () => clearInterval(id);
   }, [active]);
@@ -85,6 +84,17 @@ export default function SyncProgress({ active, result }) {
   const errKeys = new Set(Object.keys(result?.collectionErrors || result?.errors || {}));
   const fetchedKeys = new Set(result?.fetched || []);
 
+  // "Total failure" = the edge call itself bailed (timeout, abort,
+  // supabase-js rejected) before producing any per-collection data. In
+  // that case `fetched` and `collectionErrors` are both empty but we
+  // still have `result.success === false` and a top-level error message.
+  // We mark every remaining step as 'error' so the panel reflects reality
+  // instead of leaving everything grey under a red progress bar.
+  const totalFailure = Boolean(
+    result && !active && !result.success
+      && fetchedKeys.size === 0 && errKeys.size === 0
+  );
+
   const statusFor = (step) => {
     if (result && !active) {
       if (step.key === 'portal') {
@@ -94,14 +104,16 @@ export default function SyncProgress({ active, result }) {
       }
       if (step.key === 'discover') {
         if (result.discoveryError) return 'error';
-        return result.discoveredCompanies?.length ? 'done' : 'pending';
+        if (result.discoveredCompanies?.length) return 'done';
+        return totalFailure ? 'error' : 'pending';
       }
       if (step.key === 'persist') {
-        return result.success ? 'done' : 'pending';
+        if (result.success) return 'done';
+        return totalFailure ? 'error' : 'pending';
       }
       if (errKeys.has(step.key)) return 'error';
       if (fetchedKeys.has(step.key)) return 'done';
-      return 'pending';
+      return totalFailure ? 'error' : 'pending';
     }
     // Active run — optimistic cursor.
     if (elapsed >= step.end) return 'done';
@@ -132,7 +144,7 @@ export default function SyncProgress({ active, result }) {
     return null;
   };
 
-  const displayedElapsed = (result && !active) ? (startedAt ? Date.now() - startedAt : 0) : elapsed;
+  const displayedElapsed = elapsed;
   const pct = Math.min(100, Math.round(((result && !active) ? 100 : (elapsed / totalEta * 100))));
   const isFailure = result && !active && !result.success && !result.connected;
 
