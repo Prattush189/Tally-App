@@ -56,18 +56,31 @@ const parser = new XMLParser({
   ].includes(name),
 });
 
+// Coerce empty / whitespace-only strings to undefined so the `||` fallback
+// chain below actually falls through. The client sometimes sends "" for
+// optional fields (React-controlled inputs with empty initial state); the
+// original nullish-coalescing (??) preserved those empty strings, which
+// made the portal-login fallback a silent no-op and confused the UI.
+function nonEmpty(v: unknown): string | undefined {
+  if (typeof v !== 'string') return undefined;
+  const t = v.trim();
+  return t ? t : undefined;
+}
+
 function resolveConfig(overrides: TallyConfig): Required<TallyConfig> {
-  const host = overrides.host || Deno.env.get('TALLY_HOST') || '';
-  const username = overrides.username ?? Deno.env.get('TALLY_USERNAME') ?? '';
-  const password = overrides.password ?? Deno.env.get('TALLY_PASSWORD') ?? '';
-  // Portal creds fall back to the XML creds when the caller doesn't supply
-  // them. If you want separate portal vs XML auth, fill the dedicated
-  // Portal Username / Portal Password fields in the TallySync UI.
-  const portalUsername = overrides.portalUsername ?? Deno.env.get('TALLY_PORTAL_USER') ?? username;
-  const portalPassword = overrides.portalPassword ?? Deno.env.get('TALLY_PORTAL_PASS') ?? password;
-  const company = overrides.company || Deno.env.get('TALLY_COMPANY') || '';
-  const fromDate = overrides.fromDate || '';
-  const toDate = overrides.toDate || '';
+  const host = nonEmpty(overrides.host) || Deno.env.get('TALLY_HOST') || '';
+  const username = nonEmpty(overrides.username) || Deno.env.get('TALLY_USERNAME') || '';
+  const password = (typeof overrides.password === 'string' && overrides.password) || Deno.env.get('TALLY_PASSWORD') || '';
+  // Portal creds fall back to the XML creds ONLY when dedicated portal
+  // fields + env overrides are both blank. If a separate portal login is
+  // needed (most hosted-Tally tunnels — portal user != XML user), fill
+  // the Portal Username / Portal Password fields in the TallySync UI.
+  const portalUsername = nonEmpty(overrides.portalUsername) || Deno.env.get('TALLY_PORTAL_USER') || username;
+  const portalPassword = (typeof overrides.portalPassword === 'string' && overrides.portalPassword)
+    || Deno.env.get('TALLY_PORTAL_PASS') || password;
+  const company = nonEmpty(overrides.company) || Deno.env.get('TALLY_COMPANY') || '';
+  const fromDate = nonEmpty(overrides.fromDate) || '';
+  const toDate = nonEmpty(overrides.toDate) || '';
   return { host, username, password, portalUsername, portalPassword, company, fromDate, toDate };
 }
 
@@ -178,47 +191,54 @@ async function portalLogin(host: string, username: string, password: string, tim
   }
 }
 
-// When the XML endpoint on :9007 isn't responding, we auto-trigger a
-// portal login (hb.exe cp). The portal starts the RemoteApp session which
-// brings Tally's XML listener online, so the very next tallyRequest() call
-// typically succeeds. Keyed off whether creds are present — if the caller
-// didn't pass portal creds we skip the retry and surface the original
-// error. Only fires once per host per cold function invocation.
-const portalLoggedInForHost = new Set<string>();
-
-// Per-invocation diagnostics bucket, reset at the top of every Deno.serve
-// handler. Every call to tallyRequest pushes into this so the final
-// response can tell the UI whether portal auto-login fired — used to drive
-// the progress panel.
+// Per-invocation state. Previously `portalLoggedInForHost` lived at module
+// scope and stuck across warm invocations — meaning the second Sync press
+// on a warm instance would skip portal login even though the RemoteApp
+// session had timed out in between. Now it resets at the top of every
+// Deno.serve handler so each Sync starts fresh. Within a single
+// invocation, we still only log in once (even if ensurePortalLogin is
+// called from 6 different collection queries).
 type RequestDiagnostics = {
   portalLoginAttempted: boolean;
   portalLoginOk: boolean;
   portalLoginError: string | null;
+  // Explain why the step didn't fire, so the UI can show it instead of
+  // silently hiding the row. Filled only when attempted is false.
+  portalLoginSkippedReason: string | null;
 };
 let currentDiagnostics: RequestDiagnostics = {
   portalLoginAttempted: false,
   portalLoginOk: false,
   portalLoginError: null,
+  portalLoginSkippedReason: null,
 };
+let portalLoggedInForHost = new Set<string>();
 
 async function ensurePortalLogin(cfg: Required<TallyConfig>): Promise<void> {
   // Proactive portal login. The hosted Tally tunnel routes to :9007 only
   // when there's an active RemoteApp session on the portal; if the session
   // has idled out, every XML call aborts after its long per-collection
-  // timeout (45-65s) before we get a chance to revive the session
-  // reactively. Running hb.exe cp up front is cheap (~3s) and, when it
-  // succeeds, unlocks every subsequent XML call. Fires once per host per
-  // cold function invocation; noop if portal creds aren't configured.
-  if (!cfg.portalUsername || !cfg.portalPassword) return;
-  if (portalLoggedInForHost.has(cfg.host)) return;
+  // timeout (45-65s). Running hb.exe cp up front is cheap (~3s) and, when
+  // it succeeds, unlocks every subsequent XML call. We fire once per host
+  // per INVOCATION — portalLoggedInForHost resets at the top of every
+  // Deno.serve handler so a separate Sync press always gets a fresh login.
+  if (!cfg.host) {
+    currentDiagnostics.portalLoginSkippedReason = 'No Tally host configured.';
+    return;
+  }
+  if (!cfg.portalUsername || !cfg.portalPassword) {
+    currentDiagnostics.portalLoginSkippedReason = 'No portal credentials configured. Fill the Portal Username / Portal Password fields (they are usually different from the Tally XML credentials).';
+    return;
+  }
+  if (portalLoggedInForHost.has(cfg.host)) return; // already done earlier in this invocation
   currentDiagnostics.portalLoginAttempted = true;
   const login = await portalLogin(cfg.host, cfg.portalUsername, cfg.portalPassword);
   if (login.ok) {
     currentDiagnostics.portalLoginOk = true;
     portalLoggedInForHost.add(cfg.host);
     // The portal starts the RemoteApp session asynchronously — give it a
-    // moment before the first XML call. 2s has been empirically enough in
-    // local testing; bumping higher hurts the per-call budget too much.
+    // moment before the first XML call. 2s has been empirically enough;
+    // bumping higher hurts the per-call budget too much.
     await new Promise((r) => setTimeout(r, 2000));
   } else {
     currentDiagnostics.portalLoginError = login.error || 'unknown';
@@ -296,7 +316,16 @@ async function tallyRequest(xml: string, cfg: Required<TallyConfig>, timeoutMs =
 }
 
 function resetDiagnostics(): void {
-  currentDiagnostics = { portalLoginAttempted: false, portalLoginOk: false, portalLoginError: null };
+  currentDiagnostics = {
+    portalLoginAttempted: false,
+    portalLoginOk: false,
+    portalLoginError: null,
+    portalLoginSkippedReason: null,
+  };
+  // Clear the per-invocation "already logged in" set too — every fresh
+  // Deno.serve handler should treat the portal session as unknown and
+  // let the next Tally call drive ensurePortalLogin again.
+  portalLoggedInForHost = new Set<string>();
 }
 function snapshotDiagnostics(): RequestDiagnostics {
   return { ...currentDiagnostics };

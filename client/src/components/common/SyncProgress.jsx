@@ -74,12 +74,15 @@ export default function SyncProgress({ active, result }) {
     return () => clearInterval(id);
   }, [active]);
 
-  // Only reveal the Portal step once the server diagnostics confirm it
-  // actually fired on this invocation. During the live run we don't know
-  // whether the fallback is going to trigger, so we omit it rather than
-  // flash a false green.
+  // Show the Portal step whenever the server reports diagnostic
+  // information for it — either it actually fired (attempted=true) OR
+  // it was deliberately skipped with a reason the user should see
+  // (portalLoginSkippedReason). Previously the row was hidden unless the
+  // login fired, which made "no portal creds configured" look like the
+  // integration was silently working when it wasn't.
   const portalFired = result?.diagnostics?.portalLoginAttempted;
-  const steps = STEPS.filter(s => !s.conditional || portalFired);
+  const portalSkipped = Boolean(result?.diagnostics?.portalLoginSkippedReason);
+  const steps = STEPS.filter(s => !s.conditional || portalFired || portalSkipped);
 
   // Recompute cumulative ETA from the steps we actually show so the
   // optimistic cursor is accurate when the Portal step is included.
@@ -110,6 +113,9 @@ export default function SyncProgress({ active, result }) {
       if (step.key === 'portal') {
         if (result.diagnostics?.portalLoginOk) return 'done';
         if (result.diagnostics?.portalLoginAttempted && !result.diagnostics?.portalLoginOk) return 'error';
+        // Skipped by configuration → explicit error so the user sees
+        // that this is why the XML calls are failing.
+        if (result.diagnostics?.portalLoginSkippedReason) return 'error';
         return 'pending';
       }
       if (step.key === 'discover') {
@@ -139,6 +145,7 @@ export default function SyncProgress({ active, result }) {
     if (step.key === 'portal') {
       if (result.diagnostics?.portalLoginOk) return 'session revived';
       if (result.diagnostics?.portalLoginError) return result.diagnostics.portalLoginError;
+      if (result.diagnostics?.portalLoginSkippedReason) return result.diagnostics.portalLoginSkippedReason;
       return null;
     }
     const countMap = {
