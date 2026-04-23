@@ -1190,6 +1190,50 @@ Deno.serve(async (req) => {
       }
     }
 
+    // Fast-bail: if the discovery probe aborted (Tally XML endpoint cold),
+    // there's no point in plowing through 5+ more collection fetches that
+    // will each also time out at 45-65s. Supabase's 150s hard wall would
+    // kill the invocation before we return anything, so the client never
+    // sees diagnostics. Instead, return immediately with everything marked
+    // as "not attempted — Tally unreachable". The client / UI can then
+    // render the portal-login skip reason, the real error, and suggest
+    // actions (e.g. "click TallyPrime in the portal launcher").
+    const discoveryAborted = discoveryError && /aborted|timeout|fetch failed|network error|connection/i.test(discoveryError);
+    if (discoveryAborted) {
+      const errors: Record<string, string> = {};
+      const data: Record<string, unknown> = {};
+      const counts: Record<string, number> = {};
+      for (const key of ['ledgers', 'accountingGroups', 'stockItems', 'stockGroups', 'salesVouchers', 'receiptVouchers']) {
+        data[key] = null;
+        counts[key] = 0;
+        errors[key] = 'Skipped — Tally XML endpoint unreachable (discovery probe aborted).';
+      }
+      const diagSnapshot = snapshotDiagnostics();
+      const portalClue = diagSnapshot.portalLoginSkippedReason
+        ? ` ${diagSnapshot.portalLoginSkippedReason}`
+        : diagSnapshot.portalLoginError
+          ? ` Portal auto-login: ${diagSnapshot.portalLoginError}`
+          : diagSnapshot.portalLoginOk
+            ? ' Portal auto-login succeeded, but :9007 is still not responding — the RemoteApp session is probably not running.'
+            : '';
+      return new Response(JSON.stringify({
+        connected: false,
+        action,
+        counts,
+        data,
+        errors,
+        error: `Tally XML endpoint did not respond to the discovery probe. Every downstream collection was skipped to avoid a 150s dead run.${portalClue}`,
+        collectionMeta: {},
+        skipped: {},
+        fetched: [],
+        activeCompany,
+        discoveredCompanies,
+        discoveryError,
+        discoveryRawSample: null,
+        diagnostics: diagSnapshot,
+      }), { headers: jsonHeaders });
+    }
+
     // Build the job list after company discovery so every query's
     // SVCURRENTCOMPANY points at the resolved activeCompany.
     const queryCfg = { ...cfg, company: activeCompany };
