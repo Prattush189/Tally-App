@@ -23,8 +23,15 @@ import { createClient } from 'npm:@supabase/supabase-js@2';
 
 type TallyConfig = {
   host?: string;
-  username?: string;
-  password?: string;
+  username?: string;          // Tally XML Basic Auth user (may equal portalUsername)
+  password?: string;          // Tally XML Basic Auth password
+  // Portal creds are OPTIONAL and used only for the hb.exe cp auto-login
+  // fallback. They're often different from the XML user — the hosted-Tally
+  // portal login uses a HOB RemoteApp account ("unitsd5") while the XML
+  // server accepts a separate per-company user ("UNITED5"). We accept both
+  // and fall back to the XML pair when the portal pair isn't supplied.
+  portalUsername?: string;
+  portalPassword?: string;
   company?: string;
   fromDate?: string;  // Tally format: YYYYMMDD (e.g. 20250401)
   toDate?: string;
@@ -53,10 +60,15 @@ function resolveConfig(overrides: TallyConfig): Required<TallyConfig> {
   const host = overrides.host || Deno.env.get('TALLY_HOST') || '';
   const username = overrides.username ?? Deno.env.get('TALLY_USERNAME') ?? '';
   const password = overrides.password ?? Deno.env.get('TALLY_PASSWORD') ?? '';
+  // Portal creds fall back to the XML creds when the caller doesn't supply
+  // them. If you want separate portal vs XML auth, fill the dedicated
+  // Portal Username / Portal Password fields in the TallySync UI.
+  const portalUsername = overrides.portalUsername ?? Deno.env.get('TALLY_PORTAL_USER') ?? username;
+  const portalPassword = overrides.portalPassword ?? Deno.env.get('TALLY_PORTAL_PASS') ?? password;
   const company = overrides.company || Deno.env.get('TALLY_COMPANY') || '';
   const fromDate = overrides.fromDate || '';
   const toDate = overrides.toDate || '';
-  return { host, username, password, company, fromDate, toDate };
+  return { host, username, password, portalUsername, portalPassword, company, fromDate, toDate };
 }
 
 function dateFilter(cfg: { fromDate: string; toDate: string }) {
@@ -109,10 +121,13 @@ function portalBaseFromHost(host: string): string | null {
 // on :9007 as a side-effect of a successful login — but on subsequent
 // calls we DO forward the cookies in case a future portal update starts
 // requiring them.
-async function portalLogin(host: string, username: string, password: string, timeoutMs = 15000): Promise<{ ok: boolean; error?: string; cookies?: string[] }> {
+async function portalLogin(host: string, username: string, password: string, timeoutMs = 15000): Promise<{ ok: boolean; error?: string; cookies?: string[]; status?: number; bodySample?: string }> {
   const base = portalBaseFromHost(host);
   if (!base) return { ok: false, error: 'Could not derive portal URL from host.' };
+  if (!username || !password) return { ok: false, error: 'Portal username or password is blank.' };
+
   const url = `${base}cgi-bin/hb.exe`;
+  const origin = base.replace(/\/$/, '');
   const body = new URLSearchParams({
     action: 'cp',
     l: username,
@@ -125,23 +140,37 @@ async function portalLogin(host: string, username: string, password: string, tim
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
+    // HOB RemoteApp's hb.exe is picky about the request shape — it rejects
+    // bare fetches without browser-style headers and treats missing
+    // Origin/Referer as a CSRF signal. We mirror what Chrome sends in a
+    // real login to maximise the chance of a successful cp transaction.
     const res = await fetch(url, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
         'Accept': '*/*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Origin': origin,
+        'Referer': base,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-origin',
       },
       body,
       signal: controller.signal,
     });
-    if (!res.ok) return { ok: false, error: `Portal login HTTP ${res.status}` };
     const text = await res.text();
+    const bodySample = text.slice(0, 200);
+    if (!res.ok) {
+      return { ok: false, status: res.status, error: `Portal login HTTP ${res.status}: ${bodySample}`, bodySample };
+    }
     // Portal returns either {"Status":"ok"} (newer builds) or plain "ok".
     if (!/"status"\s*:\s*"ok"|^\s*ok\s*$/i.test(text)) {
-      return { ok: false, error: `Portal rejected login: ${text.slice(0, 120)}` };
+      return { ok: false, status: res.status, error: `Portal rejected login — body: ${bodySample}`, bodySample };
     }
     const cookies = res.headers.getSetCookie ? res.headers.getSetCookie() : [];
-    return { ok: true, cookies };
+    return { ok: true, status: res.status, cookies, bodySample };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   } finally {
@@ -191,10 +220,11 @@ async function tallyRequest(xml: string, cfg: Required<TallyConfig>, timeoutMs =
       res = await doFetch();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      const shouldAuto = cfg.username && cfg.password && !portalLoggedInForHost.has(cfg.host);
+      const hasPortalCreds = Boolean(cfg.portalUsername && cfg.portalPassword);
+      const shouldAuto = hasPortalCreds && !portalLoggedInForHost.has(cfg.host);
       if (!shouldAuto || /aborted/i.test(msg)) throw err;
       currentDiagnostics.portalLoginAttempted = true;
-      const login = await portalLogin(cfg.host, cfg.username, cfg.password);
+      const login = await portalLogin(cfg.host, cfg.portalUsername, cfg.portalPassword);
       if (!login.ok) {
         currentDiagnostics.portalLoginError = login.error || 'unknown';
         throw new Error(`Tally unreachable and portal auto-login failed: ${login.error}. Original: ${msg}`);
@@ -205,10 +235,11 @@ async function tallyRequest(xml: string, cfg: Required<TallyConfig>, timeoutMs =
       res = await doFetch();
     }
     if (res.status === 401 || res.status === 403) {
-      const shouldAuto = cfg.username && cfg.password && !portalLoggedInForHost.has(cfg.host);
+      const hasPortalCreds = Boolean(cfg.portalUsername && cfg.portalPassword);
+      const shouldAuto = hasPortalCreds && !portalLoggedInForHost.has(cfg.host);
       if (shouldAuto) {
         currentDiagnostics.portalLoginAttempted = true;
-        const login = await portalLogin(cfg.host, cfg.username, cfg.password);
+        const login = await portalLogin(cfg.host, cfg.portalUsername, cfg.portalPassword);
         if (login.ok) {
           currentDiagnostics.portalLoginOk = true;
           portalLoggedInForHost.add(cfg.host);
@@ -1251,6 +1282,34 @@ Deno.serve(async (req) => {
       // "Portal session revived via auto-login" when the hb.exe cp retry
       // kicked in.
       diagnostics: snapshotDiagnostics(),
+    }), { headers: jsonHeaders });
+  }
+
+  // Dedicated portal-login test. Does NOT hit the XML endpoint — just
+  // POSTs to hb.exe cp so the user can isolate whether the portal
+  // credentials themselves are accepted. Returns status + body sample
+  // so the UI can render a "here's what the server actually said".
+  if (action === 'portal-login') {
+    if (!cfg.host) {
+      return new Response(JSON.stringify({ connected: false, error: 'Tally host not configured.' }), { headers: jsonHeaders });
+    }
+    const user = cfg.portalUsername;
+    const pass = cfg.portalPassword;
+    if (!user || !pass) {
+      return new Response(JSON.stringify({
+        connected: false,
+        error: 'Portal username or password is blank. Fill the dedicated Portal fields on the TallySync page (or the Tally fields if they match).',
+      }), { headers: jsonHeaders });
+    }
+    const result = await portalLogin(cfg.host, user, pass);
+    return new Response(JSON.stringify({
+      connected: result.ok,
+      action,
+      status: result.status,
+      error: result.ok ? null : result.error,
+      bodySample: result.bodySample,
+      portalBase: portalBaseFromHost(cfg.host),
+      diagnostics: { portalLoginAttempted: true, portalLoginOk: result.ok, portalLoginError: result.ok ? null : (result.error || null) },
     }), { headers: jsonHeaders });
   }
 

@@ -6,7 +6,7 @@ import { fmt } from '../../utils/format';
 import { useAuth } from '../../context/AuthContext';
 import {
   TALLY_BACKEND, tallyAvailable, testConnection, syncFromTally,
-  getStatus, getDataSummary, loadFromSnapshot, getCompanies,
+  getStatus, getDataSummary, loadFromSnapshot, getCompanies, testPortalLogin,
 } from '../../lib/tallyClient';
 import { transformTallyLedgers, transformTallyFull } from '../../lib/tallyTransformer';
 import { saveLiveCustomers, loadLiveCustomers, clearLiveCustomers } from '../../lib/liveData';
@@ -37,10 +37,8 @@ function composeHost(ip, port) {
 function loadTallyConfig() {
   try {
     const raw = localStorage.getItem(TALLY_CONFIG_KEY);
-    if (!raw) return { ip: '', port: '', username: '', password: '' };
+    if (!raw) return { ip: '', port: '', username: '', password: '', portalUsername: '', portalPassword: '' };
     const parsed = JSON.parse(raw);
-    // Prefer the new split fields; fall back to parsing legacy `host` when
-    // only the combined field is stored (upgrade path from older builds).
     const split = (parsed.ip || parsed.port)
       ? { ip: parsed.ip || '', port: parsed.port || '' }
       : parseHost(parsed.host);
@@ -49,9 +47,16 @@ function loadTallyConfig() {
       port: split.port,
       username: parsed.username || '',
       password: parsed.password || '',
+      // Portal creds are optional. When blank, the edge function falls back
+      // to username/password for the hb.exe cp auto-login step. Separate
+      // fields are here because the hosted-Tally portal often uses a
+      // different login (e.g. `unitsd5`) than the XML server (e.g.
+      // `UNITED5`) — without the split the auto-login fails silently.
+      portalUsername: parsed.portalUsername || '',
+      portalPassword: parsed.portalPassword || '',
     };
   } catch {
-    return { ip: '', port: '', username: '', password: '' };
+    return { ip: '', port: '', username: '', password: '', portalUsername: '', portalPassword: '' };
   }
 }
 
@@ -118,6 +123,11 @@ export default function TallySync() {
     host: tallyHost,
     username: config.username,
     password: config.password,
+    // Portal creds flow through as dedicated fields so the edge function can
+    // use them specifically for the hb.exe cp auto-login. If left blank the
+    // edge function falls back to the XML username / password.
+    portalUsername: config.portalUsername,
+    portalPassword: config.portalPassword,
   });
 
   const handleTest = async () => {
@@ -130,6 +140,24 @@ export default function TallySync() {
       setTestResult({ connected: false, error: err.message });
     }
     setTesting(false);
+  };
+
+  // Portal-only login probe. Doesn't hit :9007 — just POSTs hb.exe cp with
+  // the (portal-specific) credentials and surfaces the server's response
+  // body so the user can diagnose wrong-username / wrong-password vs
+  // network / cert issues. Shown as its own inline result panel.
+  const [portalResult, setPortalResult] = useState(null);
+  const [portalTesting, setPortalTesting] = useState(false);
+  const handleTestPortal = async () => {
+    if (isDemo) return;
+    setPortalTesting(true);
+    setPortalResult(null);
+    try {
+      setPortalResult(await testPortalLogin(backendCreds()));
+    } catch (err) {
+      setPortalResult({ connected: false, error: err.message });
+    }
+    setPortalTesting(false);
   };
 
   const handleSync = async () => {
@@ -439,6 +467,26 @@ export default function TallySync() {
                 <input type="password" value={config.password} disabled={isDemo || testing || syncing} onChange={e => setConfig(c => ({ ...c, password: e.target.value }))}
                   className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Enter Tally password" />
               </div>
+              {/* Portal login credentials. Optional — leave blank to reuse
+                  the Tally username/password above. Hosted-Tally portals
+                  often use a different login (e.g. "unitsd5") than the XML
+                  server (e.g. "UNITED5"); if yours does, fill both pairs
+                  here or auto-login will fail. */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">Portal Username <span className="text-gray-600">(for auto-login)</span></label>
+                  <input type="text" value={config.portalUsername} disabled={isDemo || testing || syncing} onChange={e => setConfig(c => ({ ...c, portalUsername: e.target.value }))}
+                    className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed" placeholder={config.username || 'e.g. unitsd5'} />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">Portal Password</label>
+                  <input type="password" value={config.portalPassword} disabled={isDemo || testing || syncing} onChange={e => setConfig(c => ({ ...c, portalPassword: e.target.value }))}
+                    className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Optional — portal login password" />
+                </div>
+              </div>
+              <p className="text-[11px] text-gray-500 -mt-2">
+                Optional. The hosted-Tally portal login (<code className="text-gray-300">/cgi-bin/hb.exe</code>) often takes different credentials than the XML server on <code className="text-gray-300">:{config.port || '9007'}</code>. Leave blank to reuse the Tally credentials above.
+              </p>
               <div>
                 <label className="block text-xs text-gray-500 mb-1">Date range</label>
                 <select
@@ -486,6 +534,12 @@ export default function TallySync() {
                 <Wifi size={14} className={testing ? 'animate-pulse' : ''} />
                 {testing ? 'Testing...' : 'Test Connection'}
               </button>
+              <button onClick={handleTestPortal} disabled={portalTesting || isDemo}
+                title={isDemo ? 'Disabled for the demo account' : 'Probe hb.exe cp only — verifies your portal credentials without touching the XML endpoint.'}
+                className={`flex-1 min-w-[10rem] py-2.5 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 transition-all border disabled:opacity-40 disabled:cursor-not-allowed ${portalTesting ? 'border-gray-600 text-gray-500' : 'border-amber-500/30 text-amber-300 hover:bg-amber-500/10'}`}>
+                <Wifi size={14} className={portalTesting ? 'animate-pulse' : ''} />
+                {portalTesting ? 'Checking portal…' : 'Test Portal Login'}
+              </button>
               <button onClick={handleLoadSnapshot} disabled={loadingSnapshot || isDemo}
                 title={isDemo ? 'Disabled for the demo account' : 'Load the most recent snapshot pushed by the local sync tool'}
                 className={`flex-1 min-w-[10rem] py-2.5 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 transition-all border disabled:opacity-40 disabled:cursor-not-allowed ${loadingSnapshot ? 'border-gray-600 text-gray-500' : 'border-cyan-500/30 text-cyan-300 hover:bg-cyan-500/10'}`}>
@@ -523,7 +577,38 @@ export default function TallySync() {
             {/* Test Result */}
             {testResult && (
               <div className={`p-3 rounded-lg border text-sm ${testResult.connected ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' : 'bg-red-500/10 border-red-500/20 text-red-400'}`}>
-                {testResult.connected ? '✓ Tally server is reachable' : `✗ ${testResult.error}`}
+                <div>{testResult.connected ? '✓ Tally server is reachable' : `✗ ${testResult.error}`}</div>
+                {testResult.diagnostics?.portalLoginAttempted && (
+                  <div className={`text-xs mt-1 ${testResult.diagnostics.portalLoginOk ? 'text-amber-300/90' : 'text-red-300/90'}`}>
+                    {testResult.diagnostics.portalLoginOk
+                      ? '⤷ Portal auto-login (hb.exe cp) revived the RemoteApp session.'
+                      : `⤷ Portal auto-login failed: ${testResult.diagnostics.portalLoginError}`}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Portal-only probe result. Shows the raw server response body
+                when things fail so the user can distinguish "wrong creds"
+                from "can't reach the portal". */}
+            {portalResult && (
+              <div className={`p-3 rounded-lg border text-sm ${portalResult.connected ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' : 'bg-red-500/10 border-red-500/20 text-red-300'}`}>
+                <div className="flex items-center gap-2">
+                  {portalResult.connected
+                    ? <span>✓ Portal login accepted via <code className="text-xs bg-black/40 px-1.5 py-0.5 rounded">{portalResult.portalBase || 'hb.exe'}</code></span>
+                    : <span>✗ Portal login failed{portalResult.status ? ` (HTTP ${portalResult.status})` : ''}</span>}
+                </div>
+                {!portalResult.connected && portalResult.error && (
+                  <div className="text-xs mt-1 text-red-200/90 break-all">{portalResult.error}</div>
+                )}
+                {portalResult.bodySample && !portalResult.connected && (
+                  <pre className="text-[11px] font-mono bg-black/40 rounded p-2 mt-2 text-gray-300 overflow-x-auto whitespace-pre-wrap break-all">{portalResult.bodySample}</pre>
+                )}
+                {!portalResult.connected && (
+                  <div className="text-xs mt-2 text-amber-200/80">
+                    Check: (1) Portal Username / Password fields are set (often different from the Tally XML creds), (2) the IP field is the portal host, (3) the portal's HTTPS cert is trusted.
+                  </div>
+                )}
               </div>
             )}
 
