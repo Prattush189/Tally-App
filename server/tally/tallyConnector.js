@@ -219,70 +219,32 @@ export async function getCreditors() {
   return extractCollection(result, 'LEDGER');
 }
 
-/** Fetch Sales Vouchers with line items */
+/**
+ * Fetch Sales Vouchers via Tally's built-in 'Sales Register' report.
+ *
+ * The previous implementation used a custom Collection with the TDL filter
+ *   $VoucherTypeName = "Sales" OR $VoucherTypeName UNDER "Sales"
+ * which TallyPrime rejects with a "Cannot understand. Bad formula" dialog
+ * — UNDER is not a valid operator on $VoucherTypeName; it only works on
+ * group-typed fields like $Parent. Tally's own Sales Register report
+ * returns exactly the same data (every sales-type voucher in the date
+ * range) without any filter expression, so that's what we use.
+ */
 export async function getSalesVouchers(fromDate = '', toDate = '') {
-  const dateFilter = fromDate && toDate ? `
-    <SVFROMDATE>${fromDate}</SVFROMDATE>
-    <SVTODATE>${toDate}</SVTODATE>
-  ` : '';
-
-  const xml = exportRequest(
-    'CustomSalesCollection',
-    `<TDL>
-      <TDLMESSAGE>
-        <COLLECTION NAME="CustomSalesCollection" ISMODIFY="No">
-          <TYPE>Voucher</TYPE>
-          <NATIVEMETHOD>Date</NATIVEMETHOD>
-          <NATIVEMETHOD>VoucherNumber</NATIVEMETHOD>
-          <NATIVEMETHOD>VoucherTypeName</NATIVEMETHOD>
-          <NATIVEMETHOD>PartyLedgerName</NATIVEMETHOD>
-          <NATIVEMETHOD>Amount</NATIVEMETHOD>
-          <NATIVEMETHOD>AllLedgerEntries</NATIVEMETHOD>
-          <NATIVEMETHOD>AllInventoryEntries</NATIVEMETHOD>
-          <NATIVEMETHOD>NarrationAllocations</NATIVEMETHOD>
-          <FILTER>SalesFilter</FILTER>
-        </COLLECTION>
-        <SYSTEM TYPE="Formulae" NAME="SalesFilter">
-          $VoucherTypeName = "Sales" OR $VoucherTypeName UNDER "Sales"
-        </SYSTEM>
-      </TDLMESSAGE>
-    </TDL>`,
-    '',
-    dateFilter
-  );
+  const dateFilter = fromDate && toDate
+    ? `<SVFROMDATE Type="Date">${fromDate}</SVFROMDATE><SVTODATE Type="Date">${toDate}</SVTODATE>`
+    : '';
+  const xml = reportRequest('Sales Register', dateFilter);
   const result = await tallyRequest(xml, 60000);
   return extractCollection(result, 'VOUCHER');
 }
 
-/** Fetch Receipt Vouchers (payments from customers) */
+/** Fetch Receipt Vouchers via Tally's built-in 'Receipt Register' report. */
 export async function getReceiptVouchers(fromDate = '', toDate = '') {
-  const dateFilter = fromDate && toDate ? `
-    <SVFROMDATE>${fromDate}</SVFROMDATE>
-    <SVTODATE>${toDate}</SVTODATE>
-  ` : '';
-
-  const xml = exportRequest(
-    'CustomReceiptCollection',
-    `<TDL>
-      <TDLMESSAGE>
-        <COLLECTION NAME="CustomReceiptCollection" ISMODIFY="No">
-          <TYPE>Voucher</TYPE>
-          <NATIVEMETHOD>Date</NATIVEMETHOD>
-          <NATIVEMETHOD>VoucherNumber</NATIVEMETHOD>
-          <NATIVEMETHOD>PartyLedgerName</NATIVEMETHOD>
-          <NATIVEMETHOD>Amount</NATIVEMETHOD>
-          <NATIVEMETHOD>AllLedgerEntries</NATIVEMETHOD>
-          <NATIVEMETHOD>BillAllocations</NATIVEMETHOD>
-          <FILTER>ReceiptFilter</FILTER>
-        </COLLECTION>
-        <SYSTEM TYPE="Formulae" NAME="ReceiptFilter">
-          $VoucherTypeName = "Receipt" OR $VoucherTypeName UNDER "Receipt"
-        </SYSTEM>
-      </TDLMESSAGE>
-    </TDL>`,
-    '',
-    dateFilter
-  );
+  const dateFilter = fromDate && toDate
+    ? `<SVFROMDATE Type="Date">${fromDate}</SVFROMDATE><SVTODATE Type="Date">${toDate}</SVTODATE>`
+    : '';
+  const xml = reportRequest('Receipt Register', dateFilter);
   const result = await tallyRequest(xml, 60000);
   return extractCollection(result, 'VOUCHER');
 }
