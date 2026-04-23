@@ -233,51 +233,16 @@ let currentDiagnostics: RequestDiagnostics = {
 };
 let portalLoggedInForHost = new Set<string>();
 
-async function ensurePortalLogin(cfg: Required<TallyConfig>): Promise<void> {
-  // Proactive portal login. The hosted Tally tunnel routes to :9007 only
-  // when there's an active RemoteApp session on the portal; if the session
-  // has idled out, every XML call aborts after its long per-collection
-  // timeout (45-65s). Running hb.exe cp up front is cheap (~3s) and, when
-  // it succeeds, unlocks every subsequent XML call. We fire once per host
-  // per INVOCATION — portalLoggedInForHost resets at the top of every
-  // Deno.serve handler so a separate Sync press always gets a fresh login.
-  if (!cfg.host) {
-    currentDiagnostics.portalLoginSkippedReason = 'No Tally host configured.';
-    return;
-  }
-  if (!cfg.portalUsername || !cfg.portalPassword) {
-    currentDiagnostics.portalLoginSkippedReason = 'No portal credentials configured. Fill the Portal Username / Portal Password fields (they are usually different from the Tally XML credentials).';
-    return;
-  }
-  if (portalLoggedInForHost.has(cfg.host)) return; // already done earlier in this invocation
-  currentDiagnostics.portalLoginAttempted = true;
-  const login = await portalLogin(cfg.host, cfg.portalUsername, cfg.portalPassword);
-  if (login.ok) {
-    currentDiagnostics.portalLoginOk = true;
-    portalLoggedInForHost.add(cfg.host);
-    // The portal starts the RemoteApp session asynchronously and the
-    // TallyPrime XML listener on :9007 isn't ready until the Windows
-    // session + Tally app are both fully warm. We previously waited 2s,
-    // which worked when the session had recently been alive; for a truly
-    // cold portal we need more. 10s is a reasonable compromise between
-    // "wait enough for Tally to start" and "don't blow the 140s overall
-    // budget" — callers still have ~130s for the collection queries.
-    await new Promise((r) => setTimeout(r, 10000));
-  } else {
-    currentDiagnostics.portalLoginError = login.error || 'unknown';
-    // Don't throw — the XML call might still work (session could already
-    // be active and the portal refused a duplicate login). Falls through
-    // to the normal retry path if the XML call itself aborts / 401s.
-  }
-}
-
 async function tallyRequest(xml: string, cfg: Required<TallyConfig>, timeoutMs = 120000) {
   if (!cfg.host) throw new Error('Tally host not configured. Provide "host" in the request body or set TALLY_HOST secret.');
 
-  // Make sure the RemoteApp session is alive before we even try :9007.
-  // Cheaper than waiting for the XML call to abort.
-  await ensurePortalLogin(cfg);
-
+  // Reactive-only portal login. We used to call ensurePortalLogin before
+  // every XML request (proactive), but that wasted 10s on every cold
+  // invocation even when :9007 was already reachable. Users who open the
+  // port themselves don't need portal login at all. Now: just try the XML
+  // call directly, and fall back to portal-login-then-retry only if the
+  // call fails with a connection-level error. Saves 10s+ on the happy
+  // path; still recovers when the session has idled out.
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -293,9 +258,9 @@ async function tallyRequest(xml: string, cfg: Required<TallyConfig>, timeoutMs =
     try {
       res = await doFetch();
     } catch (err) {
-      // Reactive retry — only useful if proactive login above didn't fire
-      // (e.g. portal creds missing) or if the session died between the
-      // login and this XML call. Kept for defense in depth.
+      // Connection-level failure. If portal creds are configured and we
+      // haven't logged in this invocation, run portal login then retry
+      // the XML call once.
       const msg = err instanceof Error ? err.message : String(err);
       const hasPortalCreds = Boolean(cfg.portalUsername && cfg.portalPassword);
       const shouldAuto = hasPortalCreds && !portalLoggedInForHost.has(cfg.host);
@@ -308,7 +273,10 @@ async function tallyRequest(xml: string, cfg: Required<TallyConfig>, timeoutMs =
       }
       currentDiagnostics.portalLoginOk = true;
       portalLoggedInForHost.add(cfg.host);
-      await new Promise((r) => setTimeout(r, 2000));
+      // Longer warm-up wait on the retry path — the RemoteApp session
+      // might still be spinning TallyPrime up. 10s has empirically been
+      // enough when the portal session was active.
+      await new Promise((r) => setTimeout(r, 10000));
       res = await doFetch();
     }
     if (res.status === 401 || res.status === 403) {
@@ -1232,20 +1200,18 @@ Deno.serve(async (req) => {
         errors[key] = 'Skipped — Tally XML endpoint unreachable (discovery probe aborted).';
       }
       const diagSnapshot = snapshotDiagnostics();
-      const portalClue = diagSnapshot.portalLoginSkippedReason
-        ? ` ${diagSnapshot.portalLoginSkippedReason}`
+      const portalClue = diagSnapshot.portalLoginOk
+        ? ' Portal auto-login succeeded, but :9007 is still not responding — TallyPrime is not running inside the RemoteApp session.'
         : diagSnapshot.portalLoginError
           ? ` Portal auto-login: ${diagSnapshot.portalLoginError}`
-          : diagSnapshot.portalLoginOk
-            ? ' Portal auto-login succeeded, but :9007 is still not responding. The portal session is active but TallyPrime.exe does not appear to be running inside it. Open the portal in a browser tab (http://<host>/), sign in, click TallyPrime on the launcher page to start the app, then retry Sync. (Or install the Chrome extension in extension/ — it runs inside the portal tab and handles this automatically.)'
-            : '';
+          : '';
       return new Response(JSON.stringify({
         connected: false,
         action,
         counts,
         data,
         errors,
-        error: `Tally XML endpoint did not respond to the discovery probe. Every downstream collection was skipped to avoid a 150s dead run.${portalClue}`,
+        error: `Tally XML endpoint did not respond. Make sure Tally is running and :${cfg.host.split(':')[1] || '9000'} is reachable.${portalClue}`,
         collectionMeta: {},
         skipped: {},
         fetched: [],
