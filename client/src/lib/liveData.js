@@ -12,8 +12,15 @@ function keyFor(userEmail) {
 export function saveLiveCustomers(userEmail, customers, totals) {
   if (!userEmail) return;
   try {
+    // Callers that pulled data from a cloud snapshot pass the snapshot's
+    // server-side updated_at via totals.syncedAt; honour it so subsequent
+    // cross-PC "is cloud newer?" comparisons stay exact. Direct Sync Now
+    // callers don't pass one — they get client now(), which is always
+    // strictly after the server finished writing (client save happens on
+    // response receive), so localAt >= cloudAt naturally.
+    const explicit = totals && typeof totals.syncedAt === 'string' ? totals.syncedAt : null;
     const payload = {
-      syncedAt: new Date().toISOString(),
+      syncedAt: explicit || new Date().toISOString(),
       customers,
       totals: totals || null,
     };
