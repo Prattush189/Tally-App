@@ -1,42 +1,59 @@
-// Client-side analytics engine — replaces /api/analytics/* routes when no backend is configured.
-// Pure functions over the mock data module. Each function matches the shape its corresponding
-// server route used to return so consumers don't need to change.
+// Client-side analytics engine. EVERY handler here requires real Tally data
+// passed in via overrides.customers. There is no mock fallback anymore —
+// if no live data is available the hooks return `data: null` and dashboards
+// render their empty state (App.jsx gates the dashboards behind a synced
+// snapshot, so these functions should never run without real customers).
 
-import {
-  customers as defaultCustomers,
-  CATEGORIES as DEFAULT_CATEGORIES,
-  revenueTrends as defaultRevenueTrends,
-  cohortData,
-  computeAdvancedAnalytics,
-} from './mockData.js';
-
-function ctx(overrides = {}) {
-  const customers = overrides.customers || defaultCustomers;
-  // When customers come from real Tally data (via overrides), derive the
-  // category universe from them instead of using the mock fixture. Without
-  // this, getGrowth / getOpportunities iterate over 'Electronics, Stationery,
-  // ...' while customer.purchasedCategories carry real Tally stock-group
-  // names → every intersection is empty → both pages render 0 across the
-  // board. Demo accounts still fall back to DEFAULT_CATEGORIES so the
-  // pre-populated experience is unchanged.
-  let CATEGORIES = overrides.CATEGORIES;
-  if (!CATEGORIES) {
-    if (overrides.customers) {
-      const seen = new Set();
-      for (const c of customers) {
-        (c.purchasedCategories || []).forEach((k) => seen.add(k));
-        (c.missedCategories || []).forEach((k) => seen.add(k));
-      }
-      CATEGORIES = seen.size ? Array.from(seen) : DEFAULT_CATEGORIES;
-    } else {
-      CATEGORIES = DEFAULT_CATEGORIES;
+// Aggregate monthly revenue across all customer invoiceHistory entries into
+// a chronological `revenueTrends` series. Used by getOverview + getRevenue
+// in place of the old fixed-array mock.
+function deriveRevenueTrends(customers) {
+  const byMonth = new Map();
+  for (const c of customers) {
+    for (const row of c.invoiceHistory || []) {
+      if (!row?.month) continue;
+      const e = byMonth.get(row.month) || { month: row.month, revenue: 0, invoiceCount: 0 };
+      e.revenue += row.value || 0;
+      e.invoiceCount += row.invoiceCount || 0;
+      byMonth.set(row.month, e);
     }
   }
+  return Array.from(byMonth.values()).map(r => ({ ...r, revenue: Math.round(r.revenue) }));
+}
+
+function deriveCategories(customers) {
+  const seen = new Set();
+  for (const c of customers) {
+    (c.purchasedCategories || []).forEach((k) => seen.add(k));
+    (c.missedCategories || []).forEach((k) => seen.add(k));
+  }
+  return Array.from(seen);
+}
+
+function ctx(overrides = {}) {
+  const customers = overrides.customers || [];
   return {
     customers,
-    CATEGORIES,
-    revenueTrends: overrides.revenueTrends || defaultRevenueTrends,
+    CATEGORIES: overrides.CATEGORIES || deriveCategories(customers),
+    revenueTrends: overrides.revenueTrends || deriveRevenueTrends(customers),
   };
+}
+
+function computeAdvancedAnalytics(customers) {
+  // Minimal advanced-analytics bundle derived from real customers. Mirrors
+  // the shape the old mockData.computeAdvancedAnalytics returned so the
+  // AdvancedAnalytics component keeps working without a mock dependency.
+  const total = customers.length || 1;
+  const avg = (fn) => Math.round(customers.reduce((s, c) => s + (fn(c) || 0), 0) / total);
+  const skuAdoption = avg(c => c.skuPenetration);
+  const catAdoption = avg(c => c.catPenetration);
+  const churnRate = Math.round(customers.filter(c => c.churnRisk === 'High').length / total * 100);
+  const avgLTV = avg(c => c.ltv);
+  const avgDSO = avg(c => c.dso);
+  const segmentSplit = ['Enterprise', 'Mid-Market', 'SMB'].map(s => ({
+    segment: s, count: customers.filter(c => c.segment === s).length,
+  }));
+  return { skuAdoption, catAdoption, churnRate, avgLTV, avgDSO, segmentSplit };
 }
 
 export function getOverview(overrides) {
@@ -75,7 +92,7 @@ export function getOverview(overrides) {
     totalAccounts, totalRevenue, avgDSO, avgSKUPen, avgCatPen,
     highChurn, highPayment, expandable, avgLTV,
     segmentBreakdown, churnDistribution, paymentDistribution, regionBreakdown,
-    revenueTrends, latestNRR: 116, latestGRR: 96,
+    revenueTrends,
   };
 }
 
@@ -196,11 +213,14 @@ export function getOpportunities(overrides) {
 export function getRevenue(overrides) {
   const { customers, revenueTrends } = ctx(overrides);
   const totalLTV = customers.reduce((s, c) => s + c.ltv, 0);
-  const avgLTV = Math.round(totalLTV / customers.length);
+  const avgLTV = customers.length ? Math.round(totalLTV / customers.length) : 0;
   const expanding = customers.filter(c => c.revenueChange > 5).length;
   const stable = customers.filter(c => c.revenueChange >= -5 && c.revenueChange <= 5).length;
   const contracting = customers.filter(c => c.revenueChange < -5).length;
-  return { revenueTrends, cohortData, avgLTV, totalLTV, expanding, stable, contracting, latestNRR: 116, latestGRR: 96 };
+  // cohortData used to come from a mock fixture. It's an empty array when we
+  // have no way to bucket customers by onboarding cohort from Tally (no
+  // onboarded_at field on ledgers); components check length before rendering.
+  return { revenueTrends, cohortData: [], avgLTV, totalLTV, expanding, stable, contracting };
 }
 
 export function getProactive(overrides) {

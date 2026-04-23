@@ -3,6 +3,7 @@ import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts';
 import SectionHeader from '../common/SectionHeader';
 import MetricCard from '../common/MetricCard';
 import LoadingSpinner from '../common/LoadingSpinner';
+import AIInsights from '../common/AIInsights';
 import { useExtended } from '../../hooks/useExtended';
 import { fmt, TOOLTIP_STYLE } from '../../utils/format';
 
@@ -29,7 +30,9 @@ export default function PaymentReminders() {
 
   return (
     <div className="space-y-6">
-      <SectionHeader icon={Bell} title="Payment Reminders" subtitle="Intelligent payment follow-ups based on each dealer's payment history" />
+      <SectionHeader icon={Bell} title="Payment Reminders" subtitle="Intelligent payment follow-ups based on each dealer's aging buckets" />
+
+      <AIInsights task="payment-reminders" title="Collection playbook" subtitle="Per-urgency guidance + exact WhatsApp / email templates for overdue invoices." />
 
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
         <MetricCard icon={AlertTriangle} label="Critical" value={data.stats.critical} sub="Significantly overdue" color="red" />
@@ -67,13 +70,14 @@ export default function PaymentReminders() {
                   <p className="text-xs text-gray-400 mt-0.5">{r.action}</p>
                   <div className="flex gap-3 mt-1 text-xs text-gray-500">
                     <span>Pending: {fmt(r.totalPending)}</span>
-                    <span>{r.pendingInvoices} invoices</span>
-                    <span>On-time rate: {r.onTimeRate}%</span>
+                    {r.pendingInvoices != null && <span>{r.pendingInvoices} invoices</span>}
+                    {r.onTimeRate != null && <span>On-time rate: {r.onTimeRate}%</span>}
+                    {r.dso != null && <span>DSO: {r.dso}d</span>}
                   </div>
                 </div>
                 <div className="text-right flex-shrink-0">
-                  {r.overdue && <p className="text-sm font-bold" style={{ color: cfg.color }}>{r.overdueDays}d overdue</p>}
-                  <p className="text-xs text-gray-500">Predicted: {r.predictedPayDate}</p>
+                  {r.overdue && r.overdueDays != null && <p className="text-sm font-bold" style={{ color: cfg.color }}>{r.overdueDays}d overdue</p>}
+                  {r.predictedPayDate && <p className="text-xs text-gray-500">Predicted: {r.predictedPayDate}</p>}
                 </div>
               </div>
             );

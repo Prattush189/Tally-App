@@ -1,19 +1,13 @@
-import { Database, LogIn } from 'lucide-react';
+import { Database } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
-import { DEMO_EMAIL } from '../../utils/demo';
 
-// Rendered for real (non-demo) users on every dashboard page. We deliberately
-// don't populate their dashboards with mock numbers — seeing fake data on a
-// real account is misleading. When the live Tally pipeline lands, this
-// component is replaced by real charts.
+// Rendered on every dashboard page when no live Tally snapshot exists.
+// Previously had a "Continue as Demo" shortcut that pretended the demo
+// account had data; that's been removed — demo accounts now hit this same
+// notice until they sync their own Tally, matching the no-mock policy.
 export default function NoDataNotice({ onNavigate }) {
-  const { loginAsDemo, logout, user } = useAuth();
+  const { user } = useAuth();
   const email = user?.email || '';
-
-  const handleTryDemo = async () => {
-    await logout();
-    try { await loginAsDemo(); } catch { /* handled in login page */ }
-  };
 
   return (
     <div className="flex items-center justify-center h-full">
@@ -22,13 +16,12 @@ export default function NoDataNotice({ onNavigate }) {
           <Database size={24} className="text-indigo-300" />
         </div>
         <div className="space-y-1">
-          <h2 className="text-lg font-semibold text-white">No data yet for <span className="text-indigo-300">{email}</span></h2>
+          <h2 className="text-lg font-semibold text-white">No Tally data synced yet {email && <>for <span className="text-indigo-300">{email}</span></>}</h2>
           <p className="text-sm text-gray-400 leading-relaxed">
-            Your account is live on Supabase, but no invoice data has been ingested yet.
-            Connect your Tally Prime server to start pulling real dealer, invoice, and payment data into the dashboards.
+            Every dashboard reads from your live Tally sync — no sample data is bundled. Connect your Tally Prime server below and click <b>Sync Now</b> to populate ledgers, vouchers, stock items, and the six AI-powered Actions &amp; Outreach pages.
           </p>
         </div>
-        <div className="flex flex-col sm:flex-row gap-3 justify-center pt-2">
+        <div className="flex justify-center pt-2">
           {onNavigate && (
             <button
               type="button"
@@ -38,17 +31,7 @@ export default function NoDataNotice({ onNavigate }) {
               Connect Tally
             </button>
           )}
-          <button
-            type="button"
-            onClick={handleTryDemo}
-            className="inline-flex items-center justify-center gap-2 border border-gray-600/60 hover:border-indigo-500/50 hover:bg-indigo-500/10 text-gray-200 text-sm font-semibold px-5 py-2.5 rounded-xl transition-all"
-          >
-            <LogIn size={15} /> Explore with demo account
-          </button>
         </div>
-        <p className="text-xs text-gray-500 pt-2">
-          Demo credentials (shown on the login page) unlock sample data across all 22 modules.
-        </p>
       </div>
     </div>
   );

@@ -2,6 +2,7 @@ import { Target } from 'lucide-react';
 import SectionHeader from '../common/SectionHeader';
 import RiskBadge from '../common/RiskBadge';
 import LoadingSpinner from '../common/LoadingSpinner';
+import AIInsights from '../common/AIInsights';
 import { useAnalytics } from '../../hooks/useAnalytics';
 import { fmt } from '../../utils/format';
 
@@ -17,6 +18,8 @@ export default function ActionFocus() {
   return (
     <div className="space-y-6">
       <SectionHeader icon={Target} title="Prioritisation & Actionability" subtitle={`Here are the ${list.length} buyers you must think about this week — and why.`} />
+
+      <AIInsights task="action-focus" title="AI-generated action plan" subtitle="Top 5 moves for this week, grounded in your Tally data + live web search." />
 
       <div className="grid grid-cols-3 gap-4">
         <div className="bg-red-500/10 border border-red-500/20 rounded-2xl p-5 text-center">
