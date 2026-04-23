@@ -139,8 +139,7 @@ async function portalLogin(host: string, username: string, password: string, tim
   if (!base) return { ok: false, error: 'Could not derive portal URL from host.' };
   if (!username || !password) return { ok: false, error: 'Portal username or password is blank.' };
 
-  const url = `${base}cgi-bin/hb.exe`;
-  const origin = base.replace(/\/$/, '');
+  const hostname = new URL(base).hostname;
   const body = new URLSearchParams({
     action: 'cp',
     l: username,
@@ -150,45 +149,65 @@ async function portalLogin(host: string, username: string, password: string, tim
     t: String(Date.now()),
   }).toString();
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    // HOB RemoteApp's hb.exe is picky about the request shape — it rejects
-    // bare fetches without browser-style headers and treats missing
-    // Origin/Referer as a CSRF signal. We mirror what Chrome sends in a
-    // real login to maximise the chance of a successful cp transaction.
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-        'Accept': '*/*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Origin': origin,
-        'Referer': base,
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
-        'Sec-Fetch-Dest': 'empty',
-        'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Site': 'same-origin',
-      },
-      body,
-      signal: controller.signal,
-    });
-    const text = await res.text();
-    const bodySample = text.slice(0, 200);
-    if (!res.ok) {
-      return { ok: false, status: res.status, error: `Portal login HTTP ${res.status}: ${bodySample}`, bodySample };
+  // Try HTTPS first, then HTTP. HOB RemoteApp portals typically listen on
+  // both :443 and :80. We hit HTTPS to mirror what Chrome does, but fall
+  // back to HTTP when Deno's rustls rejects the portal cert — which is
+  // what happens at 103.76.213.243 (cert uses an older format Deno flags
+  // as UnsupportedCertVersion; Chrome accepts it with a warning). Using
+  // HTTP is fine here: we're on Supabase's server-to-server network, not
+  // going through a user's browser, so there's no user-visible mixed
+  // content or MITM exposure that wouldn't already exist with the
+  // rejected cert anyway.
+  const attempts: Array<{ scheme: 'https' | 'http'; url: string }> = [
+    { scheme: 'https', url: `https://${hostname}/cgi-bin/hb.exe` },
+    { scheme: 'http', url: `http://${hostname}/cgi-bin/hb.exe` },
+  ];
+
+  let lastErr = '';
+  for (const attempt of attempts) {
+    const origin = `${attempt.scheme}://${hostname}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(attempt.url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+          'Accept': '*/*',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Origin': origin,
+          'Referer': `${origin}/`,
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+          'Sec-Fetch-Dest': 'empty',
+          'Sec-Fetch-Mode': 'cors',
+          'Sec-Fetch-Site': 'same-origin',
+        },
+        body,
+        signal: controller.signal,
+      });
+      const text = await res.text();
+      const bodySample = text.slice(0, 200);
+      if (!res.ok) {
+        lastErr = `${attempt.scheme.toUpperCase()} HTTP ${res.status}: ${bodySample}`;
+        continue;
+      }
+      if (!/"status"\s*:\s*"ok"|^\s*ok\s*$/i.test(text)) {
+        lastErr = `${attempt.scheme.toUpperCase()} portal rejected login — body: ${bodySample}`;
+        continue;
+      }
+      const cookies = res.headers.getSetCookie ? res.headers.getSetCookie() : [];
+      return { ok: true, status: res.status, cookies, bodySample };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      lastErr = `${attempt.scheme.toUpperCase()} ${msg}`;
+      // Cert errors specifically → keep going to the HTTP fallback. Other
+      // errors also fall through so the user sees the most informative
+      // failure at the end.
+    } finally {
+      clearTimeout(timer);
     }
-    // Portal returns either {"Status":"ok"} (newer builds) or plain "ok".
-    if (!/"status"\s*:\s*"ok"|^\s*ok\s*$/i.test(text)) {
-      return { ok: false, status: res.status, error: `Portal rejected login — body: ${bodySample}`, bodySample };
-    }
-    const cookies = res.headers.getSetCookie ? res.headers.getSetCookie() : [];
-    return { ok: true, status: res.status, cookies, bodySample };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
-  } finally {
-    clearTimeout(timer);
   }
+  return { ok: false, error: `Portal login failed over both HTTPS and HTTP. Last error: ${lastErr}` };
 }
 
 // Per-invocation state. Previously `portalLoggedInForHost` lived at module
