@@ -201,8 +201,39 @@ let currentDiagnostics: RequestDiagnostics = {
   portalLoginError: null,
 };
 
+async function ensurePortalLogin(cfg: Required<TallyConfig>): Promise<void> {
+  // Proactive portal login. The hosted Tally tunnel routes to :9007 only
+  // when there's an active RemoteApp session on the portal; if the session
+  // has idled out, every XML call aborts after its long per-collection
+  // timeout (45-65s) before we get a chance to revive the session
+  // reactively. Running hb.exe cp up front is cheap (~3s) and, when it
+  // succeeds, unlocks every subsequent XML call. Fires once per host per
+  // cold function invocation; noop if portal creds aren't configured.
+  if (!cfg.portalUsername || !cfg.portalPassword) return;
+  if (portalLoggedInForHost.has(cfg.host)) return;
+  currentDiagnostics.portalLoginAttempted = true;
+  const login = await portalLogin(cfg.host, cfg.portalUsername, cfg.portalPassword);
+  if (login.ok) {
+    currentDiagnostics.portalLoginOk = true;
+    portalLoggedInForHost.add(cfg.host);
+    // The portal starts the RemoteApp session asynchronously — give it a
+    // moment before the first XML call. 2s has been empirically enough in
+    // local testing; bumping higher hurts the per-call budget too much.
+    await new Promise((r) => setTimeout(r, 2000));
+  } else {
+    currentDiagnostics.portalLoginError = login.error || 'unknown';
+    // Don't throw — the XML call might still work (session could already
+    // be active and the portal refused a duplicate login). Falls through
+    // to the normal retry path if the XML call itself aborts / 401s.
+  }
+}
+
 async function tallyRequest(xml: string, cfg: Required<TallyConfig>, timeoutMs = 120000) {
   if (!cfg.host) throw new Error('Tally host not configured. Provide "host" in the request body or set TALLY_HOST secret.');
+
+  // Make sure the RemoteApp session is alive before we even try :9007.
+  // Cheaper than waiting for the XML call to abort.
+  await ensurePortalLogin(cfg);
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -219,10 +250,13 @@ async function tallyRequest(xml: string, cfg: Required<TallyConfig>, timeoutMs =
     try {
       res = await doFetch();
     } catch (err) {
+      // Reactive retry — only useful if proactive login above didn't fire
+      // (e.g. portal creds missing) or if the session died between the
+      // login and this XML call. Kept for defense in depth.
       const msg = err instanceof Error ? err.message : String(err);
       const hasPortalCreds = Boolean(cfg.portalUsername && cfg.portalPassword);
       const shouldAuto = hasPortalCreds && !portalLoggedInForHost.has(cfg.host);
-      if (!shouldAuto || /aborted/i.test(msg)) throw err;
+      if (!shouldAuto) throw err;
       currentDiagnostics.portalLoginAttempted = true;
       const login = await portalLogin(cfg.host, cfg.portalUsername, cfg.portalPassword);
       if (!login.ok) {
