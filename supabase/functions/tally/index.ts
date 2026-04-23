@@ -157,6 +157,21 @@ async function portalLogin(host: string, username: string, password: string, tim
 // error. Only fires once per host per cold function invocation.
 const portalLoggedInForHost = new Set<string>();
 
+// Per-invocation diagnostics bucket, reset at the top of every Deno.serve
+// handler. Every call to tallyRequest pushes into this so the final
+// response can tell the UI whether portal auto-login fired — used to drive
+// the progress panel.
+type RequestDiagnostics = {
+  portalLoginAttempted: boolean;
+  portalLoginOk: boolean;
+  portalLoginError: string | null;
+};
+let currentDiagnostics: RequestDiagnostics = {
+  portalLoginAttempted: false,
+  portalLoginOk: false,
+  portalLoginError: null,
+};
+
 async function tallyRequest(xml: string, cfg: Required<TallyConfig>, timeoutMs = 120000) {
   if (!cfg.host) throw new Error('Tally host not configured. Provide "host" in the request body or set TALLY_HOST secret.');
 
@@ -175,30 +190,32 @@ async function tallyRequest(xml: string, cfg: Required<TallyConfig>, timeoutMs =
     try {
       res = await doFetch();
     } catch (err) {
-      // Connection-level failure (tunnel refused, DNS, etc.). If the caller
-      // provided portal creds and we haven't already logged in this cold
-      // start, try the hb.exe cp flow to revive the RemoteApp session and
-      // retry once.
       const msg = err instanceof Error ? err.message : String(err);
       const shouldAuto = cfg.username && cfg.password && !portalLoggedInForHost.has(cfg.host);
       if (!shouldAuto || /aborted/i.test(msg)) throw err;
+      currentDiagnostics.portalLoginAttempted = true;
       const login = await portalLogin(cfg.host, cfg.username, cfg.password);
-      if (!login.ok) throw new Error(`Tally unreachable and portal auto-login failed: ${login.error}. Original: ${msg}`);
+      if (!login.ok) {
+        currentDiagnostics.portalLoginError = login.error || 'unknown';
+        throw new Error(`Tally unreachable and portal auto-login failed: ${login.error}. Original: ${msg}`);
+      }
+      currentDiagnostics.portalLoginOk = true;
       portalLoggedInForHost.add(cfg.host);
       await new Promise((r) => setTimeout(r, 2000));
       res = await doFetch();
     }
     if (res.status === 401 || res.status === 403) {
-      // 401/403 from Tally itself means wrong XML creds. 401/403 from the
-      // tunnel generally means the portal session isn't active — try auto-
-      // login once and retry.
       const shouldAuto = cfg.username && cfg.password && !portalLoggedInForHost.has(cfg.host);
       if (shouldAuto) {
+        currentDiagnostics.portalLoginAttempted = true;
         const login = await portalLogin(cfg.host, cfg.username, cfg.password);
         if (login.ok) {
+          currentDiagnostics.portalLoginOk = true;
           portalLoggedInForHost.add(cfg.host);
           await new Promise((r) => setTimeout(r, 2000));
           res = await doFetch();
+        } else {
+          currentDiagnostics.portalLoginError = login.error || 'unknown';
         }
       }
       if (res.status === 401 || res.status === 403) {
@@ -211,6 +228,13 @@ async function tallyRequest(xml: string, cfg: Required<TallyConfig>, timeoutMs =
   } finally {
     clearTimeout(timer);
   }
+}
+
+function resetDiagnostics(): void {
+  currentDiagnostics = { portalLoginAttempted: false, portalLoginOk: false, portalLoginError: null };
+}
+function snapshotDiagnostics(): RequestDiagnostics {
+  return { ...currentDiagnostics };
 }
 
 function companyFilter(company: string): string {
@@ -596,6 +620,9 @@ Deno.serve(async (req) => {
   }
 
   const jsonHeaders = { ...corsHeaders, 'Content-Type': 'application/json' };
+  // Reset per-invocation diagnostics so responses (test / sync-full) can
+  // report whether the portal auto-login path kicked in for this call.
+  resetDiagnostics();
 
   let body: Record<string, unknown> = {};
   try {
@@ -1210,9 +1237,6 @@ Deno.serve(async (req) => {
     return new Response(JSON.stringify({
       connected: anyConnected,
       action,
-      // Return the MERGED bundle when we could persist, so the browser sees
-      // every collection that exists in the table (fresh + just-synced) —
-      // not just the ones we fetched this invocation.
       counts: mergedResponse?.counts ?? counts,
       data: mergedResponse?.data ?? data,
       errors: mergedResponse?.errors ?? errors,
@@ -1220,14 +1244,13 @@ Deno.serve(async (req) => {
       skipped,
       fetched: jobs.map((j) => j.key),
       activeCompany,
-      // Always return the discovered companies list — even if we couldn't
-      // persist it to tally_companies (e.g. migration not applied yet) the
-      // client can still cache it in localStorage and populate the switcher.
       discoveredCompanies,
       discoveryError,
-      // Only included when we got a response but parsed 0 companies —
-      // helps diagnose which Tally XML shape this version returns.
       discoveryRawSample: (discoveredCompanies.length === 0 && !discoveryError) ? discoveryRawSample : null,
+      // Per-invocation diagnostics so the client progress panel can announce
+      // "Portal session revived via auto-login" when the hb.exe cp retry
+      // kicked in.
+      diagnostics: snapshotDiagnostics(),
     }), { headers: jsonHeaders });
   }
 
@@ -1256,13 +1279,15 @@ Deno.serve(async (req) => {
   try {
     const result = await tallyRequest(xml, cfg);
     const counts = countRecords(result);
-    return new Response(JSON.stringify({ connected: true, action, counts, data: result }), {
-      headers: jsonHeaders,
-    });
+    return new Response(JSON.stringify({
+      connected: true, action, counts, data: result,
+      diagnostics: snapshotDiagnostics(),
+    }), { headers: jsonHeaders });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return new Response(JSON.stringify({ connected: false, action, error: message }), {
-      headers: jsonHeaders,
-    });
+    return new Response(JSON.stringify({
+      connected: false, action, error: message,
+      diagnostics: snapshotDiagnostics(),
+    }), { headers: jsonHeaders });
   }
 });

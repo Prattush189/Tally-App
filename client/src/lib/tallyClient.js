@@ -45,7 +45,12 @@ async function supabaseInvoke(action, config = {}) {
 export async function testConnection(config = {}) {
   if (TALLY_BACKEND === 'supabase') {
     const data = await supabaseInvoke('test', config);
-    return { connected: Boolean(data?.connected), response: data?.data, error: data?.error };
+    return {
+      connected: Boolean(data?.connected),
+      response: data?.data,
+      error: data?.error,
+      diagnostics: data?.diagnostics || null,
+    };
   }
   if (TALLY_BACKEND === 'express') {
     const r = await api.post('/tally/test', config);
@@ -110,6 +115,8 @@ export async function syncFromTally(config = {}) {
         activeCompany: data?.activeCompany,
         discoveryError: data?.discoveryError,
         discoveryRawSample: data?.discoveryRawSample,
+        fetched: data?.fetched || [],
+        diagnostics: data?.diagnostics || null,
       };
     } catch (fullErr) {
       const data = await supabaseInvoke('sync', config);
