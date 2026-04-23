@@ -67,12 +67,15 @@ export function sundryDebtorsRequest(cfg) {
 </ENVELOPE>`;
 }
 
+// Sales Register / Receipt Register return only the matching voucher type,
+// not every voucher type in the window like 'Day Book' did. Much smaller
+// payloads, and no back-to-back duplicate fetches of the same huge report.
 export function salesVouchersRequest(cfg) {
-  return reportRequest('Day Book', { ...cfg, vouchers: true });
+  return reportRequest('Sales Register', { ...cfg, vouchers: true });
 }
 
 export function receiptVouchersRequest(cfg) {
-  return reportRequest('Day Book', { ...cfg, vouchers: true });
+  return reportRequest('Receipt Register', { ...cfg, vouchers: true });
 }
 
 // Stock items / groups: custom COLLECTION. Built-in Stock Summary returns

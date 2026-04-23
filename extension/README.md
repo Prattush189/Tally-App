@@ -7,11 +7,12 @@ A browser-only path to push Tally data to the dashboard. No terminal, no Node, n
 Extensions are allowed to bypass browser CORS / mixed-content rules for origins listed in `host_permissions`. That's the trick: a pure web app can't fetch `http://103.76.213.243:9007/` from `https://…github.io`, but an extension with `"host_permissions": ["http://103.76.213.243/*"]` can.
 
 Flow:
-1. You open `http://103.76.213.243/`, log in, click **TallyPrime**
-2. The extension has already injected a teal **↻ Sync to Dashboard** button at bottom-right
-3. Click it → the extension fetches the 5 XML collection queries from `:9007`, POSTs them to the Supabase edge function (`action: 'ingest'` with `rawXml`), edge function parses them server-side and upserts `tally_snapshots`
-4. Toast: *"✓ Synced · 42 ledgers · 318 sales · 201 receipts · 185 stock items · 27 stock groups"*
-5. Open the dashboard — data's there.
+1. You open `http://103.76.213.243/` — if portal creds are saved in the popup, the extension auto-submits the login form for you and redirects to the launcher. Otherwise log in by hand.
+2. Click **TallyPrime** on the launcher page
+3. The extension has already injected a teal **↻ Sync to Dashboard** button at bottom-right
+4. Click it → the extension fetches the 5 XML collection queries from `:9007`, POSTs them to the Supabase edge function (`action: 'ingest'` with `rawXml`), edge function parses them server-side and upserts `tally_snapshots`
+5. Toast: *"✓ Synced · 42 ledgers · 318 sales · 201 receipts · 185 stock items · 27 stock groups"*
+6. Open the dashboard — data's there.
 
 ## Install (one-time, on any computer)
 
@@ -37,6 +38,7 @@ Flow:
    - **Supabase URL** — `https://vqusztwxrjokjgkiebem.supabase.co`
    - **Supabase anon key** — from https://supabase.com/dashboard/project/vqusztwxrjokjgkiebem/settings/api (anon public)
    - **Sync token** — matches `LOCAL_SYNC_TOKEN` you set via `supabase secrets set`
+   - **Portal username / password** — *optional*. If you fill these, the extension auto-logs-in when you open `http://103.76.213.243/` so you don't have to type them every time. Stored in `chrome.storage.local` — never leaves the browser except to POST the portal login form.
    - **Tally company** — e.g. `UNITED AGENCIES DISTRIBUTORS LLP`
    - **Tenant key** — leave as `default`
 3. Click **Save**
@@ -51,9 +53,9 @@ If you fork and host the dashboard elsewhere, add your origin to `extension/mani
 
 ## Using it
 
-1. Visit `http://103.76.213.243/` in the same browser
-2. Log in, go to the launcher page, click TallyPrime — wait for the RemoteApp session to open
-3. Click **↻ Sync to Dashboard** (bottom-right floating button on the portal page)
+1. Visit `http://103.76.213.243/` in the same browser. If you saved portal creds the extension auto-logs-in and drops you on the launcher; otherwise log in by hand.
+2. Click TallyPrime — wait for the RemoteApp session to open
+3. Click **↻ Sync to Dashboard** (bottom-right floating button on the portal page). Or just wait — the extension also auto-syncs within ~5s of TallyPrime becoming reachable.
 4. Wait ~30 seconds. Toast confirms the counts.
 5. Refresh your dashboard tab — fresh data.
 
@@ -67,6 +69,7 @@ If the button says Tally isn't responding, you haven't actually started TallyPri
 | "Configure the extension first" toast | No settings saved | Click the toolbar icon, fill the form, Save |
 | "Invalid syncToken" | Token in extension ≠ Supabase `LOCAL_SYNC_TOKEN` | Copy both fresh from a single source |
 | "Tally isn't responding on :9007" | RemoteApp not started | Go to launcher page → click TallyPrime → wait 10s → try again |
+| "Auto-login rejected (HTTP …)" | Wrong portal creds or portal endpoint changed | Log in by hand, confirm the creds work, then re-save them in the popup |
 | All 5 collections have errors, first few succeeded | Portal connection limit | Retry; the extension paces at 1.5s between calls which usually avoids this |
 
 ## Files

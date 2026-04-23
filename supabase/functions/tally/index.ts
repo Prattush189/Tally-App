@@ -229,12 +229,21 @@ function countNode(tree: unknown, target: string): number {
 // from our old collections, but extractAllByKey in the transformer walks
 // for LEDGER / VOUCHER / STOCKITEM / STOCKGROUP at any depth, so it keeps
 // working across both shapes.
+//
+// Sales / Receipt Register are type-specific Tally reports (shipped with
+// every Prime version since forever). 'Day Book' returned EVERY voucher
+// type in the window (contras, journals, purchases, sales, receipts),
+// which on a 90-day default blew past the shared-host tunnel's payload
+// ceiling → "Connection reset by peer". The type-specific reports are a
+// fraction of the size (only one voucher type each), and — because sales
+// and receipts no longer fire the same query back-to-back — the second
+// call doesn't land while the tunnel is still flushing the first.
 function salesVouchersRequest(cfg: { company: string; fromDate: string; toDate: string }) {
-  return reportWithVoucherDates('Day Book', cfg);
+  return reportWithVoucherDates('Sales Register', cfg);
 }
 
 function receiptVouchersRequest(cfg: { company: string; fromDate: string; toDate: string }) {
-  return reportWithVoucherDates('Day Book', cfg);
+  return reportWithVoucherDates('Receipt Register', cfg);
 }
 
 // Stock items / groups stay on our custom COLLECTION queries — empirically
@@ -974,8 +983,12 @@ Deno.serve(async (req) => {
       { key: 'accountingGroups' as const, xml: accountingGroupsRequest(queryCfg), node: 'GROUP', timeoutMs: 15000 },
       { key: 'stockItems' as const, xml: stockItemsRequest(queryCfg), node: 'STOCKITEM', timeoutMs: 20000 },
       { key: 'stockGroups' as const, xml: stockGroupsRequest(queryCfg), node: 'STOCKGROUP', timeoutMs: 12000 },
-      { key: 'salesVouchers' as const, xml: salesVouchersRequest(queryCfg), node: 'VOUCHER', timeoutMs: 25000 },
-      { key: 'receiptVouchers' as const, xml: receiptVouchersRequest(queryCfg), node: 'VOUCHER', timeoutMs: 20000 },
+      // Sales/Receipt Register payloads are much smaller than the old Day Book
+      // ones (type-specific vs every-voucher-type), but the shared tunnel still
+      // needs room to stream each one. 45/35s gives the retry path enough
+      // budget for one reset-and-wait cycle without starving later jobs.
+      { key: 'salesVouchers' as const, xml: salesVouchersRequest(queryCfg), node: 'VOUCHER', timeoutMs: 45000 },
+      { key: 'receiptVouchers' as const, xml: receiptVouchersRequest(queryCfg), node: 'VOUCHER', timeoutMs: 35000 },
     ];
 
     const skipped: Record<string, { reason: string; updatedAt: string }> = {};
@@ -1031,6 +1044,13 @@ Deno.serve(async (req) => {
       // One retry on connection-reset-class failures. Doesn't apply to auth
       // errors or 4xx/5xx — only to TCP resets and timed-out reads, which
       // flaky tunnels tend to produce on the 2nd+ connection.
+      //
+      // Reset-class errors ("reset by peer", "ECONNRESET") mean the tunnel
+      // actively dropped the socket — it typically refuses new connections
+      // for several seconds afterwards. 2s wasn't enough; 8s lets the
+      // tunnel fully recover before the retry. Idle/abort errors ("signal
+      // has been aborted", "fetch failed") don't suffer the same refusal
+      // window, so a shorter wait is fine.
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
           result = await tallyRequest(job.xml, cfg, Math.max(5000, Math.floor(timeout / (2 - attempt))));
@@ -1039,9 +1059,10 @@ Deno.serve(async (req) => {
         } catch (err) {
           lastErr = err;
           const msg = err instanceof Error ? err.message : String(err);
-          const retriable = /reset by peer|ECONNRESET|network error|signal has been aborted|fetch failed/i.test(msg);
+          const wasReset = /reset by peer|ECONNRESET/i.test(msg);
+          const retriable = wasReset || /network error|signal has been aborted|fetch failed/i.test(msg);
           if (!retriable || deadline - Date.now() < 5000) break;
-          await new Promise((r) => setTimeout(r, 2000));
+          await new Promise((r) => setTimeout(r, wasReset ? 8000 : 2000));
         }
       }
       if (lastErr) {
