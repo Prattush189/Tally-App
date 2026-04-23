@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { FiltersProvider } from './context/FiltersContext';
 import LoginPage from './components/Auth/LoginPage';
 import Sidebar from './components/Layout/Sidebar';
 import Header from './components/Layout/Header';
@@ -31,8 +32,13 @@ import { loadLiveCustomers } from './lib/liveData';
 const ACTIVE_PAGE_KEY = 'b2b_active_page';
 
 function DashboardApp() {
-  const { user, isDemo } = useAuth();
-  const hasLiveData = !isDemo && !!loadLiveCustomers(user?.email)?.customers?.length;
+  const { user } = useAuth();
+  // Everyone — demo account included — must have a live Tally snapshot
+  // before the dashboards unlock. Previously the demo account bypassed
+  // this gate and rendered pages against a mock fixture; we removed that
+  // path so no user ever sees fabricated numbers. Demo accounts now see
+  // the same "sync Tally first" card as a fresh real account.
+  const hasLiveData = !!loadLiveCustomers(user?.email)?.customers?.length;
   const [active, setActive] = useState(() => {
     try { return localStorage.getItem(ACTIVE_PAGE_KEY) || 'overview'; }
     catch { return 'overview'; }
@@ -53,10 +59,10 @@ function DashboardApp() {
   };
 
   const renderModule = () => {
-    // Tally Sync is always accessible — it's how real users wire up their data.
-    // Every other module needs data to be meaningful; non-demo users see a
-    // "no data yet" card instead of mock numbers pretending to be their own.
-    if (!isDemo && !hasLiveData && active !== 'tally') {
+    // Tally Sync is always accessible — it's how users wire up their data.
+    // Every other module needs real data; without a live snapshot we show a
+    // "sync Tally first" card rather than any fabricated numbers.
+    if (!hasLiveData && active !== 'tally') {
       return <NoDataNotice onNavigate={setActive} />;
     }
     switch (active) {
@@ -102,7 +108,9 @@ function DashboardApp() {
 export default function App() {
   return (
     <AuthProvider>
-      <DashboardApp />
+      <FiltersProvider>
+        <DashboardApp />
+      </FiltersProvider>
     </AuthProvider>
   );
 }

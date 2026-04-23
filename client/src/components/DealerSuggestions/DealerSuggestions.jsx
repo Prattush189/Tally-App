@@ -2,18 +2,26 @@ import { UserPlus, MapPin, Star, DollarSign } from 'lucide-react';
 import SectionHeader from '../common/SectionHeader';
 import MetricCard from '../common/MetricCard';
 import LoadingSpinner from '../common/LoadingSpinner';
+import AIInsights from '../common/AIInsights';
 import { useExtended } from '../../hooks/useExtended';
 import { fmt } from '../../utils/format';
 
 const priorityColors = { High: '#22c55e', Medium: '#f59e0b', Low: '#6b7280' };
 
 export default function DealerSuggestions() {
-  const { data, loading, refresh } = useExtended('dealer-suggestions');
+  const { data, loading } = useExtended('dealer-suggestions');
   if (loading || !data) return <LoadingSpinner />;
+
+  const isReactivation = data.kind === 'reactivation';
+  const subtitle = isReactivation
+    ? `Dormant dealers worth re-engaging — ${data.today.length} candidates as of ${data.date}`
+    : `Daily outbound targets — ${data.date}`;
 
   return (
     <div className="space-y-6">
-      <SectionHeader icon={UserPlus} title="New Dealer Suggestions" subtitle={`Daily outbound targets — ${data.date}`} />
+      <SectionHeader icon={UserPlus} title={isReactivation ? 'Reactivation Targets' : 'New Dealer Suggestions'} subtitle={subtitle} />
+
+      <AIInsights task="dealer-suggestions" title="New-market prospects from AI" subtitle="Google-Search-grounded suggestions for genuinely-new dealers, plus reactivation plays." />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <MetricCard icon={UserPlus} label="Today's Suggestions" value={data.today.length} sub="New dealer prospects" color="emerald" />
@@ -51,8 +59,14 @@ export default function DealerSuggestions() {
             </div>
             <div className="mt-3 pt-3 border-t border-gray-700/30 grid grid-cols-4 gap-2 text-center">
               <div><p className="text-xs text-gray-500">Est. Monthly</p><p className="text-sm font-medium text-white">{fmt(d.estimatedMonthly)}</p></div>
-              <div><p className="text-xs text-gray-500">Market Size</p><p className="text-sm font-medium text-white">{fmt(d.marketSize)}</p></div>
-              <div><p className="text-xs text-gray-500">Competitors</p><p className="text-sm font-medium text-white">{d.competitorPresence}</p></div>
+              <div>
+                <p className="text-xs text-gray-500">Market Size</p>
+                <p className="text-sm font-medium text-white">{d.marketSize != null ? fmt(d.marketSize) : '—'}</p>
+              </div>
+              <div>
+                <p className="text-xs text-gray-500">Competitors</p>
+                <p className="text-sm font-medium text-white">{d.competitorPresence != null ? d.competitorPresence : '—'}</p>
+              </div>
               <div><p className="text-xs text-gray-500">Contact Via</p><p className="text-sm font-medium text-indigo-300">{d.contactMethod}</p></div>
             </div>
           </div>

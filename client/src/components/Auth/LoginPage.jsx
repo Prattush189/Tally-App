@@ -189,7 +189,11 @@ export default function LoginPage() {
             )}
           </p>
 
-          {/* Demo account — one-click view-only tour with sample data. */}
+          {/* Demo account — auth-only tour. No sample data is bundled; every
+              dashboard requires a real Tally sync to render, same as any
+              other account. We keep the "Continue as Demo" button so people
+              can poke around the UI without signing up, but the card now
+              tells them what they'll actually see. */}
           <div className="mt-6 pt-6 border-t border-gray-700/40">
             <div className="flex items-center gap-2 mb-3">
               <Sparkles size={14} className="text-indigo-300" />
@@ -197,7 +201,7 @@ export default function LoginPage() {
             </div>
             <div className="rounded-xl bg-indigo-500/5 border border-indigo-500/20 p-4 space-y-3">
               <p className="text-xs text-gray-400 leading-relaxed">
-                The demo account is view-only and comes pre-loaded with sample dealer, invoice, and payment data across all 22 modules.
+                The demo account lets you navigate the UI without signing up. <b>No sample data is bundled</b> — every dashboard needs a real Tally sync. You can still see the Tally Sync page and the layout of each module.
               </p>
               <div className="grid grid-cols-[auto,1fr,auto] gap-x-2 gap-y-1.5 text-xs items-center">
                 <span className="text-gray-500">Email</span>

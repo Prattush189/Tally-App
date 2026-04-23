@@ -3,6 +3,7 @@ import MetricCard from '../common/MetricCard';
 import SectionHeader from '../common/SectionHeader';
 import RiskBadge from '../common/RiskBadge';
 import LoadingSpinner from '../common/LoadingSpinner';
+import AIInsights from '../common/AIInsights';
 import { useAnalytics } from '../../hooks/useAnalytics';
 import { fmt } from '../../utils/format';
 
@@ -20,6 +21,8 @@ export default function ProactiveSystem() {
   return (
     <div className="space-y-6">
       <SectionHeader icon={Bell} title="Relationship Orchestration" subtitle="Behaviour-driven reminders — who to contact, when, and why" />
+
+      <AIInsights task="proactive" title="Proactive triggers from AI" subtitle="Catches declining patterns before they become problems." />
 
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
         <MetricCard icon={Bell} label="Active Reminders" value={data.stats.total} color="amber" />

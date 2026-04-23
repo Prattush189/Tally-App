@@ -87,6 +87,76 @@ function buildTallyUrl(host: string): string {
   return `http://${trimmed}`;
 }
 
+// Deduce the HOB portal login URL from a Tally host. "103.76.213.243:9007"
+// → "https://103.76.213.243/". The portal serves the login form over HTTPS
+// on port 443 regardless of which port Tally's XML server listens on.
+function portalBaseFromHost(host: string): string | null {
+  if (!host) return null;
+  const trimmed = host.trim();
+  const urlMatch = trimmed.match(/^https?:\/\/([^/:]+)/i);
+  const hostname = urlMatch ? urlMatch[1] : trimmed.split(':')[0];
+  if (!hostname) return null;
+  // IP-address portals we know (like the shared HOB RemoteApp tunnel) serve
+  // the login at https://<host>/. If this doesn't match a user's deployment
+  // they can override via TALLY_PORTAL_URL env / portal_url in config.
+  return `https://${hostname}/`;
+}
+
+// Attempt portal login via POST /cgi-bin/hb.exe with action=cp. HOB
+// RemoteApp's login form accepts URL-encoded form data and returns
+// {"Status":"ok"} on success along with Set-Cookie session headers. We
+// don't need to keep the cookies — the portal starts Tally's XML server
+// on :9007 as a side-effect of a successful login — but on subsequent
+// calls we DO forward the cookies in case a future portal update starts
+// requiring them.
+async function portalLogin(host: string, username: string, password: string, timeoutMs = 15000): Promise<{ ok: boolean; error?: string; cookies?: string[] }> {
+  const base = portalBaseFromHost(host);
+  if (!base) return { ok: false, error: 'Could not derive portal URL from host.' };
+  const url = `${base}cgi-bin/hb.exe`;
+  const body = new URLSearchParams({
+    action: 'cp',
+    l: username,
+    p: password,
+    d: '',
+    f: '',
+    t: String(Date.now()),
+  }).toString();
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Accept': '*/*',
+      },
+      body,
+      signal: controller.signal,
+    });
+    if (!res.ok) return { ok: false, error: `Portal login HTTP ${res.status}` };
+    const text = await res.text();
+    // Portal returns either {"Status":"ok"} (newer builds) or plain "ok".
+    if (!/"status"\s*:\s*"ok"|^\s*ok\s*$/i.test(text)) {
+      return { ok: false, error: `Portal rejected login: ${text.slice(0, 120)}` };
+    }
+    const cookies = res.headers.getSetCookie ? res.headers.getSetCookie() : [];
+    return { ok: true, cookies };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// When the XML endpoint on :9007 isn't responding, we auto-trigger a
+// portal login (hb.exe cp). The portal starts the RemoteApp session which
+// brings Tally's XML listener online, so the very next tallyRequest() call
+// typically succeeds. Keyed off whether creds are present — if the caller
+// didn't pass portal creds we skip the retry and surface the original
+// error. Only fires once per host per cold function invocation.
+const portalLoggedInForHost = new Set<string>();
+
 async function tallyRequest(xml: string, cfg: Required<TallyConfig>, timeoutMs = 120000) {
   if (!cfg.host) throw new Error('Tally host not configured. Provide "host" in the request body or set TALLY_HOST secret.');
 
@@ -98,11 +168,42 @@ async function tallyRequest(xml: string, cfg: Required<TallyConfig>, timeoutMs =
       headers['Authorization'] = 'Basic ' + btoa(`${cfg.username}:${cfg.password}`);
     }
     const url = buildTallyUrl(cfg.host);
-    const res = await fetch(url, {
+    const doFetch = () => fetch(url, {
       method: 'POST', headers, body: xml, signal: controller.signal,
     });
+    let res: Response;
+    try {
+      res = await doFetch();
+    } catch (err) {
+      // Connection-level failure (tunnel refused, DNS, etc.). If the caller
+      // provided portal creds and we haven't already logged in this cold
+      // start, try the hb.exe cp flow to revive the RemoteApp session and
+      // retry once.
+      const msg = err instanceof Error ? err.message : String(err);
+      const shouldAuto = cfg.username && cfg.password && !portalLoggedInForHost.has(cfg.host);
+      if (!shouldAuto || /aborted/i.test(msg)) throw err;
+      const login = await portalLogin(cfg.host, cfg.username, cfg.password);
+      if (!login.ok) throw new Error(`Tally unreachable and portal auto-login failed: ${login.error}. Original: ${msg}`);
+      portalLoggedInForHost.add(cfg.host);
+      await new Promise((r) => setTimeout(r, 2000));
+      res = await doFetch();
+    }
     if (res.status === 401 || res.status === 403) {
-      throw new Error(`Tally authentication failed (${res.status}). Check username/password.`);
+      // 401/403 from Tally itself means wrong XML creds. 401/403 from the
+      // tunnel generally means the portal session isn't active — try auto-
+      // login once and retry.
+      const shouldAuto = cfg.username && cfg.password && !portalLoggedInForHost.has(cfg.host);
+      if (shouldAuto) {
+        const login = await portalLogin(cfg.host, cfg.username, cfg.password);
+        if (login.ok) {
+          portalLoggedInForHost.add(cfg.host);
+          await new Promise((r) => setTimeout(r, 2000));
+          res = await doFetch();
+        }
+      }
+      if (res.status === 401 || res.status === 403) {
+        throw new Error(`Tally authentication failed (${res.status}). Check username/password.`);
+      }
     }
     if (!res.ok) throw new Error(`Tally returned HTTP ${res.status}: ${res.statusText}`);
     const text = await res.text();

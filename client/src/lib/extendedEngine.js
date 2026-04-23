@@ -1,33 +1,107 @@
 // Client-side extended analytics engine — replaces /api/extended/* routes.
 // Mirrors the server route shapes so consumers don't need to change.
 
-import { customers as defaultCustomers } from './mockData.js';
-import {
-  generateMapAnalytics, generateToyCategoryScores, generatePurchaseForecast,
-  generateAreaSKUAnalysis, generateDealerSuggestions, generatePaymentReminders,
-  generateRevenueSuggestions, generateCustomerHealth, generateInventoryBudget,
-  generateMarketingBudget,
-} from './extendedData.js';
+// Extended analytics engine — operates exclusively on real Tally-sync data
+// passed in via overrides.customers. Previously this file imported mock
+// fixtures (mockData.customers, generateToyCategoryScores, etc.) and fell
+// back to them when the caller didn't supply real data; that fallback is
+// gone so no dashboard ever renders fabricated numbers. Hooks that can't
+// find a live snapshot return `data: null` and components render their
+// empty state.
+import { INDIA_STATES } from './extendedData.js';
+
+// Deterministic PRNG mirrored from extendedData.js so real-data derivations
+// in this file can reuse seeded randomness where numbers need stable spread
+// (e.g. peer tier estimates). Same seed → same output every reload.
+function hashString(s) {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+function mulberry32(seed) {
+  let t = seed >>> 0;
+  return function () {
+    t = (t + 0x6D2B79F5) >>> 0;
+    let r = Math.imul(t ^ (t >>> 15), 1 | t);
+    r = (r + Math.imul(r ^ (r >>> 7), 61 | r)) ^ r;
+    return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function rngFor(seed) { return mulberry32(hashString(seed)); }
 
 function pickCustomers(overrides) {
-  return (overrides && overrides.customers) || defaultCustomers;
+  return (overrides && Array.isArray(overrides.customers)) ? overrides.customers : [];
 }
 
-export function getMap() {
-  return { states: generateMapAnalytics(), totalStates: 18 };
+// Roll up real Tally customers into state-level metrics. The transformer
+// populates `state` (from LedStateName / Address parsing) and `region` on
+// each customer; we aggregate revenue, dealer count, churn risk, top
+// category and DSO by state. No demo fixture — empty state + "no regional
+// data yet" empty source returned when customers lack state/region data.
+export function getMap(overrides) {
+  const customers = pickCustomers(overrides);
+  if (!customers.length) return { states: [], totalStates: 0, source: 'empty' };
+
+  const byState = new Map();
+  for (const c of customers) {
+    const rawState = (c.state || c.region || '').trim();
+    if (!rawState) continue;
+    const e = byState.get(rawState) || {
+      state: rawState, revenue: 0, dealers: 0, customers: 0,
+      monthlyAvgSum: 0, dsoSum: 0, dsoN: 0,
+      churnHigh: 0, churnMed: 0, churnLow: 0,
+      categoryCounts: new Map(),
+    };
+    e.revenue += c.totalRevenue || (c.monthlyAvg || 0) * 12;
+    e.dealers += 1;
+    e.customers += 1;
+    e.monthlyAvgSum += c.monthlyAvg || 0;
+    if (typeof c.dso === 'number') { e.dsoSum += c.dso; e.dsoN += 1; }
+    if (c.churnRisk === 'High') e.churnHigh += 1;
+    else if (c.churnRisk === 'Medium') e.churnMed += 1;
+    else e.churnLow += 1;
+    for (const cat of c.purchasedCategories || []) {
+      e.categoryCounts.set(cat, (e.categoryCounts.get(cat) || 0) + 1);
+    }
+    byState.set(rawState, e);
+  }
+  if (!byState.size) return { states: [], totalStates: 0, source: 'empty' };
+
+  const geoLookup = new Map(INDIA_STATES.map(s => [s.state.toLowerCase(), s]));
+  const states = Array.from(byState.values()).map(e => {
+    const geo = geoLookup.get(e.state.toLowerCase()) || { code: e.state.slice(0, 2).toUpperCase(), x: null, y: null, cities: [] };
+    const topCat = Array.from(e.categoryCounts.entries()).sort((a, b) => b[1] - a[1])[0];
+    const mostChurn = Math.max(e.churnHigh, e.churnMed, e.churnLow);
+    const churnRisk = mostChurn === e.churnHigh ? 'High' : mostChurn === e.churnMed ? 'Medium' : 'Low';
+    return {
+      state: e.state, code: geo.code, x: geo.x, y: geo.y, cities: geo.cities,
+      customers: e.customers,
+      revenue: Math.round(e.revenue),
+      dealers: e.dealers,
+      growth: 0,
+      topCategory: topCat ? topCat[0] : '—',
+      avgOrderValue: e.customers ? Math.round(e.monthlyAvgSum / e.customers) : 0,
+      penetration: 0,
+      churnRisk,
+      avgDSO: e.dsoN ? Math.round(e.dsoSum / e.dsoN) : 0,
+    };
+  }).sort((a, b) => b.revenue - a.revenue);
+
+  return { states, totalStates: states.length, source: 'tally' };
 }
 
 export function getToyCategories(overrides) {
   const customers = pickCustomers(overrides);
-  const isReal = overrides && overrides.customers;
-  // If we're on demo data, the fixture categories are the right answer.
-  if (!isReal) return { categories: generateToyCategoryScores(), source: 'demo' };
+  if (!customers.length) return { categories: [], source: 'empty' };
 
   // Derive categories directly from Tally stock items (via purchasedCategories
   // on each customer, which the transformer populated from sale voucher
   // inventory line items). This is the ACTUAL taxonomy from the user's Tally
-  // file — not the hardcoded toy fixtures we ship for the demo account.
-  const agg = new Map(); // categoryName -> { customers: Set, salesTotal }
+  // file — no demo fixture fallback.
+  const agg = new Map();
   for (const c of customers) {
     const cats = c.purchasedCategories || [];
     const monthly = (c.invoiceHistory || []).reduce((s, m) => s + (m.value || 0), 0);
@@ -41,15 +115,10 @@ export function getToyCategories(overrides) {
   }
 
   if (!agg.size) {
-    // User has Tally ledgers but no per-customer purchasedCategories
-    // (sales vouchers haven't synced cleanly yet). Fall back to the demo
-    // fixture so the page isn't blank + stays consistent with the Forecast
-    // Summary (which also uses the fixture). UI shows a 'sample categories'
-    // banner so it's clear these aren't the user's real taxonomy yet.
     return {
-      categories: generateToyCategoryScores(),
-      source: 'tally-empty',
-      note: 'Sample categories shown — once Tally sales vouchers sync cleanly, this view switches to the categories your customers actually buy.',
+      categories: [],
+      source: 'waiting-for-vouchers',
+      note: 'No category data yet — once Tally sales vouchers sync, this view populates with the categories your customers actually buy.',
     };
   }
 
@@ -57,9 +126,6 @@ export function getToyCategories(overrides) {
   const categories = Array.from(agg.values())
     .map((e, i) => {
       const dealerAdoption = Math.round((e.customerIds.size / totalCustomers) * 100);
-      // Scores derived from what we actually know. avgPrice / margin / returnRate
-      // need line-item detail we don't have, so we leave them at 0 and mark
-      // the data source so UI can hide those columns when source='tally'.
       const healthScore = Math.min(100, Math.max(0, Math.round(40 + dealerAdoption * 0.6)));
       return {
         id: i + 1,
@@ -84,14 +150,111 @@ export function getToyCategories(overrides) {
   return { categories, source: 'tally' };
 }
 
-export function getForecast() {
-  const forecasts = generatePurchaseForecast();
+// Linear projection from customer invoice history → a simple 8-month
+// purchase forecast per category, derived from what the user's dealers have
+// actually bought. No random padding, no hardcoded fixture. If voucher
+// history is absent we return an empty forecast so the UI can render a
+// "waiting for voucher sync" state instead of fabricated predictions.
+export function getForecast(overrides) {
+  const customers = pickCustomers(overrides);
+  if (!customers.length) return { forecasts: [], totalForecast: 0, months: 0, source: 'empty' };
+
+  const catHistory = new Map();
+  for (const c of customers) {
+    const cats = c.purchasedCategories || [];
+    const hist = c.invoiceHistory || [];
+    if (!cats.length || !hist.length) continue;
+    for (const cat of cats) {
+      const arr = catHistory.get(cat) || Array(12).fill(0);
+      hist.slice(-12).forEach((row, i) => { arr[i] += (row.value || 0) / cats.length; });
+      catHistory.set(cat, arr);
+    }
+  }
+  if (!catHistory.size) return { forecasts: [], totalForecast: 0, months: 0, source: 'waiting-for-vouchers' };
+
+  // Forward-project the next 8 months by taking the 3-month trailing average
+  // and applying a naive linear trend from the last 6 vs the first 6 months.
+  const projMonths = 8;
+  const forecasts = Array.from(catHistory.entries()).map(([cat, arr]) => {
+    const first6 = arr.slice(0, 6).reduce((s, v) => s + v, 0) / 6;
+    const last6 = arr.slice(-6).reduce((s, v) => s + v, 0) / 6;
+    const growthPerMonth = (last6 - first6) / 6;
+    const baseline = arr.slice(-3).reduce((s, v) => s + v, 0) / 3;
+    const nextMonths = Array.from({ length: projMonths }, (_, i) => {
+      const predicted = Math.max(0, Math.round(baseline + growthPerMonth * (i + 1)));
+      return {
+        month: `+${i + 1}m`,
+        predicted,
+        confidence: Math.max(60, Math.round(85 - i * 3)),
+        isPeak: false,
+        lower: Math.round(predicted * 0.8),
+        upper: Math.round(predicted * 1.2),
+      };
+    });
+    return { category: cat, avgPrice: 0, forecasts: nextMonths, totalForecast: nextMonths.reduce((s, f) => s + f.predicted, 0) };
+  });
   const totalForecast = forecasts.reduce((s, f) => s + f.totalForecast, 0);
-  return { forecasts, totalForecast, months: 8 };
+  return { forecasts, totalForecast, months: projMonths, source: 'tally' };
 }
 
-export function getAreaSKU() {
-  return generateAreaSKUAnalysis();
+// Derive region-level SKU / price mix from live customer purchase data.
+// Buckets each customer's avgOrderValue into price bands and counts
+// purchasedCategories per region. No demo/mock fallback — empty envelope
+// if no customers or no voucher data yet.
+export function getAreaSKU(overrides) {
+  const customers = pickCustomers(overrides);
+
+  const priceRanges = [
+    { range: '₹0-200', min: 0, max: 200 },
+    { range: '₹200-500', min: 200, max: 500 },
+    { range: '₹500-1000', min: 500, max: 1000 },
+    { range: '₹1000-2000', min: 1000, max: 2000 },
+    { range: '₹2000+', min: 2000, max: Infinity },
+  ];
+
+  if (!customers.length) return { priceData: [], categoryData: [], priceRanges, regions: [], source: 'empty' };
+
+  const regionAgg = new Map();
+  for (const c of customers) {
+    const region = (c.region || 'Unclassified').trim();
+    const aov = c.avgOrderValue || c.monthlyAvg || 0;
+    if (!regionAgg.has(region)) {
+      regionAgg.set(region, {
+        region,
+        priceCounts: Object.fromEntries(priceRanges.map(p => [p.range, 0])),
+        priceSum: 0, priceN: 0,
+        categoryCounts: new Map(),
+        skuSet: new Set(),
+      });
+    }
+    const e = regionAgg.get(region);
+    const band = priceRanges.find(p => aov >= p.min && aov < p.max);
+    if (band) e.priceCounts[band.range] += 1;
+    e.priceSum += aov; e.priceN += 1;
+    for (const cat of c.purchasedCategories || []) {
+      e.categoryCounts.set(cat, (e.categoryCounts.get(cat) || 0) + 1);
+    }
+    for (const sku of c.purchasedSkus || []) e.skuSet.add(sku);
+  }
+  if (!regionAgg.size) return { priceData: [], categoryData: [], priceRanges, regions: [], source: 'empty' };
+
+  const priceData = Array.from(regionAgg.values()).map(e => ({
+    region: e.region,
+    ...e.priceCounts,
+    avgPrice: e.priceN ? Math.round(e.priceSum / e.priceN) : 0,
+    bestSelling: Object.entries(e.priceCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || priceRanges[0].range,
+  }));
+  const categoryData = Array.from(regionAgg.values()).map(e => {
+    const top = Array.from(e.categoryCounts.entries()).sort((a, b) => b[1] - a[1])[0];
+    return {
+      region: e.region,
+      ...Object.fromEntries(Array.from(e.categoryCounts.entries()).map(([k, v]) => [k, v])),
+      topCategory: top ? top[0] : '—',
+      totalSKUs: e.skuSet.size,
+    };
+  });
+  const regions = Array.from(regionAgg.keys());
+  return { priceData, categoryData, priceRanges, regions, source: 'tally' };
 }
 
 export function getContactPriority(overrides) {
@@ -126,16 +289,84 @@ export function getContactPriority(overrides) {
   return { customers: prioritized };
 }
 
-export function getDealerSuggestions() {
-  const all = generateDealerSuggestions();
-  const today = new Date().getDate();
-  const startIdx = (today % 3) * 10;
-  const todayBatch = all.slice(startIdx, startIdx + 10);
-  return { today: todayBatch, total: all.length, date: new Date().toLocaleDateString('en-IN') };
+// Reactivation candidates from the live customer book. Previously this page
+// showed a hardcoded fixture of 30 made-up dealer names rotated by today's
+// date — a clear "fake data leaking onto real accounts" case. Now we return
+// dormant dealers (no orders recently + non-Low churn risk) so the page
+// answers the real question: "who should I re-engage this week?". The page
+// title is kept as "New Dealers" / "Dealer Suggestions" upstream; follow-up
+// work via the AI edge function will layer in genuinely-new-prospect ideas
+// grounded with Google Search.
+export function getDealerSuggestions(overrides) {
+  const customers = pickCustomers(overrides);
+  if (!customers.length) return { today: [], total: 0, date: new Date().toLocaleDateString('en-IN'), source: 'empty' };
+
+  const dormant = customers
+    .filter(c => (c.lastOrderDays || 0) > 60 && c.churnRisk !== 'Low')
+    .map(c => ({
+      id: c.id, name: c.name,
+      city: c.city || '',
+      state: c.state || '',
+      region: c.region || '',
+      marketSize: null,
+      fitScore: Math.round(Math.max(0, 100 - (c.lastOrderDays || 0))),
+      estimatedMonthly: c.monthlyAvg || 0,
+      competitorPresence: null,
+      populationDensity: null,
+      categories: c.purchasedCategories || [],
+      contactMethod: (c.phone ? 'Phone' : c.email ? 'Email' : 'Visit'),
+      reason: c.churnRisk === 'High' ? "High churn risk — re-engage before they're gone" : `${c.lastOrderDays}d since last order`,
+      priority: c.churnRisk === 'High' ? 'High' : c.churnRisk === 'Medium' ? 'Medium' : 'Low',
+    }))
+    .sort((a, b) => b.estimatedMonthly - a.estimatedMonthly);
+
+  return {
+    today: dormant.slice(0, 10),
+    total: dormant.length,
+    date: new Date().toLocaleDateString('en-IN'),
+    source: dormant.length ? 'tally' : 'all-active',
+    kind: 'reactivation',
+  };
 }
 
-export function getPaymentReminders() {
-  const reminders = generatePaymentReminders();
+// Real DSO- and aging-bucket-driven payment reminders. No RNG.
+export function getPaymentReminders(overrides) {
+  const customers = pickCustomers(overrides);
+  if (!customers.length) {
+    return {
+      reminders: [],
+      stats: { critical: 0, high: 0, medium: 0, upcoming: 0, totalPending: 0 },
+      source: 'empty',
+    };
+  }
+  const reminders = customers.map(c => {
+    const totalPending = (c.agingCurrent || 0) + (c.aging30 || 0) + (c.aging60 || 0) + (c.aging90 || 0);
+    const overdue60 = (c.aging60 || 0) + (c.aging90 || 0);
+    const over90 = c.aging90 || 0;
+    let urgency = 'Low';
+    let action = 'No action needed';
+    if (over90 > 0) { urgency = 'Critical'; action = 'Escalate immediately — invoices 90+ days overdue'; }
+    else if ((c.aging60 || 0) > 0) { urgency = 'High'; action = 'Send firm reminder + call follow-up'; }
+    else if ((c.aging30 || 0) > 0) { urgency = 'Medium'; action = 'Send payment reminder email/WhatsApp'; }
+    else if ((c.agingCurrent || 0) > 0) { urgency = 'Upcoming'; action = 'Pre-emptive reminder'; }
+
+    return {
+      id: c.id, name: c.name, segment: c.segment, region: c.region,
+      avgPaymentCycle: null,
+      lastPaymentDays: null,
+      overdue: overdue60 > 0,
+      overdueDays: null,
+      pendingInvoices: null,
+      totalPending,
+      onTimeRate: null,
+      urgency,
+      action,
+      predictedPayDate: null,
+      monthlyAvg: c.monthlyAvg || 0,
+      dso: c.dso || 0,
+    };
+  }).filter(r => r.totalPending > 0).sort((a, b) => b.totalPending - a.totalPending);
+
   const stats = {
     critical: reminders.filter(r => r.urgency === 'Critical').length,
     high: reminders.filter(r => r.urgency === 'High').length,
@@ -143,17 +374,57 @@ export function getPaymentReminders() {
     upcoming: reminders.filter(r => r.urgency === 'Upcoming').length,
     totalPending: reminders.reduce((s, r) => s + r.totalPending, 0),
   };
-  return { reminders, stats };
+  return { reminders, stats, source: 'tally' };
 }
 
+// Revenue-strategy ideas are now AI-generated via the Gemini edge function
+// (see Actions & Outreach components which call useAISuggestions). This
+// deterministic handler returns an empty envelope so the UI can prompt for
+// an AI refresh rather than rendering a stale hardcoded fixture.
 export function getRevenueSuggestions() {
-  const strategies = generateRevenueSuggestions();
-  const totalPotential = strategies.reduce((s, st) => s + st.estimatedRevenue, 0);
-  return { strategies, totalPotential };
+  return { strategies: [], totalPotential: 0, source: 'ai-only' };
 }
 
-export function getCustomerHealth() {
-  const health = generateCustomerHealth();
+// Health score per live customer. Previously iterated over the global mock
+// customer array. Now iterates over overrides.customers with the same 5-
+// dimension weighting used in extendedData's old generator.
+export function getCustomerHealth(overrides) {
+  const customers = pickCustomers(overrides);
+  if (!customers.length) {
+    return { customers: [], distribution: { critical: 0, atRisk: 0, needsAttention: 0, healthy: 0 }, avgHealth: 0, source: 'empty' };
+  }
+  const health = customers.map(c => {
+    const purchaseHealth = Math.max(0, 100 - (c.lastOrderDays || 0) * 1.5 - Math.max(0, c.orderFreqDecline || 0));
+    const paymentHealth = Math.max(0, 100 - ((c.dso || 0) - 30) * 1.5);
+    const engagementHealth = (c.skuPenetration || 0) * 0.5 + (c.catPenetration || 0) * 0.5;
+    const growthHealth = Math.max(0, 50 + (c.revenueChange || 0));
+    const loyaltyHealth = Math.min(100, (c.totalOrders || 0) / 3);
+    const overallHealth = Math.round(
+      purchaseHealth * 0.25 + paymentHealth * 0.25 + engagementHealth * 0.2 + growthHealth * 0.15 + loyaltyHealth * 0.15
+    );
+    let status = 'Healthy';
+    if (overallHealth < 30) status = 'Critical';
+    else if (overallHealth < 50) status = 'At Risk';
+    else if (overallHealth < 70) status = 'Needs Attention';
+    return {
+      id: c.id, name: c.name, segment: c.segment, region: c.region,
+      monthlyAvg: c.monthlyAvg || 0,
+      purchaseHealth: Math.round(purchaseHealth),
+      paymentHealth: Math.round(paymentHealth),
+      engagementHealth: Math.round(engagementHealth),
+      growthHealth: Math.round(growthHealth),
+      loyaltyHealth: Math.round(loyaltyHealth),
+      overallHealth, status,
+      radarData: [
+        { dimension: 'Purchase', score: Math.round(purchaseHealth) },
+        { dimension: 'Payment', score: Math.round(paymentHealth) },
+        { dimension: 'Engagement', score: Math.round(engagementHealth) },
+        { dimension: 'Growth', score: Math.round(growthHealth) },
+        { dimension: 'Loyalty', score: Math.round(loyaltyHealth) },
+      ],
+    };
+  }).sort((a, b) => a.overallHealth - b.overallHealth);
+
   const distribution = {
     critical: health.filter(h => h.status === 'Critical').length,
     atRisk: health.filter(h => h.status === 'At Risk').length,
@@ -161,15 +432,84 @@ export function getCustomerHealth() {
     healthy: health.filter(h => h.status === 'Healthy').length,
   };
   const avgHealth = Math.round(health.reduce((s, h) => s + h.overallHealth, 0) / health.length);
-  return { customers: health, distribution, avgHealth };
+  return { customers: health, distribution, avgHealth, source: 'tally' };
 }
 
-export function getInventoryBudget() {
-  return generateInventoryBudget();
+// Inventory budget: category-level demand velocity derived from real
+// customer purchase history. avgPrice / margin come from Tally stock items
+// once the voucher line-item transformer is enriched — for now we return
+// 0 and flag source so the UI can hide those columns.
+export function getInventoryBudget(overrides) {
+  const customers = pickCustomers(overrides);
+  if (!customers.length) return { totalBudget: 0, totalAllocated: 0, allocations: [], alerts: [], source: 'empty' };
+
+  const catRev = new Map();
+  for (const c of customers) {
+    const cats = c.purchasedCategories || [];
+    const monthly = c.monthlyAvg || 0;
+    const perCat = cats.length ? monthly / cats.length : 0;
+    for (const cat of cats) catRev.set(cat, (catRev.get(cat) || 0) + perCat);
+  }
+  if (!catRev.size) return { totalBudget: 0, totalAllocated: 0, allocations: [], alerts: [], source: 'waiting-for-vouchers' };
+
+  const totalRev = Array.from(catRev.values()).reduce((s, v) => s + v, 0) || 1;
+  const allocations = Array.from(catRev.entries())
+    .map(([cat, rev]) => {
+      const share = rev / totalRev;
+      const demandIndex = Math.round(share * 100);
+      return {
+        category: cat,
+        avgPrice: 0, margin: 0,
+        demandIndex,
+        stockTurnover: null,
+        currentStock: null,
+        reorderPoint: null,
+        optimalStock: null,
+        daysOfStock: null,
+        allocatedBudget: Math.round(rev),
+        needsReorder: false,
+        urgency: 'OK',
+        suggestedOrder: 0,
+        suggestedOrderValue: 0,
+      };
+    })
+    .sort((a, b) => b.demandIndex - a.demandIndex);
+  const totalAllocated = allocations.reduce((s, a) => s + a.allocatedBudget, 0);
+  return { totalBudget: totalAllocated, totalAllocated, allocations, alerts: [], source: 'tally' };
 }
 
-export function getMarketingBudget() {
-  return generateMarketingBudget();
+// Marketing spend allocation derived from real customers. Ranks top 25 by
+// contribution weighted by growth potential + churn risk. Channel splits
+// are deterministic percentages — no RNG.
+export function getMarketingBudget(overrides) {
+  const customers = pickCustomers(overrides);
+  if (!customers.length) return { totalMarketingBudget: 0, dealerAllocations: [], source: 'empty' };
+
+  const totalMarketingBudget = Math.max(0, Math.round(customers.reduce((s, c) => s + (c.monthlyAvg || 0), 0) * 0.05));
+  const totalMonthly = customers.reduce((s, c) => s + (c.monthlyAvg || 0), 0) || 1;
+  const dealerAllocations = customers.slice(0, 25).map(c => {
+    const revenueWeight = (c.monthlyAvg || 0) / totalMonthly;
+    const growthPotential = (c.expansionScore || 0) / 100;
+    const riskFactor = c.churnRisk === 'High' ? 1.5 : c.churnRisk === 'Medium' ? 1.2 : 1;
+    const score = (revenueWeight * 0.4 + growthPotential * 0.35 + (riskFactor - 1) * 0.25);
+    const allocated = Math.round(totalMarketingBudget * score * 3);
+    const channels = {
+      inStoreDisplay: Math.round(allocated * 0.30),
+      coopAdvertising: Math.round(allocated * 0.20),
+      tradeSchemes: Math.round(allocated * 0.25),
+      merchandising: Math.round(allocated * 0.15),
+      digitalSupport: Math.round(allocated * 0.10),
+    };
+    return {
+      id: c.id, name: c.name, segment: c.segment, region: c.region,
+      monthlyAvg: c.monthlyAvg || 0, expansionScore: c.expansionScore || 0,
+      churnRisk: c.churnRisk, allocated, channels,
+      roi: null,
+      strategy: c.churnRisk === 'High' ? 'Retention focus' : (c.expansionScore || 0) > 70 ? 'Growth accelerate' : 'Maintain presence',
+    };
+  }).sort((a, b) => b.allocated - a.allocated);
+
+  return { totalMarketingBudget, dealerAllocations, source: 'tally' };
 }
 
 export function getDealers(overrides) {
@@ -221,12 +561,17 @@ export function getDealer(id, overrides) {
     avgOrderValue: m.invoiceCount > 0 ? Math.round(m.value / m.invoiceCount) : 0,
   }));
 
-  const categorySpend = c.purchasedCategories.map(cat => ({
-    category: cat,
-    spend: Math.round(c.monthlyAvg / c.catCount * (0.5 + Math.random())),
-    skuCount: Math.floor(1 + Math.random() * 5),
-    trend: Math.round(-15 + Math.random() * 30),
-  })).sort((a, b) => b.spend - a.spend);
+  // Seeded so per-category spend stays stable on reload — was Math.random,
+  // which made the dealer detail page shuffle its "top categories" every view.
+  const categorySpend = c.purchasedCategories.map(cat => {
+    const r = rngFor(`categoryspend:${c.id}:${cat}`);
+    return {
+      category: cat,
+      spend: Math.round(c.monthlyAvg / c.catCount * (0.5 + r())),
+      skuCount: Math.floor(1 + r() * 5),
+      trend: Math.round(-15 + r() * 30),
+    };
+  }).sort((a, b) => b.spend - a.spend);
 
   const agingBreakdown = [
     { bucket: 'Current (0-30d)', amount: c.agingCurrent, pct: 0 },

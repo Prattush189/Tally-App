@@ -4,6 +4,7 @@ import SectionHeader from '../common/SectionHeader';
 import MetricCard from '../common/MetricCard';
 import RiskBadge from '../common/RiskBadge';
 import LoadingSpinner from '../common/LoadingSpinner';
+import AIInsights from '../common/AIInsights';
 import { useExtended } from '../../hooks/useExtended';
 import { fmt, TOOLTIP_STYLE } from '../../utils/format';
 
@@ -18,6 +19,8 @@ export default function ContactPriority() {
   return (
     <div className="space-y-6">
       <SectionHeader icon={Phone} title="Contact Priority" subtitle="Who to contact based on recency, frequency & churn likelihood" />
+
+      <AIInsights task="contact-priority" title="Outreach script from AI" subtitle="Ranked call plan for this week, with the opening line for each conversation." />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <MetricCard icon={Phone} label="Urgent Contacts" value={list.filter(c => c.contactUrgency === 'Urgent').length} sub="Call immediately" color="red" />

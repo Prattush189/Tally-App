@@ -1,7 +1,9 @@
-import { Search, Bell, RefreshCw, Clock } from 'lucide-react';
+import { useMemo } from 'react';
+import { Search, RefreshCw, Clock, Calendar, User } from 'lucide-react';
 import { NAV_ITEMS } from './Sidebar';
 import { useAuth } from '../../context/AuthContext';
 import { loadLiveCustomers } from '../../lib/liveData';
+import { useFilters, deriveFilterOptions } from '../../context/FiltersContext';
 import CompanySwitcher from './CompanySwitcher';
 
 function timeAgo(iso) {
@@ -20,12 +22,20 @@ function timeAgo(iso) {
 
 export default function Header({ active, searchQuery, onSearchChange, onRefresh, syncing }) {
   const { user, isDemo } = useAuth();
+  const { year, setYear, dealerId, setDealerId } = useFilters();
   const currentPage = NAV_ITEMS.find(n => n.id === active);
-  const live = !isDemo ? loadLiveCustomers(user?.email) : null;
+  const live = loadLiveCustomers(user?.email);
   const lastSync = live?.syncedAt;
   const rangeLabel = live?.totals?.range;
   const statusLabel = isDemo ? 'Demo' : live ? 'Live' : 'No data';
   const dotClass = isDemo ? 'bg-indigo-400' : live ? 'bg-emerald-500' : 'bg-gray-500';
+
+  // Option lists derived from whichever live snapshot this user has. Cheap
+  // — only recomputed when the snapshot itself changes.
+  const { years, dealers } = useMemo(
+    () => deriveFilterOptions(live?.customers || []),
+    [live?.syncedAt]
+  );
 
   return (
     <header className="h-14 flex items-center justify-between px-6 border-b border-gray-800/60 bg-gray-900/40 backdrop-blur flex-shrink-0">
@@ -43,6 +53,32 @@ export default function Header({ active, searchQuery, onSearchChange, onRefresh,
           />
         </div>
         <CompanySwitcher />
+        {live && (
+          <>
+            <div className="flex items-center gap-1 bg-gray-800/60 border border-gray-700/50 rounded-lg pl-2 pr-1 py-1" title="Filter dashboards by year">
+              <Calendar size={12} className="text-gray-500" />
+              <select
+                value={year}
+                onChange={e => setYear(e.target.value)}
+                className="bg-transparent text-xs text-gray-300 focus:outline-none appearance-none pr-1"
+              >
+                <option value="all">All years</option>
+                {years.map(y => <option key={y} value={y}>{y}</option>)}
+              </select>
+            </div>
+            <div className="flex items-center gap-1 bg-gray-800/60 border border-gray-700/50 rounded-lg pl-2 pr-1 py-1" title="Filter dashboards by dealer">
+              <User size={12} className="text-gray-500" />
+              <select
+                value={dealerId}
+                onChange={e => setDealerId(e.target.value)}
+                className="bg-transparent text-xs text-gray-300 focus:outline-none appearance-none pr-1 max-w-[10rem]"
+              >
+                <option value="all">All dealers</option>
+                {dealers.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+              </select>
+            </div>
+          </>
+        )}
         <button onClick={onRefresh} className="p-2 rounded-lg text-gray-400 hover:text-white hover:bg-gray-800/50 transition-all" title="Refresh data">
           <RefreshCw size={16} className={syncing ? 'animate-spin' : ''} />
         </button>
