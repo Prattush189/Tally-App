@@ -42,6 +42,24 @@ async function supabaseInvoke(action, config = {}) {
   return data;
 }
 
+// Dedicated portal-login probe. Hits hb.exe cp with just the portal
+// credentials — useful for debugging when the XML endpoint is down but
+// you want to verify the portal session can be revived.
+export async function testPortalLogin(config = {}) {
+  if (TALLY_BACKEND !== 'supabase') {
+    throw new Error('Portal login test requires the Supabase backend.');
+  }
+  const data = await supabaseInvoke('portal-login', config);
+  return {
+    connected: Boolean(data?.connected),
+    status: data?.status,
+    error: data?.error,
+    bodySample: data?.bodySample,
+    portalBase: data?.portalBase,
+    diagnostics: data?.diagnostics,
+  };
+}
+
 export async function testConnection(config = {}) {
   if (TALLY_BACKEND === 'supabase') {
     const data = await supabaseInvoke('test', config);
