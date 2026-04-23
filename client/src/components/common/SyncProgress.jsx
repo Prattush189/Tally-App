@@ -1,38 +1,34 @@
 import { useEffect, useState } from 'react';
 import { CheckCircle2, Loader2, Circle, AlertCircle, Shield } from 'lucide-react';
 
-// Stepwise progress panel for Test Connection + Sync Now. The edge function
-// runs its work as a single opaque POST (~5-15s for test, ~60-200s for a
-// full sync), so we can't stream real per-collection events today. Instead
-// we drive an optimistic timeline based on the well-known step durations
-// inside the edge function (see supabase/functions/tally/index.ts — 65s
-// ledgers, 15s groups, 20s stockItems, 12s stockGroups, 45s sales, 35s
-// receipts with 4s cooldowns between) and reconcile with the real
-// fetched/errors arrays once the response arrives.
+// Stepwise progress panel for the unified Sync button. The edge function
+// runs its work as a single opaque POST (~60-200s), so we can't stream
+// real per-collection events today. Instead we drive an optimistic
+// timeline based on the step durations inside the edge function (see
+// supabase/functions/tally/index.ts — 65s ledgers, 15s groups, 20s
+// stockItems, 12s stockGroups, 45s sales, 35s receipts with 4s cooldowns
+// between) and reconcile with the real fetched/errors arrays once the
+// response arrives.
 //
-// The "portal" phase (hb.exe auto-login) is only shown if the diagnostics
-// actually report it fired for this invocation — no point advertising a
-// step that didn't run.
+// The "Portal auto-login" phase is hidden entirely unless the response's
+// diagnostics confirm it actually fired. Previously we showed it in
+// pending during the run and it would turn green on the optimistic
+// cursor — a false positive when the portal path never ran. Now it only
+// appears retrospectively, with its status set from the server
+// diagnostics, so a green dot there always means the auto-login
+// genuinely revived the RemoteApp session.
 
-const STEPS = {
-  test: [
-    { key: 'host', label: 'Probing Tally host', etaMs: 2000 },
-    { key: 'auth', label: 'Authenticating XML endpoint', etaMs: 3000 },
-    { key: 'portal', label: 'Portal auto-login (hb.exe cp)', etaMs: 4000, conditional: true },
-    { key: 'verify', label: 'Verifying XML response + company list', etaMs: 3000 },
-  ],
-  sync: [
-    { key: 'discover', label: 'Discovering companies', etaMs: 3000 },
-    { key: 'portal', label: 'Portal auto-login (hb.exe cp)', etaMs: 4000, conditional: true },
-    { key: 'ledgers', label: 'Fetching ledgers (Sundry Debtors)', etaMs: 65000 },
-    { key: 'accountingGroups', label: 'Fetching accounting groups', etaMs: 15000 },
-    { key: 'stockItems', label: 'Fetching stock items', etaMs: 20000 },
-    { key: 'stockGroups', label: 'Fetching stock groups', etaMs: 12000 },
-    { key: 'salesVouchers', label: 'Fetching sales vouchers', etaMs: 45000 },
-    { key: 'receiptVouchers', label: 'Fetching receipt vouchers', etaMs: 35000 },
-    { key: 'persist', label: 'Persisting snapshot to cloud', etaMs: 3000 },
-  ],
-};
+const STEPS = [
+  { key: 'discover', label: 'Discovering companies', etaMs: 5000 },
+  { key: 'portal', label: 'Portal auto-login (hb.exe cp)', etaMs: 8000, conditional: true },
+  { key: 'ledgers', label: 'Fetching ledgers (Sundry Debtors)', etaMs: 65000 },
+  { key: 'accountingGroups', label: 'Fetching accounting groups', etaMs: 15000 },
+  { key: 'stockItems', label: 'Fetching stock items', etaMs: 20000 },
+  { key: 'stockGroups', label: 'Fetching stock groups', etaMs: 12000 },
+  { key: 'salesVouchers', label: 'Fetching sales vouchers', etaMs: 45000 },
+  { key: 'receiptVouchers', label: 'Fetching receipt vouchers', etaMs: 35000 },
+  { key: 'persist', label: 'Persisting snapshot to cloud', etaMs: 4000 },
+];
 
 function StepRow({ step, status, detail }) {
   const Icon = status === 'done' ? CheckCircle2
@@ -53,7 +49,7 @@ function StepRow({ step, status, detail }) {
   );
 }
 
-export default function SyncProgress({ kind = 'sync', active, result }) {
+export default function SyncProgress({ active, result }) {
   // Wall-clock driver. While active=true we bump `elapsed` on a setInterval
   // so the optimistic step advances. When the response lands, `result`
   // tells us the real fetched/errors and we snap the UI to the truth.
@@ -69,23 +65,23 @@ export default function SyncProgress({ kind = 'sync', active, result }) {
     return () => clearInterval(id);
   }, [active]);
 
-  // Skip the conditional portal step unless diagnostics confirm it fired.
-  // During the in-flight phase we render it in pending state so the user
-  // sees that the system will auto-login if needed.
+  // Only reveal the Portal step once the server diagnostics confirm it
+  // actually fired on this invocation. During the live run we don't know
+  // whether the fallback is going to trigger, so we omit it rather than
+  // flash a false green.
   const portalFired = result?.diagnostics?.portalLoginAttempted;
-  const steps = STEPS[kind].filter(s => !s.conditional || active || portalFired);
+  const steps = STEPS.filter(s => !s.conditional || portalFired);
 
-  // Compute cumulative ETA and derive where we are in the optimistic run.
-  const totalEta = steps.reduce((s, st) => s + st.etaMs, 0);
+  // Recompute cumulative ETA from the steps we actually show so the
+  // optimistic cursor is accurate when the Portal step is included.
   let cumulative = 0;
   const stepInfo = steps.map((s) => {
     const start = cumulative;
     cumulative += s.etaMs;
     return { ...s, start, end: cumulative };
   });
+  const totalEta = cumulative;
 
-  // Per-step status. If we have a final result, project real outcomes.
-  // If still active, use the optimistic elapsed cursor.
   const errKeys = new Set(Object.keys(result?.collectionErrors || result?.errors || {}));
   const fetchedKeys = new Set(result?.fetched || []);
 
@@ -100,16 +96,14 @@ export default function SyncProgress({ kind = 'sync', active, result }) {
         if (result.discoveryError) return 'error';
         return result.discoveredCompanies?.length ? 'done' : 'pending';
       }
-      if (step.key === 'persist') return 'done';
-      if (step.key === 'host' || step.key === 'auth' || step.key === 'verify') {
-        return result.connected ?? result.success ? 'done' : 'error';
+      if (step.key === 'persist') {
+        return result.success ? 'done' : 'pending';
       }
-      // Collection steps — use fetched / errors
       if (errKeys.has(step.key)) return 'error';
       if (fetchedKeys.has(step.key)) return 'done';
       return 'pending';
     }
-    // Active run — use optimistic cursor.
+    // Active run — optimistic cursor.
     if (elapsed >= step.end) return 'done';
     if (elapsed >= step.start) return 'running';
     return 'pending';
@@ -125,9 +119,6 @@ export default function SyncProgress({ kind = 'sync', active, result }) {
       if (result.diagnostics?.portalLoginError) return result.diagnostics.portalLoginError;
       return null;
     }
-    const countKey = step.key === 'accountingGroups' ? 'groups' : step.key;
-    // Note: the edge function's counts use salesVouchers / receiptVouchers /
-    // stockItems / stockGroups / ledgers keys directly.
     const countMap = {
       ledgers: result.ledgers, salesVouchers: result.salesVouchers,
       receiptVouchers: result.receiptVouchers, stockItems: result.stockItems,
@@ -141,14 +132,15 @@ export default function SyncProgress({ kind = 'sync', active, result }) {
     return null;
   };
 
-  const displayedElapsed = result && !active ? (result.durationMs || (startedAt ? Date.now() - startedAt : 0)) : elapsed;
+  const displayedElapsed = (result && !active) ? (startedAt ? Date.now() - startedAt : 0) : elapsed;
   const pct = Math.min(100, Math.round(((result && !active) ? 100 : (elapsed / totalEta * 100))));
+  const isFailure = result && !active && !result.success && !result.connected;
 
   return (
     <div className="glass-card p-4 border border-indigo-500/30 bg-indigo-500/5">
       <div className="flex items-center justify-between mb-2">
         <p className="text-xs font-semibold text-indigo-300 uppercase tracking-wider">
-          {kind === 'test' ? 'Testing connection' : 'Syncing from Tally'}
+          Syncing from Tally
         </p>
         <p className="text-[11px] text-gray-500">
           {Math.round(displayedElapsed / 1000)}s · {pct}%
@@ -156,7 +148,7 @@ export default function SyncProgress({ kind = 'sync', active, result }) {
       </div>
       <div className="w-full h-1.5 bg-gray-800 rounded-full overflow-hidden mb-3">
         <div
-          className={`h-full transition-all duration-300 ${result && !result.success && !result.connected ? 'bg-red-500' : 'bg-indigo-400'}`}
+          className={`h-full transition-all duration-300 ${isFailure ? 'bg-red-500' : 'bg-indigo-400'}`}
           style={{ width: `${pct}%` }}
         />
       </div>
@@ -165,6 +157,11 @@ export default function SyncProgress({ kind = 'sync', active, result }) {
           <StepRow key={s.key} step={s} status={statusFor(s)} detail={detailFor(s)} />
         ))}
       </div>
+      {result?.fellBackToSnapshot && !active && (
+        <p className="text-[11px] text-cyan-300/80 mt-3">
+          Live sync did not return fresh data — loaded the most recent cloud snapshot instead.
+        </p>
+      )}
     </div>
   );
 }

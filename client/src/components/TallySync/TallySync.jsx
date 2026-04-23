@@ -5,8 +5,8 @@ import SyncProgress from '../common/SyncProgress';
 import { fmt } from '../../utils/format';
 import { useAuth } from '../../context/AuthContext';
 import {
-  TALLY_BACKEND, tallyAvailable, testConnection, syncFromTally,
-  getStatus, getDataSummary, loadFromSnapshot, getCompanies, testPortalLogin,
+  TALLY_BACKEND, tallyAvailable, syncFromTally,
+  getStatus, getDataSummary, loadFromSnapshot, getCompanies,
 } from '../../lib/tallyClient';
 import { transformTallyLedgers, transformTallyFull } from '../../lib/tallyTransformer';
 import { saveLiveCustomers, loadLiveCustomers, clearLiveCustomers } from '../../lib/liveData';
@@ -65,19 +65,16 @@ export default function TallySync() {
   const [status, setStatus] = useState(null);
   const [summary, setSummary] = useState(null);
   const [syncing, setSyncing] = useState(false);
-  // Wall-clock marker captured when Sync Now starts. If the tab is backgrounded
+  // Wall-clock marker captured when Sync starts. If the tab is backgrounded
   // mid-sync the client-side invoke promise may be throttled or dropped, but
   // the edge function completes server-side and writes tally_snapshots. When
   // the tab returns we compare the cloud snapshot's updatedAt against this
   // marker — if the snapshot is newer, we know the sync landed even though
   // our fetch never saw the response, and we can unstick the UI.
   const [syncStartedAt, setSyncStartedAt] = useState(null);
-  const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState(null);
   const [syncResult, setSyncResult] = useState(null);
   const [config, setConfig] = useState(loadTallyConfig);
   const [rangeKey, setRangeKey] = useState('all');
-  const [loadingSnapshot, setLoadingSnapshot] = useState(false);
   const [snapshotInfo, setSnapshotInfo] = useState(null);
   const [activeCompany, setActiveCompany] = useState('');
   const [knownCompanies, setKnownCompanies] = useState([]);
@@ -130,45 +127,25 @@ export default function TallySync() {
     portalPassword: config.portalPassword,
   });
 
-  const handleTest = async () => {
-    if (isDemo) return;
-    setTesting(true);
-    setTestResult(null);
-    try {
-      setTestResult(await testConnection({ ...backendCreds(), fromDate: activeRange.fromDate, toDate: activeRange.toDate }));
-    } catch (err) {
-      setTestResult({ connected: false, error: err.message });
-    }
-    setTesting(false);
-  };
-
-  // Portal-only login probe. Doesn't hit :9007 — just POSTs hb.exe cp with
-  // the (portal-specific) credentials and surfaces the server's response
-  // body so the user can diagnose wrong-username / wrong-password vs
-  // network / cert issues. Shown as its own inline result panel.
-  const [portalResult, setPortalResult] = useState(null);
-  const [portalTesting, setPortalTesting] = useState(false);
-  const handleTestPortal = async () => {
-    if (isDemo) return;
-    setPortalTesting(true);
-    setPortalResult(null);
-    try {
-      setPortalResult(await testPortalLogin(backendCreds()));
-    } catch (err) {
-      setPortalResult({ connected: false, error: err.message });
-    }
-    setPortalTesting(false);
-  };
-
+  // One button, one flow. `handleSync` orchestrates everything:
+  //   1. syncFromTally() — hits the Edge Function. That function itself
+  //      runs portal auto-login (hb.exe cp) behind the scenes whenever
+  //      the XML endpoint on :9007 is unreachable, so we don't need a
+  //      separate "Test Portal Login" or "Test Connection" button.
+  //   2. If the live sync returns a useful bundle, transform + save.
+  //   3. If the live sync fails OR returns no data, silently fall back
+  //      to the most recent cloud snapshot so dashboards still hydrate.
+  //   4. The progress panel below surfaces each phase (discover →
+  //      portal auto-login → per-collection fetches → persist) with
+  //      real outcomes reconciled from the edge function's diagnostics.
   const handleSync = async () => {
     if (isDemo) return;
     setSyncing(true);
     setSyncStartedAt(Date.now());
     setSyncResult(null);
+    let r = null;
     try {
-      const r = await syncFromTally({ ...backendCreds(), fromDate: activeRange.fromDate, toDate: activeRange.toDate });
-      // Transform raw Tally data → dashboard customer shape and persist.
-      // Dashboards read from liveData on the next render so numbers reflect the sync.
+      r = await syncFromTally({ ...backendCreds(), fromDate: activeRange.fromDate, toDate: activeRange.toDate });
       if (r?.success && r?.raw) {
         try {
           const useFull = r.mode === 'full' && r.raw && typeof r.raw === 'object' && 'ledgers' in r.raw;
@@ -176,7 +153,7 @@ export default function TallySync() {
             ? transformTallyFull(r.raw)
             : transformTallyLedgers(r.raw);
           r.dealersStored = customers.length;
-          r.diagnostics = diagnostics;
+          r.diagnostics = { ...(r.diagnostics || {}), ...diagnostics };
           if (customers.length) {
             saveLiveCustomers(user?.email, customers, {
               ...totals,
@@ -189,52 +166,57 @@ export default function TallySync() {
           r.transformError = transformErr.message;
         }
       }
-      setSyncResult(r);
+    } catch (err) {
+      r = { success: false, error: err.message };
+    }
+
+    // Fallback path: live sync didn't land real customer data, so pull the
+    // cloud snapshot the server-side sync or another PC already wrote.
+    // This replaces the separate "Load Cloud Snapshot" button; a single
+    // Sync press always tries to leave dashboards with the freshest data
+    // available from any source.
+    if (!r?.dealersStored) {
+      try {
+        const snap = await loadFromSnapshot();
+        if (snap?.success && snap?.raw) {
+          const { customers, totals, diagnostics } = transformTallyFull(snap.raw);
+          if (customers.length) {
+            saveLiveCustomers(user?.email, customers, {
+              ...totals,
+              range: activeRange.label || 'All data',
+              fromDate: activeRange.fromDate,
+              toDate: activeRange.toDate,
+              source: `snapshot (${snap.source})`,
+              syncedAt: snap.updatedAt,
+            });
+            r = {
+              ...(r || {}),
+              success: true,
+              mode: r?.mode || 'snapshot',
+              fellBackToSnapshot: true,
+              dealersStored: customers.length,
+              diagnostics: { ...(r?.diagnostics || {}), ...diagnostics },
+              ledgers: snap.ledgers, salesVouchers: snap.salesVouchers,
+              receiptVouchers: snap.receiptVouchers, stockItems: snap.stockItems,
+              stockGroups: snap.stockGroups,
+            };
+            setSnapshotInfo({ updatedAt: snap.updatedAt, source: snap.source });
+          }
+        }
+      } catch { /* keep the original error */ }
+    }
+
+    setSyncResult(r);
+    try {
       const s = await getStatus();
       if (s) setStatus(s);
       const sm = await getDataSummary();
       if (sm) setSummary(sm);
       refreshCompanies();
-    } catch (err) {
-      setSyncResult({ success: false, error: err.message });
-    }
+    } catch { /* non-fatal */ }
+
     setSyncing(false);
     setSyncStartedAt(null);
-  };
-
-  // Pull the most recent snapshot written by the local Playwright sync tool
-  // and feed it through the existing transformer so dashboards hydrate without
-  // needing Tally reachable from the browser.
-  const handleLoadSnapshot = async () => {
-    if (isDemo) return;
-    setLoadingSnapshot(true);
-    try {
-      const r = await loadFromSnapshot();
-      if (r?.success && r?.raw) {
-        try {
-          const { customers, totals, diagnostics } = transformTallyFull(r.raw);
-          r.dealersStored = customers.length;
-          r.diagnostics = diagnostics;
-          if (customers.length) {
-            saveLiveCustomers(user?.email, customers, {
-              ...totals,
-              range: activeRange.label || 'All data',
-              fromDate: activeRange.fromDate,
-              toDate: activeRange.toDate,
-              source: `snapshot (${r.source})`,
-              syncedAt: r.updatedAt,
-            });
-          }
-        } catch (transformErr) {
-          r.transformError = transformErr.message;
-        }
-      }
-      setSyncResult(r);
-      setSnapshotInfo(r?.success ? { updatedAt: r.updatedAt, source: r.source } : null);
-    } catch (err) {
-      setSyncResult({ success: false, error: err.message });
-    }
-    setLoadingSnapshot(false);
   };
 
   // Pull the cloud snapshot only when it's MEANINGFULLY newer than what
@@ -443,12 +425,12 @@ export default function TallySync() {
               <div className="grid grid-cols-3 gap-3">
                 <div className="col-span-2">
                   <label className="block text-xs text-gray-500 mb-1">Tally IP / Hostname</label>
-                  <input type="text" value={config.ip} disabled={isDemo || testing || syncing} onChange={e => setConfig(c => ({ ...c, ip: e.target.value }))}
+                  <input type="text" value={config.ip} disabled={isDemo || syncing} onChange={e => setConfig(c => ({ ...c, ip: e.target.value }))}
                     className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="103.76.213.243" />
                 </div>
                 <div>
                   <label className="block text-xs text-gray-500 mb-1">XML Port</label>
-                  <input type="text" value={config.port} disabled={isDemo || testing || syncing} onChange={e => setConfig(c => ({ ...c, port: e.target.value.replace(/[^0-9]/g, '') }))}
+                  <input type="text" value={config.port} disabled={isDemo || syncing} onChange={e => setConfig(c => ({ ...c, port: e.target.value.replace(/[^0-9]/g, '') }))}
                     className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="9007" />
                 </div>
               </div>
@@ -459,12 +441,12 @@ export default function TallySync() {
               </p>
               <div>
                 <label className="block text-xs text-gray-500 mb-1">Tally Username</label>
-                <input type="text" value={config.username} disabled={isDemo || testing || syncing} onChange={e => setConfig(c => ({ ...c, username: e.target.value }))}
+                <input type="text" value={config.username} disabled={isDemo || syncing} onChange={e => setConfig(c => ({ ...c, username: e.target.value }))}
                   className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Enter Tally username" />
               </div>
               <div>
                 <label className="block text-xs text-gray-500 mb-1">Tally Password</label>
-                <input type="password" value={config.password} disabled={isDemo || testing || syncing} onChange={e => setConfig(c => ({ ...c, password: e.target.value }))}
+                <input type="password" value={config.password} disabled={isDemo || syncing} onChange={e => setConfig(c => ({ ...c, password: e.target.value }))}
                   className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Enter Tally password" />
               </div>
               {/* Portal login credentials. Optional — leave blank to reuse
@@ -475,12 +457,12 @@ export default function TallySync() {
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs text-gray-500 mb-1">Portal Username <span className="text-gray-600">(for auto-login)</span></label>
-                  <input type="text" value={config.portalUsername} disabled={isDemo || testing || syncing} onChange={e => setConfig(c => ({ ...c, portalUsername: e.target.value }))}
+                  <input type="text" value={config.portalUsername} disabled={isDemo || syncing} onChange={e => setConfig(c => ({ ...c, portalUsername: e.target.value }))}
                     className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed" placeholder={config.username || 'e.g. unitsd5'} />
                 </div>
                 <div>
                   <label className="block text-xs text-gray-500 mb-1">Portal Password</label>
-                  <input type="password" value={config.portalPassword} disabled={isDemo || testing || syncing} onChange={e => setConfig(c => ({ ...c, portalPassword: e.target.value }))}
+                  <input type="password" value={config.portalPassword} disabled={isDemo || syncing} onChange={e => setConfig(c => ({ ...c, portalPassword: e.target.value }))}
                     className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Optional — portal login password" />
                 </div>
               </div>
@@ -491,7 +473,7 @@ export default function TallySync() {
                 <label className="block text-xs text-gray-500 mb-1">Date range</label>
                 <select
                   value={rangeKey}
-                  disabled={isDemo || testing || syncing}
+                  disabled={isDemo || syncing}
                   onChange={e => setRangeKey(e.target.value)}
                   className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
@@ -527,32 +509,12 @@ export default function TallySync() {
               )}
             </div>
 
-            <div className="flex flex-wrap gap-3">
-              <button onClick={handleTest} disabled={testing || isDemo}
-                title={isDemo ? 'Disabled for the demo account' : ''}
-                className={`flex-1 min-w-[10rem] py-2.5 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 transition-all border disabled:opacity-40 disabled:cursor-not-allowed ${testing ? 'border-gray-600 text-gray-500' : 'border-indigo-500/30 text-indigo-400 hover:bg-indigo-500/10'}`}>
-                <Wifi size={14} className={testing ? 'animate-pulse' : ''} />
-                {testing ? 'Testing...' : 'Test Connection'}
-              </button>
-              <button onClick={handleTestPortal} disabled={portalTesting || isDemo}
-                title={isDemo ? 'Disabled for the demo account' : 'Probe hb.exe cp only — verifies your portal credentials without touching the XML endpoint.'}
-                className={`flex-1 min-w-[10rem] py-2.5 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 transition-all border disabled:opacity-40 disabled:cursor-not-allowed ${portalTesting ? 'border-gray-600 text-gray-500' : 'border-amber-500/30 text-amber-300 hover:bg-amber-500/10'}`}>
-                <Wifi size={14} className={portalTesting ? 'animate-pulse' : ''} />
-                {portalTesting ? 'Checking portal…' : 'Test Portal Login'}
-              </button>
-              <button onClick={handleLoadSnapshot} disabled={loadingSnapshot || isDemo}
-                title={isDemo ? 'Disabled for the demo account' : 'Load the most recent snapshot pushed by the local sync tool'}
-                className={`flex-1 min-w-[10rem] py-2.5 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 transition-all border disabled:opacity-40 disabled:cursor-not-allowed ${loadingSnapshot ? 'border-gray-600 text-gray-500' : 'border-cyan-500/30 text-cyan-300 hover:bg-cyan-500/10'}`}>
-                <Cloud size={14} className={loadingSnapshot ? 'animate-pulse' : ''} />
-                {loadingSnapshot ? 'Loading...' : 'Load Cloud Snapshot'}
-              </button>
-              <button onClick={handleSync} disabled={syncing || isDemo}
-                title={isDemo ? 'Disabled for the demo account' : 'Fetch live from Tally — needs the Edge Function to reach Tally directly'}
-                className={`flex-1 min-w-[10rem] py-2.5 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 transition-all disabled:opacity-40 disabled:cursor-not-allowed ${syncing ? 'bg-indigo-500/50 cursor-wait' : 'bg-indigo-600 hover:bg-indigo-500'} text-white`}>
-                <RefreshCw size={14} className={syncing ? 'animate-spin' : ''} />
-                {syncing ? 'Syncing...' : 'Sync Now (Live)'}
-              </button>
-            </div>
+            <button onClick={handleSync} disabled={syncing || isDemo}
+              title={isDemo ? 'Disabled for the demo account' : 'Sync from Tally. Auto-logs into the portal if needed and falls back to the last cloud snapshot on failure.'}
+              className={`w-full py-3 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 transition-all disabled:opacity-40 disabled:cursor-not-allowed ${syncing ? 'bg-indigo-500/50 cursor-wait' : 'bg-indigo-600 hover:bg-indigo-500'} text-white`}>
+              <RefreshCw size={16} className={syncing ? 'animate-spin' : ''} />
+              {syncing ? 'Syncing…' : 'Sync'}
+            </button>
 
             {snapshotInfo?.updatedAt && (
               <div className="text-xs text-cyan-300/80 flex items-center gap-2">
@@ -561,55 +523,12 @@ export default function TallySync() {
               </div>
             )}
 
-            {/* Stepwise progress. Driven by an optimistic timer while the
-                request is in flight; reconciles with the real fetched /
-                errors / diagnostics once the response lands so the user can
-                see which collections succeeded, which failed, and whether
-                portal auto-login fired. Unmounts when the user starts a
-                new test / sync so the bar resets. */}
-            {(testing || testResult) && (
-              <SyncProgress kind="test" active={testing} result={testResult} />
-            )}
+            {/* Stepwise progress panel. Driven by an optimistic timer while
+                the request is in flight; reconciles with the real per-
+                collection results + portal-auto-login diagnostics once the
+                response lands. Unmounts when the next Sync starts. */}
             {(syncing || syncResult) && (
               <SyncProgress kind="sync" active={syncing} result={syncResult} />
-            )}
-
-            {/* Test Result */}
-            {testResult && (
-              <div className={`p-3 rounded-lg border text-sm ${testResult.connected ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' : 'bg-red-500/10 border-red-500/20 text-red-400'}`}>
-                <div>{testResult.connected ? '✓ Tally server is reachable' : `✗ ${testResult.error}`}</div>
-                {testResult.diagnostics?.portalLoginAttempted && (
-                  <div className={`text-xs mt-1 ${testResult.diagnostics.portalLoginOk ? 'text-amber-300/90' : 'text-red-300/90'}`}>
-                    {testResult.diagnostics.portalLoginOk
-                      ? '⤷ Portal auto-login (hb.exe cp) revived the RemoteApp session.'
-                      : `⤷ Portal auto-login failed: ${testResult.diagnostics.portalLoginError}`}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Portal-only probe result. Shows the raw server response body
-                when things fail so the user can distinguish "wrong creds"
-                from "can't reach the portal". */}
-            {portalResult && (
-              <div className={`p-3 rounded-lg border text-sm ${portalResult.connected ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' : 'bg-red-500/10 border-red-500/20 text-red-300'}`}>
-                <div className="flex items-center gap-2">
-                  {portalResult.connected
-                    ? <span>✓ Portal login accepted via <code className="text-xs bg-black/40 px-1.5 py-0.5 rounded">{portalResult.portalBase || 'hb.exe'}</code></span>
-                    : <span>✗ Portal login failed{portalResult.status ? ` (HTTP ${portalResult.status})` : ''}</span>}
-                </div>
-                {!portalResult.connected && portalResult.error && (
-                  <div className="text-xs mt-1 text-red-200/90 break-all">{portalResult.error}</div>
-                )}
-                {portalResult.bodySample && !portalResult.connected && (
-                  <pre className="text-[11px] font-mono bg-black/40 rounded p-2 mt-2 text-gray-300 overflow-x-auto whitespace-pre-wrap break-all">{portalResult.bodySample}</pre>
-                )}
-                {!portalResult.connected && (
-                  <div className="text-xs mt-2 text-amber-200/80">
-                    Check: (1) Portal Username / Password fields are set (often different from the Tally XML creds), (2) the IP field is the portal host, (3) the portal's HTTPS cert is trusted.
-                  </div>
-                )}
-              </div>
             )}
 
             {/* Sync Result */}
