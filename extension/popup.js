@@ -1,5 +1,5 @@
 const STORAGE_KEY = 'tallyDashboardSyncConfig';
-const fields = ['supabaseUrl', 'supabaseAnonKey', 'syncToken', 'company', 'tenantKey'];
+const fields = ['supabaseUrl', 'supabaseAnonKey', 'syncToken', 'portalUser', 'portalPass', 'company', 'tenantKey'];
 const form = document.getElementById('cfg');
 const status = document.getElementById('status');
 

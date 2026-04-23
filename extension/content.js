@@ -1,6 +1,14 @@
-// Injects a floating "Sync to Dashboard" button on the Tally cloud portal.
+// Injects a floating "Sync to Dashboard" button on the Tally cloud portal,
+// and — if portal creds are stored — auto-submits the portal login form so
+// the user only has to click TallyPrime inside the launcher.
 //
-// Flow when the user clicks it:
+// Flow on page load:
+// 0. If we're on the portal login page and portalUser + portalPass are in
+//    chrome.storage.local, POST the login form to /cgi-bin/hb.exe and
+//    redirect to /software/html5.html. Skipped if creds aren't stored, or
+//    auto-login already fired this tab session (sessionStorage guard).
+//
+// Flow when the user clicks Sync to Dashboard:
 // 1. Read settings (Supabase URL + anon key + sync token + company) from
 //    chrome.storage.local. Bail early with a toast if not configured.
 // 2. Probe http://103.76.213.243:9007/ to make sure Tally is actually up.
@@ -13,7 +21,14 @@
 // 5. Toast with per-collection counts.
 
 const TALLY_URL = 'http://103.76.213.243:9007/';
+const PORTAL_ORIGIN = 'http://103.76.213.243';
+const PORTAL_LOGIN_ENDPOINT = `${PORTAL_ORIGIN}/cgi-bin/hb.exe`;
+const PORTAL_LAUNCHER_PATH = '/software/html5.html';
 const STORAGE_KEY = 'tallyDashboardSyncConfig';
+// Session-scoped flag so we don't retry auto-login on every SPA navigation
+// within the same tab (portal is a SPA and re-injects the script on route
+// changes, but sessionStorage survives the re-injects).
+const AUTOLOGIN_FLAG = '__tally_autologin_done';
 
 // Per-collection freshness window. Mirrors COLLECTION_TTL_MS in the edge
 // function — when we read get-snapshot back, we skip any collection synced
@@ -212,6 +227,63 @@ async function runSync(btn) {
   btn.textContent = '↻ Sync to Dashboard';
 }
 
+// Detect whether the current page is the portal login form. Portal login is
+// a static HTML page that posts to /cgi-bin/hb.exe — we check for (a) a form
+// whose action points at that endpoint, or (b) the well-known input names
+// ('l' for login, 'p' for password) used by HOB RemoteApp's login form.
+function isLoginPage() {
+  const form = document.querySelector('form');
+  if (form) {
+    const action = (form.getAttribute('action') || '').toLowerCase();
+    if (action.includes('hb.exe')) return true;
+    if (form.querySelector('input[name="l"]') && form.querySelector('input[name="p"]')) return true;
+  }
+  // Some portal builds present the login through a plain <input type="password">
+  // on the root path without a form tag. Heuristic: password field + root path.
+  if (location.pathname === '/' && document.querySelector('input[type="password"]')) return true;
+  return false;
+}
+
+// Auto-submit the portal login form using stored creds. Mirrors the Playwright
+// path in tools/tally-sync-local/sync.mjs — same endpoint, same field names.
+// Safe: if creds aren't stored, or auto-login already fired this session, we
+// no-op and let the user log in by hand.
+async function autoLoginIfPossible() {
+  if (sessionStorage.getItem(AUTOLOGIN_FLAG)) return;
+  const cfg = await loadConfig();
+  if (!cfg.portalUser || !cfg.portalPass) return;
+  if (!isLoginPage()) return;
+  sessionStorage.setItem(AUTOLOGIN_FLAG, '1');
+  toast('Auto-logging in to the Tally portal…', 'info');
+  try {
+    const form = new URLSearchParams({
+      action: 'cp',
+      l: cfg.portalUser,
+      p: cfg.portalPass,
+      d: '',
+      f: '',
+      t: String(Date.now()),
+    });
+    const res = await fetch(PORTAL_LOGIN_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: form.toString(),
+      credentials: 'include',
+    });
+    const text = await res.text();
+    if (!res.ok || !/ok/i.test(text)) {
+      toast(`Auto-login rejected (HTTP ${res.status}). Log in manually.`, 'error');
+      return;
+    }
+    // Portal accepts creds; navigate to the launcher where the user can
+    // click TallyPrime. (We don't auto-click it — the RemoteApp launcher
+    // DOM is fragile; see tools/tally-sync-local/sync.mjs for context.)
+    location.href = `${PORTAL_ORIGIN}${PORTAL_LAUNCHER_PATH}`;
+  } catch (err) {
+    toast(`Auto-login failed: ${err.message}. Log in manually.`, 'error');
+  }
+}
+
 function injectButton() {
   if (document.getElementById('__tally_sync_btn')) return;
   const btn = document.createElement('button');
@@ -225,6 +297,11 @@ function injectButton() {
   });
   document.body.appendChild(btn);
 }
+
+// Kick off auto-login before anything else — if we're on the login page and
+// creds are stored, this POSTs the form and navigates to the launcher. The
+// button injection + sync watchdog below then resumes on the next page.
+autoLoginIfPossible();
 
 // The portal is a SPA — inject after idle, and re-inject on any DOM mutation
 // that removes our button (which the portal might do on navigation).

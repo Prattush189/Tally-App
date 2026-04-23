@@ -8,7 +8,7 @@
 <body>
   <h1>Tally Dashboard Sync</h1>
   <p class="hint">
-    One-time setup. Once saved, open the Tally cloud portal, log in, click TallyPrime, then click the <b>Sync to Dashboard</b> button that appears bottom-right.
+    One-time setup. Fill in the portal username + password below and the extension will auto-login when you open the Tally portal — you only need to click TallyPrime, the Sync button takes it from there.
   </p>
   <form id="cfg">
     <label>
@@ -23,6 +23,16 @@
     <label>
       Sync token
       <input type="password" id="syncToken" placeholder="Matches LOCAL_SYNC_TOKEN in Supabase" required>
+    </label>
+    <label>
+      Portal username
+      <input type="text" id="portalUser" placeholder="e.g. prattush@…" autocomplete="off">
+      <span class="subtitle">Optional. If filled, the extension auto-logs-in when you visit the portal.</span>
+    </label>
+    <label>
+      Portal password
+      <input type="password" id="portalPass" placeholder="Portal password" autocomplete="new-password">
+      <span class="subtitle">Stored only in this browser's chrome.storage.local — never sent anywhere except the portal itself.</span>
     </label>
     <label>
       Tally company (inside portal)

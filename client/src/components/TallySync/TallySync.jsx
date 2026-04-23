@@ -13,18 +13,44 @@ import { availableRanges, rangeByKey } from '../../utils/dateRange';
 
 const TALLY_CONFIG_KEY = 'b2b_tally_config';
 
+// Legacy configs stored a single "host" field like "103.76.213.243:9007" or
+// a full URL. The UI now exposes ip + port separately (the IP is the portal
+// login URL you open in a browser; port is the XML endpoint Tally listens on),
+// so on read we split the old value and on write we compose it back.
+function parseHost(raw) {
+  if (!raw) return { ip: '', port: '' };
+  const trimmed = String(raw).trim();
+  // Pull host[:port] out of a URL if they pasted one.
+  const urlMatch = trimmed.match(/^https?:\/\/([^/]+)/i);
+  const hostPart = urlMatch ? urlMatch[1] : trimmed;
+  const idx = hostPart.lastIndexOf(':');
+  if (idx === -1) return { ip: hostPart, port: '' };
+  return { ip: hostPart.slice(0, idx), port: hostPart.slice(idx + 1) };
+}
+
+function composeHost(ip, port) {
+  if (!ip) return '';
+  return port ? `${ip.trim()}:${port.trim()}` : ip.trim();
+}
+
 function loadTallyConfig() {
   try {
     const raw = localStorage.getItem(TALLY_CONFIG_KEY);
-    if (!raw) return { host: '', username: '', password: '' };
+    if (!raw) return { ip: '', port: '', username: '', password: '' };
     const parsed = JSON.parse(raw);
+    // Prefer the new split fields; fall back to parsing legacy `host` when
+    // only the combined field is stored (upgrade path from older builds).
+    const split = (parsed.ip || parsed.port)
+      ? { ip: parsed.ip || '', port: parsed.port || '' }
+      : parseHost(parsed.host);
     return {
-      host: parsed.host || '',
+      ip: split.ip,
+      port: split.port,
       username: parsed.username || '',
       password: parsed.password || '',
     };
   } catch {
-    return { host: '', username: '', password: '' };
+    return { ip: '', port: '', username: '', password: '' };
   }
 }
 
@@ -33,6 +59,13 @@ export default function TallySync() {
   const [status, setStatus] = useState(null);
   const [summary, setSummary] = useState(null);
   const [syncing, setSyncing] = useState(false);
+  // Wall-clock marker captured when Sync Now starts. If the tab is backgrounded
+  // mid-sync the client-side invoke promise may be throttled or dropped, but
+  // the edge function completes server-side and writes tally_snapshots. When
+  // the tab returns we compare the cloud snapshot's updatedAt against this
+  // marker — if the snapshot is newer, we know the sync landed even though
+  // our fetch never saw the response, and we can unstick the UI.
+  const [syncStartedAt, setSyncStartedAt] = useState(null);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null);
   const [syncResult, setSyncResult] = useState(null);
@@ -47,10 +80,20 @@ export default function TallySync() {
   const ranges = availableRanges();
   const activeRange = rangeByKey(rangeKey);
 
+  // Persist both the new split fields AND a composed `host` string, so any
+  // legacy code path that still reads config.host keeps working until it's
+  // migrated.
   useEffect(() => {
-    try { localStorage.setItem(TALLY_CONFIG_KEY, JSON.stringify(config)); }
-    catch { /* quota / private mode */ }
+    try {
+      localStorage.setItem(TALLY_CONFIG_KEY, JSON.stringify({
+        ...config,
+        host: composeHost(config.ip, config.port),
+      }));
+    } catch { /* quota / private mode */ }
   }, [config]);
+
+  const tallyHost = composeHost(config.ip, config.port);
+  const portalUrl = config.ip ? `http://${config.ip.trim()}/` : '';
 
   useEffect(() => {
     if (!available) return;
@@ -67,12 +110,21 @@ export default function TallySync() {
     } catch { /* non-fatal */ }
   }
 
+  // Every call to the backend consumes the composed host string rather than
+  // the split fields — keeps the tallyClient / edge function contract stable
+  // (one "host" field, same as before) while the UI shows them split.
+  const backendCreds = () => ({
+    host: tallyHost,
+    username: config.username,
+    password: config.password,
+  });
+
   const handleTest = async () => {
     if (isDemo) return;
     setTesting(true);
     setTestResult(null);
     try {
-      setTestResult(await testConnection({ ...config, fromDate: activeRange.fromDate, toDate: activeRange.toDate }));
+      setTestResult(await testConnection({ ...backendCreds(), fromDate: activeRange.fromDate, toDate: activeRange.toDate }));
     } catch (err) {
       setTestResult({ connected: false, error: err.message });
     }
@@ -82,9 +134,10 @@ export default function TallySync() {
   const handleSync = async () => {
     if (isDemo) return;
     setSyncing(true);
+    setSyncStartedAt(Date.now());
     setSyncResult(null);
     try {
-      const r = await syncFromTally({ ...config, fromDate: activeRange.fromDate, toDate: activeRange.toDate });
+      const r = await syncFromTally({ ...backendCreds(), fromDate: activeRange.fromDate, toDate: activeRange.toDate });
       // Transform raw Tally data → dashboard customer shape and persist.
       // Dashboards read from liveData on the next render so numbers reflect the sync.
       if (r?.success && r?.raw) {
@@ -117,6 +170,7 @@ export default function TallySync() {
       setSyncResult({ success: false, error: err.message });
     }
     setSyncing(false);
+    setSyncStartedAt(null);
   };
 
   // Pull the most recent snapshot written by the local Playwright sync tool
@@ -154,16 +208,81 @@ export default function TallySync() {
     setLoadingSnapshot(false);
   };
 
-  // Auto-load the latest snapshot on first mount. If the local sync tool has
-  // posted one, dashboards come up with real numbers without the user needing
-  // to press anything. Skipped when there's already a local cache (to avoid
-  // clobbering whatever dashboards rendered with) and for demo accounts.
+  // Pull the cloud snapshot if it's strictly newer than what we already have
+  // in localStorage (or nothing is cached). This is the "sync on PC A shows up
+  // on PC B" path: every Sync Now persists to the Supabase tally_snapshots
+  // table; on mount + on tab-focus every other browser compares its cached
+  // syncedAt to the cloud's updatedAt and refreshes if the cloud is ahead.
+  // Also serves as the "backgrounded sync completed" recovery: if a Sync Now
+  // was in flight when the tab was backgrounded and the cloud snapshot has
+  // advanced past syncStartedAt, we finalize the sync on the client.
+  const refreshFromCloudIfNewer = async () => {
+    if (!available || isDemo || !user?.email) return;
+    try {
+      const r = await loadFromSnapshot();
+      if (!r?.success || !r?.raw || !r?.updatedAt) return;
+      const local = loadLiveCustomers(user?.email);
+      const cloudAt = new Date(r.updatedAt).getTime();
+      const localAt = local?.syncedAt ? new Date(local.syncedAt).getTime() : 0;
+      const syncLandedInBackground = syncing && syncStartedAt && cloudAt >= syncStartedAt;
+      // During an in-flight sync, only overwrite if the cloud snapshot is
+      // from after the sync started (i.e. the edge function just finished).
+      // Otherwise the stale pre-sync snapshot would clobber what the user
+      // expects to be hot fresh data once the promise resolves.
+      if (syncing && !syncLandedInBackground) return;
+      if (!syncLandedInBackground && localAt >= cloudAt) return;
+      const { customers, totals } = transformTallyFull(r.raw);
+      if (customers.length) {
+        saveLiveCustomers(user?.email, customers, {
+          ...totals,
+          range: activeRange.label || 'All data',
+          fromDate: activeRange.fromDate,
+          toDate: activeRange.toDate,
+          source: `snapshot (${r.source})`,
+          syncedAt: r.updatedAt,
+        });
+      }
+      setSnapshotInfo({ updatedAt: r.updatedAt, source: r.source });
+      if (syncLandedInBackground) {
+        setSyncing(false);
+        setSyncStartedAt(null);
+        setSyncResult({
+          success: true,
+          mode: 'full',
+          note: 'Sync finished in the background while this tab was hidden — data loaded from the cloud snapshot.',
+          ledgers: r.ledgers,
+          salesVouchers: r.salesVouchers,
+          receiptVouchers: r.receiptVouchers,
+          stockItems: r.stockItems,
+          stockGroups: r.stockGroups,
+          dealersStored: customers.length,
+        });
+      }
+    } catch { /* non-fatal */ }
+  };
+
+  // On mount + on every tab-return, pull the cloud snapshot. Two reasons:
+  //   (1) multi-PC: sync happens on PC A → every other PC refreshes on focus.
+  //   (2) background tab: Chrome throttles in-flight fetches when the tab is
+  //       backgrounded, so a Sync Now that was kicked off before switching
+  //       tabs may never see its response land — but the edge function still
+  //       persisted the snapshot server-side. Pulling on focus recovers it.
+  // `syncing` + `syncStartedAt` are deps so the handler sees the latest in-
+  // flight state (refreshFromCloudIfNewer reads them to decide whether to
+  // finalize a background sync).
   useEffect(() => {
     if (!available || isDemo) return;
-    if (loadLiveCustomers(user?.email)) return;
-    handleLoadSnapshot();
-
-  }, [available, isDemo, user?.email]);
+    refreshFromCloudIfNewer();
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') refreshFromCloudIfNewer();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+    };
+  }, [available, isDemo, user?.email, syncing, syncStartedAt]);
 
   const handleClearLiveData = () => {
     if (isDemo) return;
@@ -252,12 +371,23 @@ export default function TallySync() {
           <div className="glass-card p-6 space-y-5">
             <h3 className="text-lg font-semibold text-white">Tally Connection</h3>
             <div className="space-y-3">
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">Tally Host or URL</label>
-                <input type="text" value={config.host} disabled={isDemo || testing || syncing} onChange={e => setConfig(c => ({ ...c, host: e.target.value }))}
-                  className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="1.2.3.4:9000  or  https://tally.example.com" />
-                <p className="text-[11px] text-gray-500 mt-1">Paste the same URL you use in your browser to reach Tally. Http/https both supported.</p>
+              <div className="grid grid-cols-3 gap-3">
+                <div className="col-span-2">
+                  <label className="block text-xs text-gray-500 mb-1">Tally IP / Hostname</label>
+                  <input type="text" value={config.ip} disabled={isDemo || testing || syncing} onChange={e => setConfig(c => ({ ...c, ip: e.target.value }))}
+                    className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="103.76.213.243" />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">XML Port</label>
+                  <input type="text" value={config.port} disabled={isDemo || testing || syncing} onChange={e => setConfig(c => ({ ...c, port: e.target.value.replace(/[^0-9]/g, '') }))}
+                    className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="9007" />
+                </div>
               </div>
+              <p className="text-[11px] text-gray-500 -mt-2">
+                IP is what you open to log in ({portalUrl ? (
+                  <a href={portalUrl} target="_blank" rel="noreferrer" className="text-indigo-300 hover:underline">{portalUrl}</a>
+                ) : 'http://your-ip/'}). Port is where TallyPrime's XML server listens (usually <code className="text-gray-300">9007</code> for cloud, <code className="text-gray-300">9000</code> for desktop).
+              </p>
               <div>
                 <label className="block text-xs text-gray-500 mb-1">Tally Username</label>
                 <input type="text" value={config.username} disabled={isDemo || testing || syncing} onChange={e => setConfig(c => ({ ...c, username: e.target.value }))}
