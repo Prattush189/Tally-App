@@ -18,15 +18,25 @@ import { CheckCircle2, Loader2, Circle, AlertCircle, Shield } from 'lucide-react
 // diagnostics, so a green dot there always means the auto-login
 // genuinely revived the RemoteApp session.
 
+// Portal login now runs proactively at the top of tallyRequest() (see
+// supabase/functions/tally/index.ts ensurePortalLogin), so its step is
+// listed FIRST — before company discovery. Conditional: only shown when
+// the server diagnostics confirm it actually fired on this invocation.
+//
+// Labels use plain business terms; the parenthetical shows the underlying
+// Tally nomenclature for people who want the detail. "Sundry Debtors" is
+// Tally's chart-of-accounts group for every customer who owes money, so
+// "dealers" is the accurate business name; "invoices" / "payments" are
+// the user-facing names for sales / receipt vouchers.
 const STEPS = [
+  { key: 'portal', label: 'Portal auto-login', etaMs: 4000, conditional: true },
   { key: 'discover', label: 'Discovering companies', etaMs: 5000 },
-  { key: 'portal', label: 'Portal auto-login (hb.exe cp)', etaMs: 8000, conditional: true },
-  { key: 'ledgers', label: 'Fetching ledgers (Sundry Debtors)', etaMs: 65000 },
+  { key: 'ledgers', label: 'Fetching dealers (Sundry Debtors ledgers)', etaMs: 65000 },
   { key: 'accountingGroups', label: 'Fetching accounting groups', etaMs: 15000 },
   { key: 'stockItems', label: 'Fetching stock items', etaMs: 20000 },
   { key: 'stockGroups', label: 'Fetching stock groups', etaMs: 12000 },
-  { key: 'salesVouchers', label: 'Fetching sales vouchers', etaMs: 45000 },
-  { key: 'receiptVouchers', label: 'Fetching receipt vouchers', etaMs: 35000 },
+  { key: 'salesVouchers', label: 'Fetching invoices (sales vouchers)', etaMs: 45000 },
+  { key: 'receiptVouchers', label: 'Fetching payments (receipt vouchers)', etaMs: 35000 },
   { key: 'persist', label: 'Persisting snapshot to cloud', etaMs: 4000 },
 ];
 
