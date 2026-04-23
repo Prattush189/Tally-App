@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { RefreshCw, CheckCircle, AlertTriangle, Wifi, WifiOff, Database, Users, Package, Layers, Eye, Cloud } from 'lucide-react';
 import SectionHeader from '../common/SectionHeader';
 import { fmt } from '../../utils/format';
@@ -208,29 +208,59 @@ export default function TallySync() {
     setLoadingSnapshot(false);
   };
 
-  // Pull the cloud snapshot if it's strictly newer than what we already have
-  // in localStorage (or nothing is cached). This is the "sync on PC A shows up
-  // on PC B" path: every Sync Now persists to the Supabase tally_snapshots
-  // table; on mount + on tab-focus every other browser compares its cached
-  // syncedAt to the cloud's updatedAt and refreshes if the cloud is ahead.
-  // Also serves as the "backgrounded sync completed" recovery: if a Sync Now
-  // was in flight when the tab was backgrounded and the cloud snapshot has
-  // advanced past syncStartedAt, we finalize the sync on the client.
-  const refreshFromCloudIfNewer = async () => {
+  // Pull the cloud snapshot only when it's MEANINGFULLY newer than what
+  // localStorage holds — "meaningful" means beyond the natural client/server
+  // clock-drift window (30s). Without that buffer a fresh local Sync Now
+  // would trigger a spurious refresh on every tab-return because the server
+  // clock is usually a handful of seconds ahead of the browser clock.
+  //
+  // This serves two flows:
+  //   (1) multi-PC: sync on PC A → PC B picks up on next tab-return.
+  //   (2) background-tab recovery: Chrome throttles in-flight fetches on
+  //       hidden tabs, so a Sync Now kicked off pre-switch may never see its
+  //       response land, but the edge function persists server-side. Pulling
+  //       on visibility-return recovers that completed state.
+  // Refs (not state) keep in-flight sync metadata visible to the handler
+  // without re-subscribing the listener on every syncing toggle — that used
+  // to tear down + re-create the effect dozens of times per sync.
+  const FRESHNESS_MS = 5 * 60_000;       // skip cloud pull if local is younger than this
+  const CLOCK_DRIFT_MS = 30_000;         // cloud must beat local by at least this
+  const MIN_HIDDEN_MS = 15_000;          // ignore brief tab-switches
+  const syncingRef = useRef(false);
+  const syncStartedAtRef = useRef(null);
+  const refreshInFlightRef = useRef(false);
+  const hiddenSinceRef = useRef(null);
+  useEffect(() => { syncingRef.current = syncing; }, [syncing]);
+  useEffect(() => { syncStartedAtRef.current = syncStartedAt; }, [syncStartedAt]);
+
+  const refreshFromCloudIfNewer = async (trigger) => {
     if (!available || isDemo || !user?.email) return;
+    if (refreshInFlightRef.current) return;
+    refreshInFlightRef.current = true;
     try {
+      const local = loadLiveCustomers(user?.email);
+      const localAt = local?.syncedAt ? new Date(local.syncedAt).getTime() : 0;
+      const syncingNow = syncingRef.current;
+      // On a plain tab-return (not the post-sync recovery path), skip the
+      // whole cloud roundtrip when local is fresh — this is the fix for
+      // "data shifts every time I click a tab". No fetch, no transform, no
+      // re-render.
+      if (trigger !== 'sync-recovery' && !syncingNow
+          && localAt && (Date.now() - localAt) < FRESHNESS_MS) {
+        return;
+      }
       const r = await loadFromSnapshot();
       if (!r?.success || !r?.raw || !r?.updatedAt) return;
-      const local = loadLiveCustomers(user?.email);
       const cloudAt = new Date(r.updatedAt).getTime();
-      const localAt = local?.syncedAt ? new Date(local.syncedAt).getTime() : 0;
-      const syncLandedInBackground = syncing && syncStartedAt && cloudAt >= syncStartedAt;
-      // During an in-flight sync, only overwrite if the cloud snapshot is
-      // from after the sync started (i.e. the edge function just finished).
-      // Otherwise the stale pre-sync snapshot would clobber what the user
-      // expects to be hot fresh data once the promise resolves.
-      if (syncing && !syncLandedInBackground) return;
-      if (!syncLandedInBackground && localAt >= cloudAt) return;
+      const startedAt = syncStartedAtRef.current;
+      const syncLandedInBackground = syncingNow && startedAt && cloudAt >= startedAt;
+      // During an in-flight sync, only finalize if the cloud snapshot is
+      // from after the sync started. Otherwise the pre-sync snapshot would
+      // clobber what the user expects once the promise resolves.
+      if (syncingNow && !syncLandedInBackground) return;
+      // Require meaningful time delta to absorb server-vs-client clock drift.
+      // Equal or slightly-newer cloud snapshots are treated as "same data".
+      if (!syncLandedInBackground && cloudAt <= localAt + CLOCK_DRIFT_MS) return;
       const { customers, totals } = transformTallyFull(r.raw);
       if (customers.length) {
         saveLiveCustomers(user?.email, customers, {
@@ -239,6 +269,8 @@ export default function TallySync() {
           fromDate: activeRange.fromDate,
           toDate: activeRange.toDate,
           source: `snapshot (${r.source})`,
+          // Store cloud's server-time verbatim so the next equality check is
+          // exact — avoids a slow drift that would otherwise keep refreshing.
           syncedAt: r.updatedAt,
         });
       }
@@ -258,31 +290,39 @@ export default function TallySync() {
           dealersStored: customers.length,
         });
       }
-    } catch { /* non-fatal */ }
+    } catch { /* non-fatal */ } finally {
+      refreshInFlightRef.current = false;
+    }
   };
 
-  // On mount + on every tab-return, pull the cloud snapshot. Two reasons:
-  //   (1) multi-PC: sync happens on PC A → every other PC refreshes on focus.
-  //   (2) background tab: Chrome throttles in-flight fetches when the tab is
-  //       backgrounded, so a Sync Now that was kicked off before switching
-  //       tabs may never see its response land — but the edge function still
-  //       persisted the snapshot server-side. Pulling on focus recovers it.
-  // `syncing` + `syncStartedAt` are deps so the handler sees the latest in-
-  // flight state (refreshFromCloudIfNewer reads them to decide whether to
-  // finalize a background sync).
+  // On mount + on visibility-return (NOT on window-focus — window.focus is
+  // too aggressive, it fires on the slightest alt-tab / click-into-window and
+  // was causing the "data changes when I click a tab" flicker). We also gate
+  // visibilitychange on the tab having been hidden long enough that something
+  // plausibly happened server-side.
   useEffect(() => {
     if (!available || isDemo) return;
-    refreshFromCloudIfNewer();
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') refreshFromCloudIfNewer();
+    refreshFromCloudIfNewer('mount');
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        hiddenSinceRef.current = Date.now();
+        return;
+      }
+      const since = hiddenSinceRef.current;
+      hiddenSinceRef.current = null;
+      // Pull only if we were hidden long enough OR a sync is in flight (the
+      // background-recovery path should fire regardless of how briefly the
+      // tab was hidden).
+      const longEnough = since && Date.now() - since > MIN_HIDDEN_MS;
+      if (longEnough || syncingRef.current) {
+        refreshFromCloudIfNewer(syncingRef.current ? 'sync-recovery' : 'tab-return');
+      }
     };
-    document.addEventListener('visibilitychange', onVisible);
-    window.addEventListener('focus', onVisible);
+    document.addEventListener('visibilitychange', onVisibilityChange);
     return () => {
-      document.removeEventListener('visibilitychange', onVisible);
-      window.removeEventListener('focus', onVisible);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [available, isDemo, user?.email, syncing, syncStartedAt]);
+  }, [available, isDemo, user?.email]);
 
   const handleClearLiveData = () => {
     if (isDemo) return;
