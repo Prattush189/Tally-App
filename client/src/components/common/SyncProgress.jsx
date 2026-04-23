@@ -59,7 +59,7 @@ function StepRow({ step, status, detail }) {
   );
 }
 
-export default function SyncProgress({ active, result }) {
+export default function SyncProgress({ active, result, progressCompany }) {
   // Wall-clock driver. While active=true we bump `elapsed` on a setInterval
   // so the optimistic step advances. When the response lands we stop the
   // timer but KEEP the final elapsed value — resetting it to 0 on !active
@@ -165,12 +165,50 @@ export default function SyncProgress({ active, result }) {
   const pct = Math.min(100, Math.round(((result && !active) ? 100 : (elapsed / totalEta * 100))));
   const isFailure = result && !active && !result.success && !result.connected;
 
+  // When the parent is mid-loop across companies, show which one is
+  // currently syncing ("2 of 4 — UNITED AGENCIES LLP"). We clear
+  // progressCompany.total to 1 when there's only a single company to
+  // sync, which collapses the header back to the default wording.
+  const companyHeader = (() => {
+    if (!active) return null;
+    if (!progressCompany || progressCompany.total <= 1 || !progressCompany.name) return null;
+    return (
+      <p className="text-[11px] text-indigo-200/80 mt-1">
+        Company {progressCompany.index} of {progressCompany.total} — <span className="text-indigo-100">{progressCompany.name}</span>
+      </p>
+    );
+  })();
+
+  // After the whole loop finishes, show a per-company breakdown so the
+  // user can see "Company A: 4 dealers, 12 invoices · Company B: …".
+  const perCompany = result?.perCompany;
+  const perCompanyRows = (!active && perCompany && Object.keys(perCompany).length > 1) ? (
+    <div className="mt-3 pt-3 border-t border-gray-700/40 space-y-1">
+      <p className="text-[11px] text-gray-400 uppercase tracking-wider mb-1">Per company</p>
+      {Object.entries(perCompany).map(([name, c]) => (
+        <div key={name} className="flex items-center justify-between text-[11px]">
+          <span className={c.success ? 'text-gray-200' : 'text-red-300'}>
+            {c.success ? '✓' : '✗'} {name}
+          </span>
+          <span className="text-gray-500">
+            {c.success
+              ? `${c.ledgers || 0} dealers · ${c.salesVouchers || 0} invoices · ${c.receiptVouchers || 0} payments · ${c.stockItems || 0} items`
+              : (c.error || 'failed').slice(0, 80)}
+          </span>
+        </div>
+      ))}
+    </div>
+  ) : null;
+
   return (
     <div className="glass-card p-4 border border-indigo-500/30 bg-indigo-500/5">
       <div className="flex items-center justify-between mb-2">
-        <p className="text-xs font-semibold text-indigo-300 uppercase tracking-wider">
-          Syncing from Tally
-        </p>
+        <div>
+          <p className="text-xs font-semibold text-indigo-300 uppercase tracking-wider">
+            Syncing from Tally
+          </p>
+          {companyHeader}
+        </div>
         <p className="text-[11px] text-gray-500">
           {Math.round(displayedElapsed / 1000)}s · {pct}%
         </p>
@@ -186,6 +224,7 @@ export default function SyncProgress({ active, result }) {
           <StepRow key={s.key} step={s} status={statusFor(s)} detail={detailFor(s)} />
         ))}
       </div>
+      {perCompanyRows}
       {result?.fellBackToSnapshot && !active && (
         <p className="text-[11px] text-cyan-300/80 mt-3">
           Live sync did not return fresh data — loaded the most recent cloud snapshot instead.

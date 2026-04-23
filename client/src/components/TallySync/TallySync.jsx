@@ -127,25 +127,25 @@ export default function TallySync() {
     portalPassword: config.portalPassword,
   });
 
-  // One button, one flow. `handleSync` orchestrates everything:
-  //   1. syncFromTally() — hits the Edge Function. That function itself
-  //      runs portal auto-login (hb.exe cp) behind the scenes whenever
-  //      the XML endpoint on :9007 is unreachable, so we don't need a
-  //      separate "Test Portal Login" or "Test Connection" button.
-  //   2. If the live sync returns a useful bundle, transform + save.
-  //   3. If the live sync fails OR returns no data, silently fall back
-  //      to the most recent cloud snapshot so dashboards still hydrate.
-  //   4. The progress panel below surfaces each phase (discover →
-  //      portal auto-login → per-collection fetches → persist) with
-  //      real outcomes reconciled from the edge function's diagnostics.
-  const handleSync = async () => {
-    if (isDemo) return;
-    setSyncing(true);
-    setSyncStartedAt(Date.now());
-    setSyncResult(null);
+  // Multi-company sync progress. Each Sync press iterates through every
+  // company Tally detected on the first round-trip — each company gets
+  // its own edge-function call with its own 150s budget so we don't have
+  // to fit 4 companies into one 140s window. The progress header flips
+  // between companies as they complete; the data that powers the
+  // dashboards comes from whichever company is currently active in the
+  // top-bar picker.
+  const [progressCompany, setProgressCompany] = useState({ name: '', index: 0, total: 1 });
+
+  // Run sync-full once for a single company (or the default / discovered
+  // one if blank). Transforms + persists the result. Returns the raw
+  // result plus `dealersStored` so the caller can decide whether to save
+  // this company's data as the dashboards' active customer list.
+  const syncOneCompany = async (companyName) => {
+    const body = { ...backendCreds(), fromDate: activeRange.fromDate, toDate: activeRange.toDate };
+    if (companyName) body.company = companyName;
     let r = null;
     try {
-      r = await syncFromTally({ ...backendCreds(), fromDate: activeRange.fromDate, toDate: activeRange.toDate });
+      r = await syncFromTally(body);
       if (r?.success && r?.raw) {
         try {
           const useFull = r.mode === 'full' && r.raw && typeof r.raw === 'object' && 'ledgers' in r.raw;
@@ -154,14 +154,8 @@ export default function TallySync() {
             : transformTallyLedgers(r.raw);
           r.dealersStored = customers.length;
           r.diagnostics = { ...(r.diagnostics || {}), ...diagnostics };
-          if (customers.length) {
-            saveLiveCustomers(user?.email, customers, {
-              ...totals,
-              range: activeRange.label || 'All data',
-              fromDate: activeRange.fromDate,
-              toDate: activeRange.toDate,
-            });
-          }
+          r._customers = customers;
+          r._totals = totals;
         } catch (transformErr) {
           r.transformError = transformErr.message;
         }
@@ -169,13 +163,112 @@ export default function TallySync() {
     } catch (err) {
       r = { success: false, error: err.message };
     }
+    return r;
+  };
 
-    // Fallback path: live sync didn't land real customer data, so pull the
-    // cloud snapshot the server-side sync or another PC already wrote.
-    // This replaces the separate "Load Cloud Snapshot" button; a single
-    // Sync press always tries to leave dashboards with the freshest data
-    // available from any source.
-    if (!r?.dealersStored) {
+  // One button, one flow. handleSync orchestrates everything across all
+  // companies Tally exposes:
+  //   1. First edge-function call returns the discoveredCompanies list
+  //      (the edge function always auto-detects at the top of sync-full).
+  //   2. For every company beyond the first, fire another sync-full.
+  //      Serial — shared-host Tally tunnels don't like parallel XML.
+  //   3. Transform + save the customer list for the ACTIVE company (what
+  //      the top-bar CompanySwitcher points at) so the dashboards hydrate
+  //      with that one. The server still persists per-company snapshots,
+  //      so switching company in the top bar just reads the other rows.
+  //   4. If nothing came back with dealers, fall back to the cloud
+  //      snapshot as before.
+  const handleSync = async () => {
+    if (isDemo) return;
+    setSyncing(true);
+    setSyncStartedAt(Date.now());
+    setSyncResult(null);
+    setProgressCompany({ name: '', index: 0, total: 1 });
+
+    // 1st pass — no explicit company so the edge function picks up its
+    // own active_company and returns the full discoveredCompanies list.
+    setProgressCompany({ name: '', index: 1, total: 1 });
+    let first = await syncOneCompany('');
+    const discovered = first?.discoveredCompanies || [];
+    const firstCompany = first?.activeCompany || discovered[0] || '';
+    const companiesToSync = discovered.length
+      ? discovered
+      : (firstCompany ? [firstCompany] : ['']);
+
+    const results = new Map();
+    results.set(firstCompany || '(default)', first);
+
+    // 2nd...Nth passes — every company except the one the edge function
+    // already synced on the first round-trip.
+    for (let i = 0; i < companiesToSync.length; i++) {
+      const name = companiesToSync[i];
+      if (name === firstCompany) continue;
+      setProgressCompany({ name, index: results.size + 1, total: companiesToSync.length });
+      const r = await syncOneCompany(name);
+      results.set(name, r);
+    }
+
+    // Decide whose customer list powers the dashboards on this browser.
+    // Preference: the company the user has pinned in the CompanySwitcher
+    // (activeCompany state). Otherwise the first company we synced.
+    const preferred = activeCompany || firstCompany || companiesToSync[0];
+    const primary = results.get(preferred) || first;
+
+    if (primary?._customers?.length) {
+      saveLiveCustomers(user?.email, primary._customers, {
+        ...primary._totals,
+        range: activeRange.label || 'All data',
+        fromDate: activeRange.fromDate,
+        toDate: activeRange.toDate,
+      });
+    }
+
+    // Aggregated result used by the sync-result panel + progress reconcile.
+    // Counts are summed across all companies; collectionErrors show which
+    // companies failed where. `raw` mirrors the primary company's raw
+    // bundle so the transformer-based diagnostics still make sense.
+    const agg = {
+      success: Boolean(primary?.success),
+      error: primary?.error,
+      partial: Array.from(results.values()).some(r => !r?.success),
+      mode: primary?.mode || 'full',
+      tallyNotRunning: primary?.tallyNotRunning,
+      ledgers: 0, salesVouchers: 0, receiptVouchers: 0, stockItems: 0, stockGroups: 0,
+      collectionErrors: {},
+      dealersStored: primary?.dealersStored || 0,
+      diagnostics: primary?.diagnostics,
+      discoveredCompanies: discovered,
+      activeCompany: firstCompany,
+      raw: primary?.raw,
+      perCompany: Object.fromEntries(Array.from(results.entries()).map(([name, res]) => ([name, {
+        success: Boolean(res?.success),
+        ledgers: res?.ledgers || 0,
+        salesVouchers: res?.salesVouchers || 0,
+        receiptVouchers: res?.receiptVouchers || 0,
+        stockItems: res?.stockItems || 0,
+        stockGroups: res?.stockGroups || 0,
+        error: res?.error || null,
+      }]))),
+      fetched: primary?.fetched || [],
+    };
+    for (const res of results.values()) {
+      agg.ledgers += res?.ledgers || 0;
+      agg.salesVouchers += res?.salesVouchers || 0;
+      agg.receiptVouchers += res?.receiptVouchers || 0;
+      agg.stockItems += res?.stockItems || 0;
+      agg.stockGroups += res?.stockGroups || 0;
+      if (res?.collectionErrors) {
+        for (const [k, v] of Object.entries(res.collectionErrors)) {
+          if (v && !agg.collectionErrors[k]) agg.collectionErrors[k] = v;
+        }
+      }
+    }
+
+    // Fallback: if nothing landed with real customers, pull the cloud
+    // snapshot so dashboards still hydrate (another PC or the cron
+    // workflow may have written one recently).
+    let r = agg;
+    if (!r.dealersStored) {
       try {
         const snap = await loadFromSnapshot();
         if (snap?.success && snap?.raw) {
@@ -190,15 +283,16 @@ export default function TallySync() {
               syncedAt: snap.updatedAt,
             });
             r = {
-              ...(r || {}),
+              ...r,
               success: true,
-              mode: r?.mode || 'snapshot',
               fellBackToSnapshot: true,
               dealersStored: customers.length,
-              diagnostics: { ...(r?.diagnostics || {}), ...diagnostics },
-              ledgers: snap.ledgers, salesVouchers: snap.salesVouchers,
-              receiptVouchers: snap.receiptVouchers, stockItems: snap.stockItems,
-              stockGroups: snap.stockGroups,
+              diagnostics: { ...(r.diagnostics || {}), ...diagnostics },
+              ledgers: snap.ledgers || r.ledgers,
+              salesVouchers: snap.salesVouchers || r.salesVouchers,
+              receiptVouchers: snap.receiptVouchers || r.receiptVouchers,
+              stockItems: snap.stockItems || r.stockItems,
+              stockGroups: snap.stockGroups || r.stockGroups,
             };
             setSnapshotInfo({ updatedAt: snap.updatedAt, source: snap.source });
           }
@@ -215,6 +309,7 @@ export default function TallySync() {
       refreshCompanies();
     } catch { /* non-fatal */ }
 
+    setProgressCompany({ name: '', index: 0, total: 1 });
     setSyncing(false);
     setSyncStartedAt(null);
   };
@@ -486,18 +581,20 @@ export default function TallySync() {
                 </p>
               </div>
               <div className="bg-gray-900/50 rounded-lg p-3">
-                <p className="text-xs text-gray-500 mb-1">Company {knownCompanies.length > 1 ? `(of ${knownCompanies.length} in Tally)` : ''}</p>
+                <p className="text-xs text-gray-500 mb-1">Companies</p>
                 <p className="text-sm text-white">
-                  {activeCompany || (knownCompanies[0]) || 'No company selected yet — click Sync Now to auto-detect from Tally'}
+                  {knownCompanies.length > 0
+                    ? `All ${knownCompanies.length} detected compan${knownCompanies.length === 1 ? 'y' : 'ies'} will be synced on every click.`
+                    : 'Companies will be auto-detected on the first Sync and then synced together.'}
                 </p>
                 <p className="text-xs text-gray-500 mt-0.5">
                   {activeRange.fromDate
                     ? `${activeRange.label}: ${activeRange.fromDate} → ${activeRange.toDate}`
                     : 'All available data (Tally default range)'}
                 </p>
-                {knownCompanies.length > 1 && (
-                  <p className="text-[11px] text-indigo-300/80 mt-1">Switch company from the top-bar dropdown.</p>
-                )}
+                <p className="text-[11px] text-indigo-300/80 mt-1">
+                  Use the top-bar company picker to choose which one's data the dashboards show.
+                </p>
               </div>
               {status?.cacheAge != null && (
                 <div className="bg-gray-900/50 rounded-lg p-3">
@@ -528,7 +625,12 @@ export default function TallySync() {
                 collection results + portal-auto-login diagnostics once the
                 response lands. Unmounts when the next Sync starts. */}
             {(syncing || syncResult) && (
-              <SyncProgress kind="sync" active={syncing} result={syncResult} />
+              <SyncProgress
+                kind="sync"
+                active={syncing}
+                result={syncResult}
+                progressCompany={progressCompany}
+              />
             )}
 
             {/* Sync Result */}
