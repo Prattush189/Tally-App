@@ -255,10 +255,14 @@ async function ensurePortalLogin(cfg: Required<TallyConfig>): Promise<void> {
   if (login.ok) {
     currentDiagnostics.portalLoginOk = true;
     portalLoggedInForHost.add(cfg.host);
-    // The portal starts the RemoteApp session asynchronously — give it a
-    // moment before the first XML call. 2s has been empirically enough;
-    // bumping higher hurts the per-call budget too much.
-    await new Promise((r) => setTimeout(r, 2000));
+    // The portal starts the RemoteApp session asynchronously and the
+    // TallyPrime XML listener on :9007 isn't ready until the Windows
+    // session + Tally app are both fully warm. We previously waited 2s,
+    // which worked when the session had recently been alive; for a truly
+    // cold portal we need more. 10s is a reasonable compromise between
+    // "wait enough for Tally to start" and "don't blow the 140s overall
+    // budget" — callers still have ~130s for the collection queries.
+    await new Promise((r) => setTimeout(r, 10000));
   } else {
     currentDiagnostics.portalLoginError = login.error || 'unknown';
     // Don't throw — the XML call might still work (session could already
@@ -1233,7 +1237,7 @@ Deno.serve(async (req) => {
         : diagSnapshot.portalLoginError
           ? ` Portal auto-login: ${diagSnapshot.portalLoginError}`
           : diagSnapshot.portalLoginOk
-            ? ' Portal auto-login succeeded, but :9007 is still not responding — the RemoteApp session is probably not running.'
+            ? ' Portal auto-login succeeded, but :9007 is still not responding. The portal session is active but TallyPrime.exe does not appear to be running inside it. Open the portal in a browser tab (http://<host>/), sign in, click TallyPrime on the launcher page to start the app, then retry Sync. (Or install the Chrome extension in extension/ — it runs inside the portal tab and handles this automatically.)'
             : '';
       return new Response(JSON.stringify({
         connected: false,
