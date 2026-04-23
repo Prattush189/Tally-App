@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { RefreshCw, CheckCircle, AlertTriangle, Wifi, WifiOff, Database, Users, Package, Layers, Eye, Cloud } from 'lucide-react';
 import SectionHeader from '../common/SectionHeader';
+import SyncProgress from '../common/SyncProgress';
 import { fmt } from '../../utils/format';
 import { useAuth } from '../../context/AuthContext';
 import {
@@ -504,6 +505,19 @@ export default function TallySync() {
                 <Cloud size={12} /> Snapshot from {new Date(snapshotInfo.updatedAt).toLocaleString()}
                 {snapshotInfo.source ? ` · via ${snapshotInfo.source}` : ''}
               </div>
+            )}
+
+            {/* Stepwise progress. Driven by an optimistic timer while the
+                request is in flight; reconciles with the real fetched /
+                errors / diagnostics once the response lands so the user can
+                see which collections succeeded, which failed, and whether
+                portal auto-login fired. Unmounts when the user starts a
+                new test / sync so the bar resets. */}
+            {(testing || testResult) && (
+              <SyncProgress kind="test" active={testing} result={testResult} />
+            )}
+            {(syncing || syncResult) && (
+              <SyncProgress kind="sync" active={syncing} result={syncResult} />
             )}
 
             {/* Test Result */}
