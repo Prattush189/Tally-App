@@ -545,8 +545,14 @@ export function transformTallyFull(bundle, options = {}) {
   const accountingGroupsTree = bundle?.accountingGroups ?? null;
   const salesTree = bundle?.salesVouchers ?? null;
   const receiptsTree = bundle?.receiptVouchers ?? null;
+  const paymentsTree = bundle?.paymentVouchers ?? null;
+  const journalsTree = bundle?.journalVouchers ?? null;
+  const contrasTree = bundle?.contraVouchers ?? null;
   const stockItemsTree = bundle?.stockItems ?? null;
   const stockGroupsTree = bundle?.stockGroups ?? null;
+  const profitLossTree = bundle?.profitLoss ?? null;
+  const balanceSheetTree = bundle?.balanceSheet ?? null;
+  const trialBalanceTree = bundle?.trialBalance ?? null;
 
   // Build a lowercase name→parent map from the Group master, so every
   // ledger can walk its ancestry and find "Sundry Debtors" even when the
@@ -572,6 +578,9 @@ export function transformTallyFull(bundle, options = {}) {
   const allVouchers = [
     ...extractCollection(salesTree, 'VOUCHER'),
     ...extractCollection(receiptsTree, 'VOUCHER'),
+    ...extractCollection(paymentsTree, 'VOUCHER'),
+    ...extractCollection(journalsTree, 'VOUCHER'),
+    ...extractCollection(contrasTree, 'VOUCHER'),
   ];
   const seenKeys = new Set();
   const dedupedVouchers = [];
@@ -581,13 +590,37 @@ export function transformTallyFull(bundle, options = {}) {
     seenKeys.add(key);
     dedupedVouchers.push(v);
   }
+  // Classify each voucher by its Tally type so every downstream view
+  // (sales dashboards, payment history, ledger drilldowns, All Entries
+  // table in Advanced Analytics) has a consistent source.
+  const voucherTypeOf = (v) => readField(v, 'VOUCHERTYPENAME').toLowerCase();
   const salesVouchers = dedupedVouchers.filter((v) => {
-    const t = readField(v, 'VOUCHERTYPENAME').toLowerCase();
+    const t = voucherTypeOf(v);
     return t === 'sales' || t.includes('sales') || t.includes('invoice') || t.includes('tax invoice');
   });
   const receiptVouchers = dedupedVouchers.filter((v) => {
-    const t = readField(v, 'VOUCHERTYPENAME').toLowerCase();
+    const t = voucherTypeOf(v);
     return t === 'receipt' || t.includes('receipt');
+  });
+  const paymentVouchers = dedupedVouchers.filter((v) => {
+    const t = voucherTypeOf(v);
+    return t === 'payment' || t.includes('payment');
+  });
+  const journalVouchers = dedupedVouchers.filter((v) => {
+    const t = voucherTypeOf(v);
+    return t === 'journal' || t.includes('journal');
+  });
+  const contraVouchers = dedupedVouchers.filter((v) => {
+    const t = voucherTypeOf(v);
+    return t === 'contra' || t.includes('contra');
+  });
+  const debitNoteVouchers = dedupedVouchers.filter((v) => {
+    const t = voucherTypeOf(v);
+    return t.includes('debit note');
+  });
+  const creditNoteVouchers = dedupedVouchers.filter((v) => {
+    const t = voucherTypeOf(v);
+    return t.includes('credit note');
   });
   const stockItems = extractCollection(stockItemsTree, 'STOCKITEM');
   const stockGroups = extractCollection(stockGroupsTree, 'STOCKGROUP');
@@ -664,6 +697,22 @@ export function transformTallyFull(bundle, options = {}) {
     .slice(0, 20)
     .map(([name, n]) => `${name} (${n})`);
 
+  const financials = {
+    profitLoss: parseFinancialStatement(profitLossTree, 'pl'),
+    balanceSheet: parseFinancialStatement(balanceSheetTree, 'bs'),
+    trialBalance: parseFinancialStatement(trialBalanceTree, 'tb'),
+    vouchers: {
+      sales: salesVouchers,
+      receipts: receiptVouchers,
+      payments: paymentVouchers,
+      journals: journalVouchers,
+      contra: contraVouchers,
+      debitNotes: debitNoteVouchers,
+      creditNotes: creditNoteVouchers,
+      all: dedupedVouchers,
+    },
+  };
+
   return {
     customers,
     totals: {
@@ -671,12 +720,16 @@ export function transformTallyFull(bundle, options = {}) {
       sundryDebtors: debtors.length,
       salesVouchers: salesVouchers.length,
       receiptVouchers: receiptVouchers.length,
+      paymentVouchers: paymentVouchers.length,
+      journalVouchers: journalVouchers.length,
+      contraVouchers: contraVouchers.length,
       stockItems: stockItems.length,
       stockGroups: stockGroups.length,
       categories: allCategories.size,
       outstanding: customers.reduce((s, c) => s + c.outstandingAmount, 0),
       totalSales: customers.reduce((s, c) => s + c.invoiceHistory.reduce((a, m) => a + m.value, 0), 0),
     },
+    financials,
     diagnostics: {
       filterMatched: debtors.length > 0,
       usedFallback: debtors.length === 0 && source.length > 0,
@@ -689,12 +742,76 @@ export function transformTallyFull(bundle, options = {}) {
         ledgers: ledgers.length,
         salesVouchers: salesVouchers.length,
         receiptVouchers: receiptVouchers.length,
+        paymentVouchers: paymentVouchers.length,
+        journalVouchers: journalVouchers.length,
+        contraVouchers: contraVouchers.length,
         stockItems: stockItems.length,
         stockGroups: stockGroups.length,
       },
       window: window.map(b => b.month),
     },
   };
+}
+
+// Parse a Tally built-in financial statement (Profit & Loss A/c, Balance
+// Sheet, Trial Balance). The shape varies slightly between Tally versions,
+// but the common pieces are a DSPACCNAME element per row holding the group
+// name (DSPDISPNAME) and a sibling DSPACCINFO with closing debit (DSPCLDRAMA)
+// and credit (DSPCLCRAMA) amounts. We pair them by traversal order — Tally
+// emits name+info immediately adjacent — so the output is a flat list of
+// { name, debit, credit, net } rows the UI can render as a tree or a table.
+// The `kind` hint lets us split rows into sensible top-level buckets
+// (income vs expense for P&L; assets vs liabilities for BS).
+function parseFinancialStatement(tree, kind) {
+  if (!tree) return null;
+  const rows = [];
+  const walk = (node, depth, parent) => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) { node.forEach((n) => walk(n, depth, parent)); return; }
+    const entries = Object.entries(node);
+    let i = 0;
+    while (i < entries.length) {
+      const [key, value] = entries[i];
+      if (key === 'DSPACCNAME') {
+        const nameNode = Array.isArray(value) ? value[0] : value;
+        const name = readField(nameNode || {}, 'DSPDISPNAME') || textField(nameNode);
+        // DSPACCINFO typically sits immediately after DSPACCNAME at the
+        // same level. Walk forward until we find it (or bail).
+        let info = null;
+        for (let j = i + 1; j < entries.length && j < i + 4; j++) {
+          if (entries[j][0] === 'DSPACCINFO') { info = entries[j][1]; break; }
+        }
+        const infoNode = Array.isArray(info) ? info[0] : info;
+        const debit = parseAmount(readField(infoNode || {}, 'DSPCLDRAMA'));
+        const credit = parseAmount(readField(infoNode || {}, 'DSPCLCRAMA'));
+        if (name) {
+          rows.push({
+            name: name.trim(),
+            parent: parent || '',
+            depth,
+            debit: Math.round(debit),
+            credit: Math.round(credit),
+            net: Math.round(credit - debit),
+          });
+          // Recurse into the info node in case child groups nest inside it.
+          if (infoNode) walk(infoNode, depth + 1, name.trim());
+        }
+      } else if (value && typeof value === 'object') {
+        walk(value, depth, parent);
+      }
+      i += 1;
+    }
+  };
+  walk(tree, 0, '');
+  // Totals for the summary row at the top of each statement. Debit/credit
+  // totals come straight from the roots (depth 0); callers can still sum
+  // the full `rows` array if they want per-group detail.
+  const rootRows = rows.filter((r) => r.depth === 0);
+  const totals = rootRows.reduce(
+    (acc, r) => ({ debit: acc.debit + r.debit, credit: acc.credit + r.credit }),
+    { debit: 0, credit: 0 },
+  );
+  return { kind, rows, rootRows, totals };
 }
 
 export function transformTallyLedgers(rawTree) {

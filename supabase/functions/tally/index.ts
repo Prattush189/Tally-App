@@ -472,6 +472,37 @@ function receiptVouchersRequest(cfg: { company: string; fromDate: string; toDate
   return reportWithVoucherDates('Receipt Register', cfg);
 }
 
+// Additional voucher-type registers so "all entry data" is populated, not
+// just sales + receipts. Payment Register = money out (vendor payments,
+// expense reimbursements). Journal Register = adjustment entries (accruals,
+// depreciation, inter-book transfers). Contra Register = bank/cash transfers.
+// Each is its own type-specific report — same rationale as sales/receipts:
+// smaller payloads than Day Book, faster through the shared-host tunnel.
+function paymentVouchersRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
+  return reportWithVoucherDates('Payment Register', cfg);
+}
+function journalVouchersRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
+  return reportWithVoucherDates('Journal Register', cfg);
+}
+function contraVouchersRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
+  return reportWithVoucherDates('Contra Register', cfg);
+}
+
+// Management-accounting reports. P&L and Balance Sheet are Tally's built-in
+// financial statements — pre-compiled, no TDL, returns a hierarchical tree
+// of groups → sub-groups → ledgers with opening/closing balances. Trial
+// Balance is the same flat group-level view without the P&L/BS split, so
+// dashboards that want group-by-group drill-downs have it as a fallback.
+function profitLossRequest(cfg: { company: string; fromDate: string; toDate: string }) {
+  return reportWithDates('Profit & Loss', cfg);
+}
+function balanceSheetRequest(cfg: { company: string; fromDate: string; toDate: string }) {
+  return reportWithDates('Balance Sheet', cfg);
+}
+function trialBalanceRequest(cfg: { company: string; fromDate: string; toDate: string }) {
+  return reportWithDates('Trial Balance', cfg);
+}
+
 // Stock items / groups stay on our custom COLLECTION queries — empirically
 // the built-in 'Stock Summary' report returns a hierarchical summary (one
 // row per group, not per item) and 'List of Stock Groups' came back with a
@@ -591,8 +622,15 @@ const COLLECTION_TTL_MS: Record<string, number> = {
   ledgers: 30 * 60_000,
   salesVouchers: 10 * 60_000,
   receiptVouchers: 10 * 60_000,
+  paymentVouchers: 10 * 60_000,
+  journalVouchers: 10 * 60_000,
+  contraVouchers: 10 * 60_000,
   stockItems: 30 * 60_000,
   stockGroups: 30 * 60_000,
+  accountingGroups: 30 * 60_000,
+  profitLoss: 15 * 60_000,
+  balanceSheet: 15 * 60_000,
+  trialBalance: 15 * 60_000,
 };
 
 // Merge a new sync result into the existing tally_snapshots row. Idempotent
@@ -1254,12 +1292,19 @@ Deno.serve(async (req) => {
       { key: 'accountingGroups' as const, xml: accountingGroupsRequest(queryCfg), node: 'GROUP', timeoutMs: 15000 },
       { key: 'stockItems' as const, xml: stockItemsRequest(queryCfg), node: 'STOCKITEM', timeoutMs: 20000 },
       { key: 'stockGroups' as const, xml: stockGroupsRequest(queryCfg), node: 'STOCKGROUP', timeoutMs: 12000 },
-      // Sales/Receipt Register payloads are much smaller than the old Day Book
-      // ones (type-specific vs every-voucher-type), but the shared tunnel still
-      // needs room to stream each one. 45/35s gives the retry path enough
-      // budget for one reset-and-wait cycle without starving later jobs.
+      // Financial statements — small (group-level tree, not per-voucher),
+      // run before the heavy voucher registers so they never get starved by
+      // wall-clock exhaustion. P&L + BS together are ~20-40 KB for most tenants.
+      { key: 'profitLoss' as const, xml: profitLossRequest(queryCfg), node: 'DSPACCNAME', timeoutMs: 15000 },
+      { key: 'balanceSheet' as const, xml: balanceSheetRequest(queryCfg), node: 'DSPACCNAME', timeoutMs: 15000 },
+      { key: 'trialBalance' as const, xml: trialBalanceRequest(queryCfg), node: 'DSPACCNAME', timeoutMs: 18000 },
+      // Voucher registers last — big, tunnel-sensitive. Type-specific (not
+      // Day Book) keeps each payload small enough to stream in one TCP window.
       { key: 'salesVouchers' as const, xml: salesVouchersRequest(queryCfg), node: 'VOUCHER', timeoutMs: 45000 },
       { key: 'receiptVouchers' as const, xml: receiptVouchersRequest(queryCfg), node: 'VOUCHER', timeoutMs: 35000 },
+      { key: 'paymentVouchers' as const, xml: paymentVouchersRequest(queryCfg), node: 'VOUCHER', timeoutMs: 30000 },
+      { key: 'journalVouchers' as const, xml: journalVouchersRequest(queryCfg), node: 'VOUCHER', timeoutMs: 25000 },
+      { key: 'contraVouchers' as const, xml: contraVouchersRequest(queryCfg), node: 'VOUCHER', timeoutMs: 20000 },
     ];
 
     const skipped: Record<string, { reason: string; updatedAt: string }> = {};
