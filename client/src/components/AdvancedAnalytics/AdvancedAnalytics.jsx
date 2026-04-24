@@ -5,16 +5,23 @@ import MetricCard from '../common/MetricCard';
 import SectionHeader from '../common/SectionHeader';
 import LoadingSpinner from '../common/LoadingSpinner';
 import { useAnalytics } from '../../hooks/useAnalytics';
+import { useTallyData } from '../../context/TallyDataContext';
 import { fmt, TOOLTIP_STYLE, CHART_COLORS } from '../../utils/format';
+import { ProfitLossTab, BalanceSheetTab, TrialBalanceTab, VouchersTab } from './FinancialsTabs';
 
 const RFM_COLORS = { Champions: '#22c55e', Loyal: '#3b82f6', Potential: '#f59e0b', 'Needs Attention': '#f97316', 'At Risk': '#ef4444' };
 const HEALTH_COLORS = ['#ef4444', '#f59e0b', '#22c55e'];
 
 export default function AdvancedAnalytics() {
   const { data, loading } = useAnalytics('advanced');
+  const { financials } = useTallyData();
   const [tab, setTab] = useState('rfm');
 
-  if (loading || !data) return <LoadingSpinner message="Computing advanced analytics..." />;
+  // Only the portfolio-analytics tabs need the runAnalytics result. The
+  // financial-statement tabs read straight from the cloud snapshot, so we
+  // let those render even if the portfolio compute is still running.
+  const isFinancialTab = tab === 'pl' || tab === 'bs' || tab === 'tb' || tab === 'vouchers';
+  if ((loading || !data) && !isFinancialTab) return <LoadingSpinner message="Computing advanced analytics..." />;
 
   const tabs = [
     { id: 'rfm', label: 'RFM Analysis' },
@@ -22,6 +29,10 @@ export default function AdvancedAnalytics() {
     { id: 'pareto', label: 'Revenue Concentration' },
     { id: 'matrix', label: 'Risk Matrix' },
     { id: 'correlation', label: 'Correlations' },
+    { id: 'pl', label: 'Profit & Loss' },
+    { id: 'bs', label: 'Balance Sheet' },
+    { id: 'tb', label: 'Trial Balance' },
+    { id: 'vouchers', label: 'All Entries' },
   ];
 
   return (
@@ -218,6 +229,13 @@ export default function AdvancedAnalytics() {
           </div>
         </div>
       )}
+
+      {/* Financial statements (data comes from the shared Tally context, not
+          the portfolio-analytics compute) */}
+      {tab === 'pl' && <ProfitLossTab financials={financials} />}
+      {tab === 'bs' && <BalanceSheetTab financials={financials} />}
+      {tab === 'tb' && <TrialBalanceTab financials={financials} />}
+      {tab === 'vouchers' && <VouchersTab financials={financials} />}
 
       {/* Correlations */}
       {tab === 'correlation' && (

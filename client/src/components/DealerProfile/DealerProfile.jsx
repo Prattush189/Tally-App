@@ -13,7 +13,7 @@ import RiskBadge from '../common/RiskBadge';
 import LoadingSpinner from '../common/LoadingSpinner';
 import api, { HAS_BACKEND } from '../../utils/api';
 import { getDealer, getDealers } from '../../lib/extendedEngine';
-import { loadLiveCustomers } from '../../lib/liveData';
+import { useTallyData } from '../../context/TallyDataContext';
 import { useAuth } from '../../context/AuthContext';
 import { fmt, TOOLTIP_STYLE, CHART_COLORS } from '../../utils/format';
 
@@ -22,6 +22,7 @@ const typeColors = { Retention: '#ef4444', 'Cross-sell': '#8b5cf6', 'SKU Deepeni
 
 export default function DealerProfile() {
   const { isDemo, user } = useAuth();
+  const { customers } = useTallyData();
   const [dealers, setDealers] = useState([]);
   const [search, setSearch] = useState('');
   const [selectedId, setSelectedId] = useState(null);
@@ -30,8 +31,8 @@ export default function DealerProfile() {
   const [listLoading, setListLoading] = useState(true);
   const [expandedSuggestion, setExpandedSuggestion] = useState(null);
 
-  // Pick the customer source: live synced data for real users, mock for demo.
-  const liveCustomers = !isDemo ? loadLiveCustomers(user?.email)?.customers : null;
+  // Pick the customer source: cloud-synced data for real users, none for demo.
+  const liveCustomers = !isDemo && customers.length ? customers : null;
   const overrides = liveCustomers ? { customers: liveCustomers } : undefined;
 
   // Load dealer list

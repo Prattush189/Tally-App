@@ -35,8 +35,14 @@ const STEPS = [
   { key: 'accountingGroups', label: 'Fetching accounting groups', etaMs: 15000 },
   { key: 'stockItems', label: 'Fetching stock items', etaMs: 20000 },
   { key: 'stockGroups', label: 'Fetching stock groups', etaMs: 12000 },
+  { key: 'profitLoss', label: 'Fetching Profit & Loss', etaMs: 15000 },
+  { key: 'balanceSheet', label: 'Fetching Balance Sheet', etaMs: 15000 },
+  { key: 'trialBalance', label: 'Fetching Trial Balance', etaMs: 18000 },
   { key: 'salesVouchers', label: 'Fetching invoices (sales vouchers)', etaMs: 45000 },
-  { key: 'receiptVouchers', label: 'Fetching payments (receipt vouchers)', etaMs: 35000 },
+  { key: 'receiptVouchers', label: 'Fetching receipts (receipt vouchers)', etaMs: 35000 },
+  { key: 'paymentVouchers', label: 'Fetching payments (payment vouchers)', etaMs: 30000 },
+  { key: 'journalVouchers', label: 'Fetching journal vouchers', etaMs: 25000 },
+  { key: 'contraVouchers', label: 'Fetching contra entries', etaMs: 20000 },
   { key: 'persist', label: 'Persisting snapshot to cloud', etaMs: 4000 },
 ];
 

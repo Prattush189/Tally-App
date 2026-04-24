@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { requestAISuggestions, AI_AVAILABLE } from '../lib/aiClient';
-import { loadLiveCustomers } from '../lib/liveData';
-import { useAuth } from '../context/AuthContext';
+import { useTallyData } from '../context/TallyDataContext';
 
 // React hook for the six Actions & Outreach pages. Calls the Gemini edge
 // function with a live Tally snapshot summary, handles loading + error +
@@ -9,7 +8,7 @@ import { useAuth } from '../context/AuthContext';
 // button. The edge function caches for 1 hour, so repeated visits are
 // cheap; forceRefresh=true asks for a fresh generation.
 export function useAISuggestions(task) {
-  const { user } = useAuth();
+  const { customers } = useTallyData();
   const [state, setState] = useState({
     loading: AI_AVAILABLE,
     data: null,
@@ -23,13 +22,12 @@ export function useAISuggestions(task) {
       setState({ loading: false, data: null, error: null, configured: false, cached: false });
       return;
     }
-    const live = loadLiveCustomers(user?.email);
-    if (!live?.customers?.length) {
+    if (!customers.length) {
       setState({ loading: false, data: null, error: 'Sync your Tally data first — AI needs real customers to reason about.', configured: null, cached: false });
       return;
     }
     setState((s) => ({ ...s, loading: true, error: null }));
-    const result = await requestAISuggestions({ task, customers: live.customers, forceRefresh });
+    const result = await requestAISuggestions({ task, customers, forceRefresh });
     const configured = result.configured !== false;
     setState({
       loading: false,
@@ -39,7 +37,7 @@ export function useAISuggestions(task) {
       cached: Boolean(result.cached),
       setupHint: result.setupHint || null,
     });
-  }, [task, user?.email]);
+  }, [task, customers]);
 
   useEffect(() => { run(false); }, [run]);
 
