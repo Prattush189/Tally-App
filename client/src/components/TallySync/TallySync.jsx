@@ -7,7 +7,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useTallyData } from '../../context/TallyDataContext';
 import {
   TALLY_BACKEND, tallyAvailable, syncFromTally,
-  getStatus, getDataSummary, getCompanies, deleteSnapshot,
+  getStatus, getDataSummary, getCompanies, deleteSnapshot, loadFromSnapshot,
 } from '../../lib/tallyClient';
 import { transformTallyLedgers, transformTallyFull } from '../../lib/tallyTransformer';
 import { availableRanges, rangeByKey } from '../../utils/dateRange';
@@ -288,7 +288,15 @@ export default function TallySync() {
   // visibility-return, not window-focus (too aggressive — flickers on every
   // alt-tab). Refs (not state) keep in-flight metadata visible without
   // re-subscribing the listener every toggle.
-  const MIN_HIDDEN_MS = 15_000;          // ignore brief tab-switches
+  //
+  // MIN_HIDDEN_MS was 15s, and the gate used `longEnough || syncingRef` —
+  // which meant ANY brief tab-switch during sync (including 1-2 s
+  // alt-tabs to read another panel) force-stopped the live progress UI
+  // and repainted it with the recovery stub. Real syncs take 60-140 s,
+  // so 15 s almost always hijacked an in-flight run. Bumped to 75 s and
+  // gated with AND — we only fire recovery once we're genuinely past the
+  // point where a normal sync would have come back.
+  const MIN_HIDDEN_MS = 75_000;
   const syncingRef = useRef(false);
   const syncStartedAtRef = useRef(null);
   const hiddenSinceRef = useRef(null);
@@ -305,54 +313,80 @@ export default function TallySync() {
       const since = hiddenSinceRef.current;
       hiddenSinceRef.current = null;
       const longEnough = since && Date.now() - since > MIN_HIDDEN_MS;
-      if (longEnough || syncingRef.current) {
+      // Only run recovery when the tab was really hidden long enough that
+      // Chrome might have suspended the fetch — AND either the original
+      // sync is still showing as active (we need to unstick it) or we
+      // genuinely want to repoll the cloud to catch a sync that happened
+      // on a different PC. OR-ing syncingRef alone here (the old shape)
+      // meant every brief alt-tab torpedoed an in-flight sync.
+      if (longEnough) {
         // Re-pull from cloud AND wait so we can populate real record counts
         // in the recovery banner instead of the misleading "No records
         // returned" placeholder. Every dashboard reads via the context, so
         // one refresh propagates.
         const wasSyncing = syncingRef.current;
-        refreshTallyData().finally(() => {
-          if (wasSyncing) {
-            setSyncing(false);
-            setSyncStartedAt(null);
-            setSyncResult((r) => {
-              if (r) return r;
-              // Be honest about what the cloud snapshot actually holds.
-              // Previously this always claimed `success: true` and surfaced
-              // a green "Synced successfully" banner — which was misleading
-              // when the edge function had failed mid-run (e.g. compute
-              // OOM on a heavy Day Book) and nothing had landed in cloud.
-              // Users saw "success" and then "No Tally data synced yet" on
-              // dashboards, which looks like the app lied to them. Only
-              // claim success when there's real data under this tenant.
-              const hasData = Boolean(liveCustomers.length)
-                || Number(liveTotals?.ledgers) > 0
-                || Number(liveTotals?.salesVouchers) > 0
-                || Number(liveTotals?.receiptVouchers) > 0
-                || Number(liveTotals?.stockItems) > 0;
-              if (hasData) {
-                return {
-                  success: true,
-                  mode: 'full',
-                  note: 'Sync finished in the background while this tab was hidden — data loaded from the cloud snapshot.',
-                  dealersStored: liveCustomers.length,
-                  ledgers: liveTotals?.ledgers,
-                  salesVouchers: liveTotals?.salesVouchers,
-                  receiptVouchers: liveTotals?.receiptVouchers,
-                  paymentVouchers: liveTotals?.paymentVouchers,
-                  stockItems: liveTotals?.stockItems,
-                  stockGroups: liveTotals?.stockGroups,
-                };
-              }
+        // Pull both the context (to drive hasLiveData) AND the raw snapshot
+        // metadata in parallel. The raw snapshot is what tells us WHICH
+        // collection errored with what message — without that the recovery
+        // banner can only say "something went wrong" and the user has no
+        // way to diagnose. loadFromSnapshot returns counts + collectionErrors
+        // from the server-side row, so we can feed real per-collection
+        // status into the existing SyncProgress panel.
+        Promise.allSettled([refreshTallyData(), loadFromSnapshot()]).then(([_, snapRes]) => {
+          if (!wasSyncing) return;
+          const snap = snapRes?.status === 'fulfilled' ? snapRes.value : null;
+          const snapCounts = snap?.raw ? (snap || {}) : {};
+          const snapErrors = snap?.collectionErrors || {};
+          setSyncing(false);
+          setSyncStartedAt(null);
+          setSyncResult((r) => {
+            if (r) return r;
+            const hasData = Boolean(liveCustomers.length)
+              || Number(snapCounts.ledgers) > 0
+              || Number(snapCounts.salesVouchers) > 0
+              || Number(snapCounts.receiptVouchers) > 0
+              || Number(snapCounts.stockItems) > 0;
+            // Per-collection errors came back from the cloud row: at least
+            // ONE job got far enough to write its error into the snapshot.
+            // That means the edge function ran, just didn't produce data —
+            // the user can see which tunnel/auth/compute error hit which
+            // collection in the existing progress panel.
+            const hasServerErrors = Object.keys(snapErrors).length > 0;
+            if (hasData) {
+              return {
+                success: true,
+                mode: 'full',
+                note: 'Sync finished in the background while this tab was hidden — data loaded from the cloud snapshot.',
+                dealersStored: liveCustomers.length,
+                ledgers: snapCounts.ledgers,
+                salesVouchers: snapCounts.salesVouchers,
+                receiptVouchers: snapCounts.receiptVouchers,
+                paymentVouchers: snapCounts.paymentVouchers,
+                stockItems: snapCounts.stockItems,
+                stockGroups: snapCounts.stockGroups,
+                collectionErrors: snapErrors,
+                fetched: Object.keys(snapCounts).filter((k) => typeof snapCounts[k] === 'number'),
+              };
+            }
+            if (hasServerErrors) {
+              const firstErr = Object.values(snapErrors)[0];
               return {
                 success: false,
                 mode: 'full',
                 partial: true,
-                error: 'Sync did not return data while this tab was hidden, and the cloud snapshot is still empty. The edge function may have run out of compute or Tally was unreachable — open the browser back on this tab, press Sync again, and watch the progress panel. If it keeps failing, check Supabase Edge Function logs for the tally function.',
-                collectionErrors: {},
+                error: `Sync finished server-side but every collection failed. First error: ${String(firstErr).slice(0, 200)}. See per-collection details below.`,
+                collectionErrors: snapErrors,
+                fetched: [],
               };
-            });
-          }
+            }
+            return {
+              success: false,
+              mode: 'full',
+              partial: true,
+              error: 'Sync did not return data while this tab was hidden, and the cloud snapshot is still empty. Usually means one of: (1) the edge-function deploy has not propagated yet — check EDGE_BUILD_ID on a future success banner, (2) Tally/RemoteApp is not running on the configured :9007, or (3) the edge function hit its 150 s wall-clock budget. Press Sync again WITHOUT switching tabs so you can watch the live progress, and check Supabase Edge Function logs if it keeps failing.',
+              collectionErrors: {},
+            };
+          });
         });
       }
     };

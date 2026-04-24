@@ -386,6 +386,19 @@ async function tallyRequest(xml: string, cfg: Required<TallyConfig>, timeoutMs =
     }
     if (!res.ok) throw new Error(`Tally returned HTTP ${res.status}: ${res.statusText}`);
     const text = await res.text();
+    // Hard memory guard. fast-xml-parser allocates a parse tree roughly
+    // 2-3x the raw XML size, and JSON.stringify on that tree (what the
+    // merge RPC body needs) doubles peak memory again. If a single
+    // response is already pushing 40 MB of text, parsing it on the
+    // 150 MB Edge Function would OOM-kill the whole invocation —
+    // taking the rest of the sync down with it. Better to surface a
+    // clean per-collection error and let the other collections land.
+    const MAX_XML_BYTES = 40 * 1024 * 1024;
+    if (text.length > MAX_XML_BYTES) {
+      throw new Error(
+        `Tally response too large to parse in the Edge Function (${Math.round(text.length / 1024 / 1024)} MB > ${MAX_XML_BYTES / 1024 / 1024} MB). Narrow the date range (the default is 5 years — try 1-2 years) or split the collection further.`,
+      );
+    }
     return parser.parse(text);
   } finally {
     clearTimeout(timer);
@@ -816,7 +829,7 @@ function rollupDayBookList(keys: string[]): string[] {
 // tell which edge-function revision it's talking to. Bump manually when
 // deploys need verification; the value is purely informational. Useful
 // when diagnosing "is my fix live yet?" without digging into Actions logs.
-const EDGE_BUILD_ID = '2026-04-24-daybook-fastbail';
+const EDGE_BUILD_ID = '2026-04-24-xml-size-guard';
 
 // Merge a new sync result into the existing tally_snapshots row. Idempotent
 // — collections not included in `incoming.data` retain their prior values
