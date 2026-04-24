@@ -148,11 +148,13 @@ export async function syncFromTally(config = {}) {
         paymentVouchers: counts.paymentVouchers || 0,
         journalVouchers: counts.journalVouchers || 0,
         contraVouchers: counts.contraVouchers || 0,
+        dayBook: counts.dayBook || 0,
         stockItems: counts.stockItems || 0,
         stockGroups: counts.stockGroups || 0,
         profitLoss: counts.profitLoss || 0,
         balanceSheet: counts.balanceSheet || 0,
         trialBalance: counts.trialBalance || 0,
+        edgeBuildId: data?.edgeBuildId || null,
         collectionErrors: errors,
         raw: bundle,
         discoveredCompanies: data?.discoveredCompanies || [],
@@ -284,6 +286,22 @@ export async function loadFromSnapshot(tenantKey = 'default', company) {
       collectionErrors: data?.errors || {},
       raw: data?.data || {},
     };
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+// Nuke the current cloud snapshot for this tenant (+ active company).
+// The dashboards' next refresh will pull an empty row → hasLiveData flips
+// false → NoDataNotice. Meant for the "Clear" button on the TallySync
+// card when a stale / bad sync is stuck in tally_snapshots.
+export async function deleteSnapshot(tenantKey = 'default', company) {
+  if (TALLY_BACKEND !== 'supabase') return { success: false, error: 'Snapshot delete requires the Supabase backend.' };
+  try {
+    const body = { tenantKey };
+    if (company) body.company = company;
+    const data = await supabaseInvoke('delete-snapshot', body);
+    return { success: Boolean(data?.deleted), data };
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err) };
   }

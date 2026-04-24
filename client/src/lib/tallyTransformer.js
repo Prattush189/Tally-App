@@ -548,6 +548,10 @@ export function transformTallyFull(bundle, options = {}) {
   const paymentsTree = bundle?.paymentVouchers ?? null;
   const journalsTree = bundle?.journalVouchers ?? null;
   const contrasTree = bundle?.contraVouchers ?? null;
+  // Day Book is a safety-net catch-all: if any type-specific register
+  // returned 0 because Tally didn't recognise the voucher-type name,
+  // Day Book still pulls everything and we split by VOUCHERTYPENAME below.
+  const dayBookTree = bundle?.dayBook ?? null;
   const stockItemsTree = bundle?.stockItems ?? null;
   const stockGroupsTree = bundle?.stockGroups ?? null;
   const profitLossTree = bundle?.profitLoss ?? null;
@@ -581,6 +585,7 @@ export function transformTallyFull(bundle, options = {}) {
     ...extractCollection(paymentsTree, 'VOUCHER'),
     ...extractCollection(journalsTree, 'VOUCHER'),
     ...extractCollection(contrasTree, 'VOUCHER'),
+    ...extractCollection(dayBookTree, 'VOUCHER'),
   ];
   const seenKeys = new Set();
   const dedupedVouchers = [];

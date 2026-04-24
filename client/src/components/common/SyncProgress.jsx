@@ -43,6 +43,7 @@ const STEPS = [
   { key: 'paymentVouchers', label: 'Fetching payments (payment vouchers)', etaMs: 30000 },
   { key: 'journalVouchers', label: 'Fetching journal vouchers', etaMs: 25000 },
   { key: 'contraVouchers', label: 'Fetching contra entries', etaMs: 20000 },
+  { key: 'dayBook', label: 'Fetching Day Book (all vouchers)', etaMs: 60000 },
   { key: 'persist', label: 'Persisting snapshot to cloud', etaMs: 4000 },
 ];
 
@@ -155,9 +156,18 @@ export default function SyncProgress({ active, result, progressCompany }) {
       return null;
     }
     const countMap = {
-      ledgers: result.ledgers, salesVouchers: result.salesVouchers,
-      receiptVouchers: result.receiptVouchers, stockItems: result.stockItems,
+      ledgers: result.ledgers,
+      salesVouchers: result.salesVouchers,
+      receiptVouchers: result.receiptVouchers,
+      paymentVouchers: result.paymentVouchers,
+      journalVouchers: result.journalVouchers,
+      contraVouchers: result.contraVouchers,
+      dayBook: result.dayBook,
+      stockItems: result.stockItems,
       stockGroups: result.stockGroups,
+      profitLoss: result.profitLoss,
+      balanceSheet: result.balanceSheet,
+      trialBalance: result.trialBalance,
     };
     if (countMap[step.key] != null) return `${countMap[step.key]} records`;
     if (errKeys.has(step.key)) {
