@@ -331,15 +331,28 @@ export default function TallySync() {
   // context refresh that follows. Used when a bad sync leaves stale counts
   // in collection_meta and the TTL-based skipFresh optimisation keeps
   // honouring them.
+  //
+  // We keep the existing `syncResult` (if any) visible while the DELETE
+  // round-trip runs, so the user doesn't lose the previous sync's
+  // diagnostic panel just because they clicked Clear by mistake. Result
+  // only clears once deleteSnapshot returns.
+  const [clearing, setClearing] = useState(false);
   const handleClearLiveData = async () => {
-    if (isDemo) return;
-    setSyncResult(null);
-    const r = await deleteSnapshot();
-    if (r.success) {
-      await refreshTallyData();
-      setSyncResult({ success: true, cleared: true });
-    } else {
-      setSyncResult({ success: false, error: r.error || 'Failed to clear snapshot.' });
+    if (isDemo || clearing) return;
+    setClearing(true);
+    try {
+      const r = await deleteSnapshot();
+      if (r.success) {
+        await refreshTallyData();
+        setSyncResult({ success: true, cleared: true });
+      } else {
+        setSyncResult({
+          success: false,
+          error: `Failed to clear snapshot: ${r.error || 'unknown error (edge function may not be redeployed yet)'}`,
+        });
+      }
+    } finally {
+      setClearing(false);
     }
   };
 
@@ -695,8 +708,13 @@ export default function TallySync() {
                 <span>
                   <span className="text-gray-300">{liveSnapshot.customers.length}</span> dealers cached from {new Date(liveSnapshot.syncedAt).toLocaleString()}
                 </span>
-                <button type="button" onClick={handleClearLiveData} className="text-red-300/80 hover:text-red-200 underline underline-offset-2">
-                  Clear
+                <button
+                  type="button"
+                  onClick={handleClearLiveData}
+                  disabled={clearing}
+                  className="text-red-300/80 hover:text-red-200 underline underline-offset-2 disabled:opacity-40 disabled:cursor-wait"
+                >
+                  {clearing ? 'Clearing…' : 'Clear'}
                 </button>
               </div>
             )}

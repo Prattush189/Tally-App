@@ -301,7 +301,17 @@ export async function deleteSnapshot(tenantKey = 'default', company) {
     const body = { tenantKey };
     if (company) body.company = company;
     const data = await supabaseInvoke('delete-snapshot', body);
-    return { success: Boolean(data?.deleted), data };
+    // The edge function can return `{connected: false, error: '...'}` with a
+    // 200 status when the service role key is missing or the action hasn't
+    // deployed. Propagate that error to the caller — otherwise the Clear
+    // button silently falls into the "Failed to clear snapshot" fallback
+    // with no indication of the underlying cause.
+    if (data?.deleted) return { success: true, data };
+    return {
+      success: false,
+      error: data?.error || 'delete-snapshot returned no confirmation (edge function may not be deployed yet — check the EDGE_BUILD_ID in the last sync result).',
+      data,
+    };
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err) };
   }
