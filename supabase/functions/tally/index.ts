@@ -816,7 +816,7 @@ function rollupDayBookList(keys: string[]): string[] {
 // tell which edge-function revision it's talking to. Bump manually when
 // deploys need verification; the value is purely informational. Useful
 // when diagnosing "is my fix live yet?" without digging into Actions logs.
-const EDGE_BUILD_ID = '2026-04-24-daybook-yearly-chunks';
+const EDGE_BUILD_ID = '2026-04-24-daybook-fastbail';
 
 // Merge a new sync result into the existing tally_snapshots row. Idempotent
 // — collections not included in `incoming.data` retain their prior values
@@ -1566,10 +1566,18 @@ Deno.serve(async (req) => {
     // one resident alongside the other collection trees would put us
     // right back over the compute cap.
     const HEAVY_KEYS = new Set<string>(['dayBook', ...dayBookSubKeys]);
+    const dayBookSubKeySet = new Set<string>(dayBookSubKeys);
     const data: Record<string, unknown> = {};
     const counts: Record<string, number> = {};
     const errors: Record<string, string> = {};
     let anyConnected = false;
+    // Fast-bail guard for the per-year Day Book chunks. If the first chunk
+    // fails with a connection-class error the tunnel is clearly down for
+    // vouchers, and burning the remaining 4-6 chunks each at ~10s a pop
+    // can eat the 150 s Edge Function runtime on top of every other
+    // failed job. Once this flips true we skip the rest of the Day Book
+    // shards with a clear reason instead of silently dropping.
+    let dayBookShortCircuit: string | null = null;
     let first = true;
     for (const job of jobs) {
       // Cooldown between calls. Observed behaviour: after a big response
@@ -1584,6 +1592,14 @@ Deno.serve(async (req) => {
       if (budget <= 1000) {
         counts[job.key] = 0;
         errors[job.key] = 'Skipped — wall-clock budget exhausted by earlier queries';
+        continue;
+      }
+      // Day Book shards after the first failed one: skip immediately so
+      // a dead tunnel doesn't chew 60-70 s of wall clock on repeated
+      // doomed fetches.
+      if (dayBookShortCircuit && dayBookSubKeySet.has(job.key)) {
+        counts[job.key] = 0;
+        errors[job.key] = `Skipped — earlier Day Book chunk failed (${dayBookShortCircuit}); tunnel likely down for vouchers`;
         continue;
       }
       const timeout = Math.min(job.timeoutMs, budget);
@@ -1615,7 +1631,19 @@ Deno.serve(async (req) => {
       }
       if (lastErr) {
         counts[job.key] = 0;
-        errors[job.key] = lastErr instanceof Error ? lastErr.message : String(lastErr);
+        const errMsg = lastErr instanceof Error ? lastErr.message : String(lastErr);
+        errors[job.key] = errMsg;
+        // Flip the Day Book fast-bail when the FIRST shard dies with a
+        // connection-class error. We don't want to short-circuit on a
+        // 4xx/5xx from Tally (that's a config / permission issue we
+        // should surface per-shard) or on an already-aborted deadline.
+        if (
+          !dayBookShortCircuit
+          && dayBookSubKeySet.has(job.key)
+          && /reset by peer|ECONNRESET|network error|signal has been aborted|fetch failed|connection closed/i.test(errMsg)
+        ) {
+          dayBookShortCircuit = errMsg.slice(0, 120);
+        }
       } else {
         counts[job.key] = countNode(result, job.node);
         anyConnected = true;

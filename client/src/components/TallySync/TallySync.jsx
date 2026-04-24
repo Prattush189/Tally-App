@@ -315,17 +315,42 @@ export default function TallySync() {
           if (wasSyncing) {
             setSyncing(false);
             setSyncStartedAt(null);
-            setSyncResult((r) => r || {
-              success: true,
-              mode: 'full',
-              note: 'Sync finished in the background while this tab was hidden — data loaded from the cloud snapshot.',
-              dealersStored: liveCustomers.length,
-              ledgers: liveTotals?.ledgers,
-              salesVouchers: liveTotals?.salesVouchers,
-              receiptVouchers: liveTotals?.receiptVouchers,
-              paymentVouchers: liveTotals?.paymentVouchers,
-              stockItems: liveTotals?.stockItems,
-              stockGroups: liveTotals?.stockGroups,
+            setSyncResult((r) => {
+              if (r) return r;
+              // Be honest about what the cloud snapshot actually holds.
+              // Previously this always claimed `success: true` and surfaced
+              // a green "Synced successfully" banner — which was misleading
+              // when the edge function had failed mid-run (e.g. compute
+              // OOM on a heavy Day Book) and nothing had landed in cloud.
+              // Users saw "success" and then "No Tally data synced yet" on
+              // dashboards, which looks like the app lied to them. Only
+              // claim success when there's real data under this tenant.
+              const hasData = Boolean(liveCustomers.length)
+                || Number(liveTotals?.ledgers) > 0
+                || Number(liveTotals?.salesVouchers) > 0
+                || Number(liveTotals?.receiptVouchers) > 0
+                || Number(liveTotals?.stockItems) > 0;
+              if (hasData) {
+                return {
+                  success: true,
+                  mode: 'full',
+                  note: 'Sync finished in the background while this tab was hidden — data loaded from the cloud snapshot.',
+                  dealersStored: liveCustomers.length,
+                  ledgers: liveTotals?.ledgers,
+                  salesVouchers: liveTotals?.salesVouchers,
+                  receiptVouchers: liveTotals?.receiptVouchers,
+                  paymentVouchers: liveTotals?.paymentVouchers,
+                  stockItems: liveTotals?.stockItems,
+                  stockGroups: liveTotals?.stockGroups,
+                };
+              }
+              return {
+                success: false,
+                mode: 'full',
+                partial: true,
+                error: 'Sync did not return data while this tab was hidden, and the cloud snapshot is still empty. The edge function may have run out of compute or Tally was unreachable — open the browser back on this tab, press Sync again, and watch the progress panel. If it keeps failing, check Supabase Edge Function logs for the tally function.',
+                collectionErrors: {},
+              };
             });
           }
         });
@@ -333,7 +358,7 @@ export default function TallySync() {
     };
     document.addEventListener('visibilitychange', onVisibilityChange);
     return () => document.removeEventListener('visibilitychange', onVisibilityChange);
-  }, [available, isDemo, refreshTallyData]);
+  }, [available, isDemo, refreshTallyData, liveCustomers.length, liveTotals]);
 
   // "Clear" wipes the cloud snapshot for this tenant — that's where
   // dashboards read from. Local browser state is already reactive to the
