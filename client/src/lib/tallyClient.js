@@ -195,6 +195,38 @@ export async function syncFromTally(config = {}) {
   throw new Error('Tally is not available on this deployment.');
 }
 
+// Company discovery only — the edge function probes Tally's "List of
+// Companies" report, persists the result to tally_companies, and
+// resolves the active_company. No collection fetches happen here, so
+// it always returns quickly (~2-5 s). This is the entry point for the
+// client-driven per-phase sync: fire sync-discover, then chain a
+// sync-collection call per phase with a cooldown in between (see
+// syncAllPhases).
+export async function syncDiscover(config = {}) {
+  if (TALLY_BACKEND !== 'supabase') {
+    throw new Error('sync-discover requires the Supabase backend.');
+  }
+  const data = await supabaseInvoke('sync-discover', config);
+  if (Array.isArray(data?.discoveredCompanies) && data.discoveredCompanies.length) {
+    try {
+      localStorage.setItem('b2b_tally_companies_cache', JSON.stringify({
+        companies: data.discoveredCompanies,
+        activeCompany: data.activeCompany || data.discoveredCompanies[0],
+        at: Date.now(),
+      }));
+    } catch { /* quota / private mode */ }
+  }
+  return {
+    connected: Boolean(data?.connected),
+    activeCompany: data?.activeCompany || '',
+    discoveredCompanies: data?.discoveredCompanies || [],
+    discoveryError: data?.discoveryError || null,
+    discoveryRawSample: data?.discoveryRawSample || null,
+    diagnostics: data?.diagnostics || null,
+    edgeBuildId: data?.edgeBuildId || null,
+  };
+}
+
 // Fetch + persist ONE named collection via the edge function's
 // sync-collection action. Runs in a fresh isolate with its own 150 s
 // wall clock and 150 MB compute budget, which is how heavy Day Book
@@ -221,6 +253,246 @@ export async function syncCollection({ key, company, config = {} }) {
     portalUsername: config.portalUsername,
     portalPassword: config.portalPassword,
   });
+}
+
+// Ordered list of non-Day-Book phases every sync walks. Kept in one place so
+// SyncProgress, handleSync and any scheduler stay in lockstep.
+export const CORE_SYNC_PHASES = [
+  'ledgers',
+  'accountingGroups',
+  'stockItems',
+  'stockGroups',
+  'profitLoss',
+  'balanceSheet',
+  'trialBalance',
+];
+
+// Build the per-year Day Book phase keys for the requested date window.
+// Mirrors dayBookYearChunks() on the edge function. "All data" expands to
+// the 5-year window the edge function uses; a sub-90-day window collapses
+// to the single legacy "dayBook" key so the cached snapshot stays
+// byte-compatible with older runs.
+export function dayBookPhaseKeys({ allData, fromDate, toDate } = {}) {
+  const today = new Date();
+  if (allData) {
+    const startYear = today.getFullYear() - 4;
+    const endYear = today.getFullYear();
+    const keys = [];
+    for (let y = startYear; y <= endYear; y++) keys.push(`dayBook_${y}`);
+    return keys;
+  }
+  const fY = fromDate && /^\d{4}/.test(fromDate) ? Number(fromDate.slice(0, 4)) : NaN;
+  const tY = toDate && /^\d{4}/.test(toDate) ? Number(toDate.slice(0, 4)) : NaN;
+  if (!Number.isFinite(fY) || !Number.isFinite(tY) || fY === tY) {
+    // Sub-year window → single legacy chunk so cached snapshots stay compatible.
+    return ['dayBook'];
+  }
+  const keys = [];
+  for (let y = fY; y <= tY; y++) keys.push(`dayBook_${y}`);
+  return keys;
+}
+
+// Sleep helper used for the inter-phase cooldown and retry backoff. Wrapped
+// so callers can abort a long wait early if the user clicks "Stop" (not yet
+// wired, but keeps the door open).
+function wait(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(new Error('aborted')); return; }
+    const t = setTimeout(resolve, ms);
+    if (signal) {
+      signal.addEventListener('abort', () => { clearTimeout(t); reject(new Error('aborted')); }, { once: true });
+    }
+  });
+}
+
+// Classify an error message as "Tally tunnel / RemoteApp just dropped the
+// socket" — those are the cases where waiting a bit and retrying often
+// succeeds because Tally itself was momentarily unresponsive (including
+// the c0000005 memory-access-violation crash pattern, which causes the
+// XML service to briefly reject connections until the Tally UI's error
+// dialog is dismissed).
+function isRetriableSyncError(msg) {
+  if (!msg) return false;
+  const s = String(msg);
+  return /reset by peer|ECONNRESET|connection reset|connection closed|connection refused|network error|fetch failed|signal has been aborted|aborted/i.test(s);
+}
+
+// Run a single phase with up to `maxAttempts` tries. Retries only on the
+// retriable-class errors above, waits `retryWaitMs` between attempts so
+// Tally's socket / RemoteApp session can recover (and, for the crash
+// pattern, so the user has a moment to dismiss the "Internal Error" dialog
+// before we hit Tally again). Non-retriable errors bubble out immediately
+// — auth/4xx/5xx responses don't get better on retry.
+async function runPhaseWithRetry({ key, company, config, maxAttempts, retryWaitMs, onAttempt }) {
+  let lastErr = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      onAttempt?.({ key, attempt, maxAttempts });
+      const res = await syncCollection({ key, company, config });
+      if (res?.error && isRetriableSyncError(res.error) && attempt < maxAttempts) {
+        lastErr = new Error(res.error);
+        await wait(retryWaitMs);
+        continue;
+      }
+      return res;
+    } catch (err) {
+      lastErr = err;
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!isRetriableSyncError(msg) || attempt >= maxAttempts) throw err;
+      await wait(retryWaitMs);
+    }
+  }
+  throw lastErr;
+}
+
+// Orchestrate a full multi-phase sync from the client. Replaces the
+// monolithic sync-full call with a sequence of per-phase sync-collection
+// invocations separated by `cooldownMs` (default 12 s). Each invocation
+// gets its OWN Edge Function isolate with a fresh 150 s / 150 MB budget,
+// so a phase that fails (e.g. a Tally memory-access-violation crash that
+// resets the TCP connection for Day Book 2021) no longer cascades into
+// skipping every remaining phase — each subsequent phase is tried
+// independently with its own retry. The cooldown between calls also
+// gives the Tally RemoteApp tunnel time to recover between hits, which is
+// the root cause the user identified.
+//
+// `onPhase(evt)` is fired for lifecycle transitions so the UI can drive a
+// real per-phase progress indicator instead of guessing with a timer.
+// Events: { type: 'discover-start' | 'discover-done' | 'phase-start' |
+// 'phase-done' | 'cooldown-start' | 'cooldown-done' | 'done', ...data }.
+export async function syncAllPhases({
+  config = {},
+  company: explicitCompany,
+  allData,
+  fromDate,
+  toDate,
+  cooldownMs = 12000,
+  maxAttemptsPerPhase = 2,
+  retryWaitMs = 15000,
+  signal,
+  onPhase,
+} = {}) {
+  if (TALLY_BACKEND !== 'supabase') {
+    throw new Error('Client-chained sync requires the Supabase backend.');
+  }
+
+  const phaseConfig = {
+    ...config,
+    allData: Boolean(allData),
+    fromDate,
+    toDate,
+  };
+
+  // 1) Company discovery — cheap probe, single invocation.
+  onPhase?.({ type: 'discover-start' });
+  let discovery;
+  try {
+    discovery = await syncDiscover({ ...config, company: explicitCompany });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    onPhase?.({ type: 'discover-done', error: msg });
+    return {
+      success: false,
+      error: `Could not reach Tally: ${msg}`,
+      partial: true,
+      discoveredCompanies: [],
+      activeCompany: '',
+      diagnostics: null,
+      collectionErrors: { discover: msg },
+      phaseResults: {},
+    };
+  }
+  onPhase?.({ type: 'discover-done', discovery });
+
+  const activeCompany = explicitCompany || discovery.activeCompany || discovery.discoveredCompanies[0] || '';
+  if (!discovery.connected && !activeCompany) {
+    return {
+      success: false,
+      error: discovery.discoveryError || 'Tally did not return any companies — is Tally running inside the RemoteApp session?',
+      partial: true,
+      discoveredCompanies: discovery.discoveredCompanies,
+      activeCompany: '',
+      diagnostics: discovery.diagnostics,
+      collectionErrors: { discover: discovery.discoveryError || 'no companies' },
+      phaseResults: {},
+      edgeBuildId: discovery.edgeBuildId,
+    };
+  }
+
+  // 2) Build the phase list. Core phases first, then per-year Day Book.
+  const dayBookKeys = dayBookPhaseKeys({ allData, fromDate, toDate });
+  const phaseKeys = [...CORE_SYNC_PHASES, ...dayBookKeys];
+
+  // 3) Walk each phase serially with a cooldown between calls. A failure
+  //    on one phase no longer blocks the next — we record the error and
+  //    keep going, which is the whole point of moving off sync-full.
+  const phaseResults = {};
+  const collectionErrors = {};
+  const counts = {};
+  let lastDiagnostics = discovery.diagnostics;
+  let anyConnected = false;
+  for (let i = 0; i < phaseKeys.length; i++) {
+    if (signal?.aborted) break;
+    const key = phaseKeys[i];
+    onPhase?.({ type: 'phase-start', key, index: i, total: phaseKeys.length });
+    try {
+      const res = await runPhaseWithRetry({
+        key,
+        company: activeCompany,
+        config: phaseConfig,
+        maxAttempts: maxAttemptsPerPhase,
+        retryWaitMs,
+        onAttempt: (evt) => onPhase?.({ type: 'phase-attempt', ...evt }),
+      });
+      phaseResults[key] = res;
+      if (res?.diagnostics) lastDiagnostics = res.diagnostics;
+      if (res?.connected) anyConnected = true;
+      if (res?.error) collectionErrors[key] = res.error;
+      counts[key] = res?.count ?? 0;
+      onPhase?.({ type: 'phase-done', key, index: i, total: phaseKeys.length, count: counts[key], error: res?.error || null });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      collectionErrors[key] = msg;
+      counts[key] = 0;
+      phaseResults[key] = { error: msg };
+      onPhase?.({ type: 'phase-done', key, index: i, total: phaseKeys.length, count: 0, error: msg });
+    }
+    if (i < phaseKeys.length - 1) {
+      onPhase?.({ type: 'cooldown-start', ms: cooldownMs });
+      try { await wait(cooldownMs, signal); } catch { break; }
+      onPhase?.({ type: 'cooldown-done' });
+    }
+  }
+
+  // Roll up per-year Day Book counts into a single aggregate so the UI's
+  // headline numbers match what sync-full used to surface.
+  const dayBookTotal = dayBookKeys.reduce((sum, k) => sum + (counts[k] || 0), 0);
+  counts.dayBook = (counts.dayBook || 0) + dayBookTotal;
+
+  const success = anyConnected && Object.values(phaseResults).some((r) => r?.connected);
+  onPhase?.({ type: 'done', success });
+  return {
+    success,
+    error: success ? null : firstMeaningfulError(collectionErrors) || 'Sync completed with errors — see per-phase details.',
+    partial: Object.keys(collectionErrors).length > 0,
+    mode: 'client-chained',
+    discoveredCompanies: discovery.discoveredCompanies,
+    activeCompany,
+    discoveryError: discovery.discoveryError,
+    diagnostics: lastDiagnostics,
+    edgeBuildId: discovery.edgeBuildId,
+    counts,
+    collectionErrors,
+    phaseResults,
+    fetched: phaseKeys.filter((k) => !collectionErrors[k]),
+  };
+}
+
+function firstMeaningfulError(errors) {
+  for (const [k, v] of Object.entries(errors || {})) {
+    if (v && typeof v === 'string') return `${k}: ${v}`;
+  }
+  return null;
 }
 
 // Fetch status (is sync configured, when was the last snapshot, what are the

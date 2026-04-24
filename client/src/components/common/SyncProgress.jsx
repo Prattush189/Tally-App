@@ -61,7 +61,7 @@ function StepRow({ step, status, detail }) {
   );
 }
 
-export default function SyncProgress({ active, result, progressCompany }) {
+export default function SyncProgress({ active, result, progressCompany, livePhase }) {
   // Wall-clock driver. While active=true we bump `elapsed` on a setInterval
   // so the optimistic step advances. When the response lands we stop the
   // timer but KEEP the final elapsed value — resetting it to 0 on !active
@@ -75,6 +75,24 @@ export default function SyncProgress({ active, result, progressCompany }) {
     const id = setInterval(() => setElapsed(Date.now() - t0), 250);
     return () => clearInterval(id);
   }, [active]);
+
+  // Ticking "now" so the cooldown countdown below rerenders each second
+  // instead of only on phase transitions. Cheap — one setState/s while
+  // active, nothing when idle.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [active]);
+
+  // Client-driven per-phase progress wins over the optimistic timer when
+  // present. `livePhase` comes from syncAllPhases' onPhase callback so we
+  // can show "ledgers: running · accountingGroups: 142 records · dayBook_2023: connection reset by peer (retry 2/2)"
+  // in real time rather than guessing from a stopwatch. Falls back to the
+  // old timer-based cursor when livePhase is null (e.g. background sync
+  // recovered from a different tab where we don't have live events).
+  const hasLiveDriver = Boolean(livePhase);
 
   // Show the Portal step whenever the server reports diagnostic
   // information for it — either it actually fired (attempted=true) OR
@@ -133,13 +151,106 @@ export default function SyncProgress({ active, result, progressCompany }) {
       if (fetchedKeys.has(step.key)) return 'done';
       return totalFailure ? 'error' : 'pending';
     }
-    // Active run — optimistic cursor.
+    // Active run, live-driver path — real per-phase status from
+    // syncAllPhases. Each step reflects what the client-chained sync is
+    // actually doing right now instead of a stopwatch guess.
+    if (hasLiveDriver) {
+      if (step.key === 'discover') {
+        const s = livePhase.discoveryStatus;
+        if (s === 'done') return 'done';
+        if (s === 'error') return 'error';
+        if (s === 'running') return 'running';
+        return 'pending';
+      }
+      if (step.key === 'persist') {
+        // Persist is implicit per-phase (each sync-collection writes its
+        // own row server-side), so mirror the last phase's state.
+        const allDone = STEPS.every((s) =>
+          s.conditional || s.key === 'persist' || s.key === 'portal'
+            || livePhase.keyStatus[s.key] === 'done'
+            || livePhase.keyStatus[s.key] === 'error');
+        if (allDone) return 'done';
+        return 'pending';
+      }
+      if (step.key === 'dayBook') {
+        // dayBook rolls up every dayBook_YYYY sub-phase. Running if any
+        // year is currently running, error if any year errored, done if
+        // every year finished cleanly, pending otherwise.
+        const dayBookKeys = Object.keys(livePhase.keyStatus).filter((k) => k.startsWith('dayBook'));
+        if (!dayBookKeys.length) {
+          if (livePhase.currentKey && livePhase.currentKey.startsWith('dayBook')) return 'running';
+          return 'pending';
+        }
+        if (dayBookKeys.some((k) => livePhase.keyStatus[k] === 'running')) return 'running';
+        if (dayBookKeys.some((k) => livePhase.keyStatus[k] === 'error')) {
+          const allFinished = dayBookKeys.every((k) => livePhase.keyStatus[k] !== 'running');
+          return allFinished ? 'error' : 'running';
+        }
+        if (dayBookKeys.every((k) => livePhase.keyStatus[k] === 'done')) return 'done';
+        return 'pending';
+      }
+      const s = livePhase.keyStatus[step.key];
+      if (s) return s;
+      return 'pending';
+    }
+    // Active run — optimistic cursor (used when livePhase is not provided,
+    // e.g. background-recovery path with no streamed events).
     if (elapsed >= step.end) return 'done';
     if (elapsed >= step.start) return 'running';
     return 'pending';
   };
 
   const detailFor = (step) => {
+    // Live-driver path: surface real-time details during an active sync
+    // so the user sees exactly what's happening (or what failed) without
+    // waiting for the whole run to finish. This is the main
+    // observability win of the per-phase architecture — each phase's
+    // error lands on its own row with its own message instead of being
+    // collapsed into "earlier Day Book chunk failed".
+    if (active && hasLiveDriver) {
+      if (step.key === 'discover') {
+        if (livePhase.discoveryStatus === 'running') return 'probing companies…';
+        if (livePhase.discoveryStatus === 'error') return 'failed';
+        return null;
+      }
+      if (step.key === 'dayBook') {
+        const entries = Object.entries(livePhase.keyStatus).filter(([k]) => k.startsWith('dayBook'));
+        const running = entries.find(([, s]) => s === 'running');
+        const errored = entries.filter(([, s]) => s === 'error');
+        if (running) {
+          const year = running[0].replace(/^dayBook_?/, '') || 'current window';
+          const attempt = livePhase.attempt?.key === running[0]
+            ? ` (retry ${livePhase.attempt.n}/${livePhase.attempt.of})` : '';
+          return `year ${year}${attempt}`;
+        }
+        if (errored.length) {
+          const [k, ] = errored[0];
+          const msg = livePhase.keyErrors[k];
+          return `${errored.length} year${errored.length === 1 ? '' : 's'} failed — ${String(msg || '').slice(0, 50)}`;
+        }
+        const total = Object.keys(livePhase.keyCounts).filter((k) => k.startsWith('dayBook')).reduce((s, k) => s + (livePhase.keyCounts[k] || 0), 0);
+        if (total > 0) return `${total} vouchers`;
+        return null;
+      }
+      // Non-dayBook live detail: show the per-phase count if it landed,
+      // the per-phase error if it failed, or "attempt N/M" while a retry
+      // is mid-flight so the user understands why the step is still
+      // spinning after 30+ seconds.
+      const s = livePhase.keyStatus[step.key];
+      if (s === 'running') {
+        if (livePhase.attempt?.key === step.key) return `retry ${livePhase.attempt.n}/${livePhase.attempt.of}`;
+        return null;
+      }
+      if (s === 'error') {
+        const msg = livePhase.keyErrors[step.key];
+        return msg ? String(msg).slice(0, 80) : 'failed';
+      }
+      if (s === 'done') {
+        const count = livePhase.keyCounts[step.key];
+        if (count != null) return `${count} records`;
+      }
+      return null;
+    }
     if (!result || active) return null;
     if (step.key === 'discover' && result.discoveredCompanies?.length) {
       return `${result.discoveredCompanies.length} company${result.discoveredCompanies.length === 1 ? '' : 'ies'}`;
@@ -173,7 +284,21 @@ export default function SyncProgress({ active, result, progressCompany }) {
   };
 
   const displayedElapsed = elapsed;
-  const pct = Math.min(100, Math.round(((result && !active) ? 100 : (elapsed / totalEta * 100))));
+  // When the live phase driver is present we compute the progress bar
+  // from real step completion rather than a stopwatch — otherwise a
+  // long retry or cooldown made the bar race past real progress.
+  const livePct = (() => {
+    if (!active || !hasLiveDriver) return null;
+    const countable = stepInfo.filter((s) => s.key !== 'persist' && s.key !== 'portal');
+    if (!countable.length) return 0;
+    const doneCount = countable.reduce((n, s) => n + (statusFor(s) === 'done' ? 1 : statusFor(s) === 'running' ? 0.5 : 0), 0);
+    return Math.round((doneCount / countable.length) * 100);
+  })();
+  const pct = Math.min(100, Math.round(
+    (result && !active) ? 100
+      : livePct != null ? livePct
+        : (elapsed / totalEta * 100)
+  ));
   const isFailure = result && !active && !result.success && !result.connected;
 
   // When the parent is mid-loop across companies, show which one is
@@ -187,6 +312,44 @@ export default function SyncProgress({ active, result, progressCompany }) {
       <p className="text-[11px] text-indigo-200/80 mt-1">
         Company {progressCompany.index} of {progressCompany.total} — <span className="text-indigo-100">{progressCompany.name}</span>
       </p>
+    );
+  })();
+
+  // Cooldown banner — visible while syncAllPhases is waiting between
+  // phases so the user understands why the bar is idle for 12 s. Without
+  // this the UI looked frozen.
+  const cooldownBanner = (() => {
+    if (!active || !hasLiveDriver) return null;
+    const ends = livePhase.cooldownEndsAt;
+    if (!ends) return null;
+    const remaining = Math.max(0, ends - now);
+    if (remaining <= 0) return null;
+    return (
+      <p className="text-[11px] text-amber-300/80 mt-3">
+        Pausing {Math.ceil(remaining / 1000)} s before the next phase — lets Tally's RemoteApp tunnel recover between calls.
+      </p>
+    );
+  })();
+
+  // Live error log: during an active sync, surface every per-phase error
+  // immediately under the step list. This is the whole reason we split
+  // sync into separate edge invocations — each phase's failure is its
+  // own line with its own message, instead of being hidden behind a
+  // single "earlier Day Book chunk failed" cascade.
+  const liveErrorLog = (() => {
+    if (!active || !hasLiveDriver) return null;
+    const entries = Object.entries(livePhase.keyErrors || {});
+    if (!entries.length) return null;
+    return (
+      <div className="mt-3 pt-3 border-t border-red-500/20 space-y-1">
+        <p className="text-[11px] text-red-400 uppercase tracking-wider mb-1">Errors so far</p>
+        {entries.map(([k, msg]) => (
+          <div key={k} className="text-[11px] text-red-300/90">
+            <span className="font-mono text-red-400/80">{k}</span>
+            <span className="text-red-300/70"> — {String(msg).slice(0, 200)}</span>
+          </div>
+        ))}
+      </div>
     );
   })();
 
@@ -235,6 +398,8 @@ export default function SyncProgress({ active, result, progressCompany }) {
           <StepRow key={s.key} step={s} status={statusFor(s)} detail={detailFor(s)} />
         ))}
       </div>
+      {cooldownBanner}
+      {liveErrorLog}
       {perCompanyRows}
       {result?.fellBackToSnapshot && !active && (
         <p className="text-[11px] text-cyan-300/80 mt-3">

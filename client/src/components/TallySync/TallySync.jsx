@@ -6,8 +6,9 @@ import { fmt } from '../../utils/format';
 import { useAuth } from '../../context/AuthContext';
 import { useTallyData } from '../../context/TallyDataContext';
 import {
-  TALLY_BACKEND, tallyAvailable, syncFromTally,
-  getStatus, getDataSummary, getCompanies, deleteSnapshot, loadFromSnapshot, syncCollection,
+  TALLY_BACKEND, tallyAvailable,
+  getStatus, getDataSummary, getCompanies, deleteSnapshot, loadFromSnapshot,
+  syncAllPhases,
 } from '../../lib/tallyClient';
 import { transformTallyLedgers, transformTallyFull } from '../../lib/tallyTransformer';
 import { availableRanges, rangeByKey } from '../../utils/dateRange';
@@ -58,41 +59,6 @@ function loadTallyConfig() {
   } catch {
     return { ip: '', port: '', username: '', password: '', portalUsername: '', portalPassword: '' };
   }
-}
-
-// Walk the first-pass sync result and return every (company, year)
-// pair whose Day Book shard didn't land. Used by the completion pass
-// to retry just those years via sync-collection. A year counts as
-// "missing" if the collectionErrors map has a dayBook entry AND the
-// count came back as 0 — successful empty years (a business that
-// genuinely had no vouchers that year) are left alone so we don't
-// hammer the tunnel retrying confirmed-empty windows. Yields the
-// full dayBook_YYYY keys so callers can pass them straight to
-// sync-collection.
-function computeMissingDayBookYears(resultsMap) {
-  const today = new Date();
-  const startYear = today.getFullYear() - 5;
-  const endYear = today.getFullYear() + 1;
-  const out = [];
-  for (const [name, res] of resultsMap.entries()) {
-    const companyName = name === '(default)' ? '' : name;
-    if (!companyName) continue;
-    const errs = res?.collectionErrors || {};
-    const hadDayBookError = /aborted|budget|compute|connection|timeout|size/i.test(String(errs.dayBook || ''));
-    const dayBookCount = Number(res?.dayBook || 0);
-    // If either the aggregated Day Book errored OR the count is
-    // suspiciously low (0 for a tenant with real ledgers), retry
-    // every year defensively. Dedup is cheap — merge_tally_snapshot_key
-    // overwrites per-key, so re-running a year that did land is a
-    // no-op in steady state.
-    const ledgerCount = Number(res?.ledgers || 0);
-    const suspicious = ledgerCount > 10 && dayBookCount === 0;
-    if (!hadDayBookError && !suspicious) continue;
-    for (let y = startYear; y <= endYear; y++) {
-      out.push({ company: companyName, year: y, key: `dayBook_${y}` });
-    }
-  }
-  return out;
 }
 
 export default function TallySync() {
@@ -175,20 +141,104 @@ export default function TallySync() {
   // top-bar picker.
   const [progressCompany, setProgressCompany] = useState({ name: '', index: 0, total: 1 });
 
-  // Run sync-full once for a single company (or the default / discovered
-  // one if blank). Transforms + persists the result. Returns the raw
-  // result plus `dealersStored` so the caller can decide whether to save
-  // this company's data as the dashboards' active customer list.
+  // Live per-phase state, driven by syncAllPhases' onPhase callback. Lets
+  // SyncProgress show the true current phase + per-phase status/counts
+  // instead of the previous timer-based optimistic cursor. Shape:
+  //   { currentKey, keyStatus: { [key]: 'running' | 'done' | 'error' },
+  //     keyCounts: { [key]: number }, keyErrors: { [key]: string },
+  //     cooldownEndsAt: number | null, attempt: { key, n, of } | null }
+  const [livePhase, setLivePhase] = useState(null);
+
+  // Run the per-phase chained sync for a single company. Replaces the old
+  // monolithic sync-full call. Each phase hits sync-collection in its own
+  // Edge Function isolate (fresh 150 s / 150 MB budget), separated by a
+  // 12 s cooldown so Tally's RemoteApp tunnel can recover between hits.
+  // A connection-reset error on one phase (e.g. Tally's c0000005 memory
+  // access violation momentarily dropping the XML socket) no longer
+  // cascades into skipping every subsequent phase — each phase is tried
+  // independently with its own retry.
+  //
+  // After all phases finish we load the persisted snapshot from the cloud
+  // so the transformer can populate customers / totals / diagnostics.
+  // Phase results themselves only carry counts + per-phase errors; the
+  // actual data tree lives in tally_snapshots and is pulled by
+  // loadFromSnapshot once the walk is done.
   const syncOneCompany = async (companyName) => {
-    const body = { ...backendCreds(), fromDate: activeRange.fromDate, toDate: activeRange.toDate };
-    if (activeRange.allData) body.allData = true;
-    if (companyName) body.company = companyName;
-    let r = null;
+    const phaseEvents = (evt) => {
+      setLivePhase((prev) => {
+        const next = {
+          currentKey: prev?.currentKey || null,
+          keyStatus: { ...(prev?.keyStatus || {}) },
+          keyCounts: { ...(prev?.keyCounts || {}) },
+          keyErrors: { ...(prev?.keyErrors || {}) },
+          cooldownEndsAt: prev?.cooldownEndsAt || null,
+          attempt: prev?.attempt || null,
+          discoveryStatus: prev?.discoveryStatus || 'pending',
+        };
+        if (evt.type === 'discover-start') {
+          next.discoveryStatus = 'running';
+        } else if (evt.type === 'discover-done') {
+          next.discoveryStatus = evt.error ? 'error' : 'done';
+        } else if (evt.type === 'phase-start') {
+          next.currentKey = evt.key;
+          next.keyStatus[evt.key] = 'running';
+          next.cooldownEndsAt = null;
+          next.attempt = null;
+        } else if (evt.type === 'phase-attempt') {
+          if (evt.attempt > 1) next.attempt = { key: evt.key, n: evt.attempt, of: evt.maxAttempts };
+          else next.attempt = null;
+        } else if (evt.type === 'phase-done') {
+          next.keyStatus[evt.key] = evt.error ? 'error' : 'done';
+          if (evt.count != null) next.keyCounts[evt.key] = evt.count;
+          if (evt.error) next.keyErrors[evt.key] = evt.error;
+          next.attempt = null;
+        } else if (evt.type === 'cooldown-start') {
+          next.cooldownEndsAt = Date.now() + (evt.ms || 0);
+        } else if (evt.type === 'cooldown-done') {
+          next.cooldownEndsAt = null;
+        } else if (evt.type === 'done') {
+          next.currentKey = null;
+          next.cooldownEndsAt = null;
+        }
+        return next;
+      });
+    };
+
+    let r;
     try {
-      r = await syncFromTally(body);
-      if (r?.success && r?.raw) {
+      r = await syncAllPhases({
+        config: backendCreds(),
+        company: companyName || undefined,
+        allData: Boolean(activeRange.allData),
+        fromDate: activeRange.fromDate,
+        toDate: activeRange.toDate,
+        onPhase: phaseEvents,
+      });
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err), mode: 'client-chained' };
+    }
+
+    // Hydrate with the persisted snapshot so the transformer has the raw
+    // data tree (phases only return counts + errors). Skip when the run
+    // couldn't even establish discovery — nothing would be there.
+    try {
+      const snap = await loadFromSnapshot(undefined, r.activeCompany || companyName || undefined);
+      if (snap?.success && snap.raw) {
+        r.raw = snap.raw;
+        r.ledgers = snap.ledgers ?? r.counts?.ledgers ?? 0;
+        r.salesVouchers = snap.salesVouchers ?? 0;
+        r.receiptVouchers = snap.receiptVouchers ?? 0;
+        r.stockItems = snap.stockItems ?? r.counts?.stockItems ?? 0;
+        r.stockGroups = snap.stockGroups ?? r.counts?.stockGroups ?? 0;
+        r.dayBook = r.counts?.dayBook ?? 0;
+        r.profitLoss = r.counts?.profitLoss ?? 0;
+        r.balanceSheet = r.counts?.balanceSheet ?? 0;
+        r.trialBalance = r.counts?.trialBalance ?? 0;
+        // Merge server-persisted error map so partial failures landed on
+        // prior phases still appear in the UI.
+        r.collectionErrors = { ...(snap.collectionErrors || {}), ...(r.collectionErrors || {}) };
         try {
-          const useFull = r.mode === 'full' && r.raw && typeof r.raw === 'object' && 'ledgers' in r.raw;
+          const useFull = r.raw && typeof r.raw === 'object' && 'ledgers' in r.raw;
           const { customers, totals, diagnostics } = useFull
             ? transformTallyFull(r.raw)
             : transformTallyLedgers(r.raw);
@@ -200,9 +250,7 @@ export default function TallySync() {
           r.transformError = transformErr.message;
         }
       }
-    } catch (err) {
-      r = { success: false, error: err.message };
-    }
+    } catch { /* non-fatal — phase counts alone are enough for the headline */ }
     return r;
   };
 
@@ -224,9 +272,20 @@ export default function TallySync() {
     setSyncStartedAt(Date.now());
     setSyncResult(null);
     setProgressCompany({ name: '', index: 0, total: 1 });
+    setLivePhase({
+      currentKey: null,
+      keyStatus: {},
+      keyCounts: {},
+      keyErrors: {},
+      cooldownEndsAt: null,
+      attempt: null,
+      discoveryStatus: 'pending',
+    });
 
-    // 1st pass — no explicit company so the edge function picks up its
-    // own active_company and returns the full discoveredCompanies list.
+    // 1st pass — no explicit company so syncAllPhases picks up whichever
+    // active_company the edge function resolves during discovery and
+    // returns the full discoveredCompanies list so the loop below covers
+    // every tenant.
     setProgressCompany({ name: '', index: 1, total: 1 });
     let first = await syncOneCompany('');
     const discovered = first?.discoveredCompanies || [];
@@ -238,12 +297,23 @@ export default function TallySync() {
     const results = new Map();
     results.set(firstCompany || '(default)', first);
 
-    // 2nd...Nth passes — every company except the one the edge function
-    // already synced on the first round-trip.
+    // 2nd...Nth passes — every company except the one already covered by
+    // the first pass. Each pass runs the full per-phase chain with its
+    // own cooldowns, so a Tally crash on company B's Day Book 2022
+    // doesn't torpedo company C's sync.
     for (let i = 0; i < companiesToSync.length; i++) {
       const name = companiesToSync[i];
       if (name === firstCompany) continue;
       setProgressCompany({ name, index: results.size + 1, total: companiesToSync.length });
+      setLivePhase({
+        currentKey: null,
+        keyStatus: {},
+        keyCounts: {},
+        keyErrors: {},
+        cooldownEndsAt: null,
+        attempt: null,
+        discoveryStatus: 'pending',
+      });
       const r = await syncOneCompany(name);
       results.set(name, r);
     }
@@ -299,43 +369,11 @@ export default function TallySync() {
 
     setSyncResult(agg);
 
-    // Per-year Day Book completion pass. sync-full's single 150 s
-    // budget can only land 1-2 yearly chunks before it exhausts —
-    // the remaining years come back with "budget exhausted" or a
-    // timeout, so tenants with 3k+ ledgers and multi-year history
-    // were ending up with incomplete voucher coverage. Now we walk
-    // every year that didn't land cleanly in the first pass and run
-    // it through sync-collection, which gives EACH year its own
-    // fresh 150 s / 150 MB isolate. The count runs in series so we
-    // don't hammer the RemoteApp tunnel with parallel XML POSTs
-    // (those drop connections on shared-host tunnels); for most
-    // tenants this adds 1-2 extra minutes but gets every voucher
-    // year into the cloud instead of a truncated prefix.
-    try {
-      const missingYears = computeMissingDayBookYears(results);
-      if (missingYears.length && firstCompany) {
-        const dayBookErrors = { ...agg.collectionErrors };
-        for (const { company: cName, year, key } of missingYears) {
-          setProgressCompany({
-            name: `${cName} — Day Book ${year}`,
-            index: 1,
-            total: missingYears.length,
-          });
-          try {
-            const res = await syncCollection({
-              key,
-              company: cName,
-              config: { ...backendCreds(), allData: true, fromDate: activeRange.fromDate, toDate: activeRange.toDate },
-            });
-            if (res?.error) dayBookErrors[`${key}@${cName}`] = res.error;
-            else delete dayBookErrors[`${key}@${cName}`];
-          } catch (err) {
-            dayBookErrors[`${key}@${cName}`] = err instanceof Error ? err.message : String(err);
-          }
-        }
-        setSyncResult({ ...agg, collectionErrors: dayBookErrors });
-      }
-    } catch { /* non-fatal — primary sync already produced a result */ }
+    // Per-year Day Book completion pass used to live here to re-run years
+    // sync-full's single 150 s budget couldn't land. That's now folded
+    // into syncAllPhases — every dayBook_YYYY phase already runs in its
+    // own Edge Function isolate with its own retry, so no follow-up pass
+    // is needed.
 
     // Pull the fresh snapshot from Supabase into the context — every dashboard
     // reads from there, so a single refresh here propagates the new data to
@@ -352,6 +390,7 @@ export default function TallySync() {
     } catch { /* non-fatal */ }
 
     setProgressCompany({ name: '', index: 0, total: 1 });
+    setLivePhase(null);
     setSyncing(false);
     setSyncStartedAt(null);
   };
@@ -696,6 +735,7 @@ export default function TallySync() {
                 active={syncing}
                 result={syncResult}
                 progressCompany={progressCompany}
+                livePhase={livePhase}
               />
             )}
 

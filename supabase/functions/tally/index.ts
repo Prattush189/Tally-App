@@ -945,7 +945,7 @@ function rollupDayBookList(keys: string[]): string[] {
 // tell which edge-function revision it's talking to. Bump manually when
 // deploys need verification; the value is purely informational. Useful
 // when diagnosing "is my fix live yet?" without digging into Actions logs.
-const EDGE_BUILD_ID = '2026-04-24-per-collection-action';
+const EDGE_BUILD_ID = '2026-04-24-sync-discover-client-chained';
 
 // Merge a new sync result into the existing tally_snapshots row. Idempotent
 // — collections not included in `incoming.data` retain their prior values
@@ -1451,6 +1451,98 @@ Deno.serve(async (req) => {
       source: row.source,
       updatedAt: row.updated_at,
       collectionMeta: row.collection_meta || {},
+    }), { headers: jsonHeaders });
+  }
+
+  // sync-discover: runs ONLY the company-detection probe that sync-full does
+  // at its top, then returns the discovered companies + resolved active
+  // company without touching any collection fetches. Exists so the client
+  // can drive sync as a sequence of (discover → sync-collection per phase)
+  // with its own pacing — giving each phase a fresh 150s isolate and a
+  // cooldown between calls so a transient Tally crash or RemoteApp tunnel
+  // drop on one phase doesn't cascade into skipping every remaining phase,
+  // which is what sync-full's monolithic loop used to do when Tally's XML
+  // service bounced mid-run.
+  //
+  // Body: { action: 'sync-discover', ...creds }
+  // Returns: { connected, activeCompany, discoveredCompanies, discoveryError, discoveryRawSample, diagnostics }
+  if (action === 'sync-discover') {
+    const dbUrl = Deno.env.get('SUPABASE_URL') || '';
+    const dbRole = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
+    const db = (dbUrl && dbRole) ? createClient(dbUrl, dbRole, { auth: { persistSession: false } }) : null;
+    let activeCompany = cfg.company || company;
+    let discoveredCompanies: string[] = [];
+    let discoveryError: string | null = null;
+    let discoveryRawSample: string | null = null;
+    try {
+      const probeXml = reportRequest('List of Companies', '');
+      const parsed = await tallyRequest(probeXml, cfg, 15000);
+      try {
+        discoveryRawSample = JSON.stringify(parsed).slice(0, 1500);
+      } catch { /* ignore */ }
+      const seen = new Set<string>();
+      const walk = (node: unknown) => {
+        if (!node) return;
+        if (Array.isArray(node)) { node.forEach(walk); return; }
+        if (typeof node !== 'object') return;
+        for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+          if (key.toUpperCase() === 'COMPANY') {
+            const items = Array.isArray(value) ? value : [value];
+            for (const item of items) {
+              if (!item || typeof item !== 'object') continue;
+              const rec = item as Record<string, unknown>;
+              const raw = rec?._NAME ?? rec?.NAME;
+              let name: string | undefined;
+              if (typeof raw === 'string') name = raw;
+              else if (raw && typeof raw === 'object') {
+                const r = raw as Record<string, unknown>;
+                if (typeof r._text === 'string') name = r._text;
+                else if (typeof r['#text'] === 'string') name = r['#text'] as string;
+              }
+              if (name && name.trim()) seen.add(name.trim());
+            }
+          }
+          walk(value);
+        }
+      };
+      walk(parsed);
+      discoveredCompanies = Array.from(seen).sort();
+      if (db && discoveredCompanies.length) {
+        try {
+          const { data: prior } = await db
+            .from('tally_companies')
+            .select('active_company')
+            .eq('tenant_key', tenantKey)
+            .maybeSingle();
+          const nextActive = prior?.active_company
+            && discoveredCompanies.includes(prior.active_company)
+              ? prior.active_company
+              : discoveredCompanies[0];
+          await db.from('tally_companies').upsert({
+            tenant_key: tenantKey,
+            companies: discoveredCompanies,
+            active_company: nextActive,
+            updated_at: new Date().toISOString(),
+          }, { onConflict: 'tenant_key' });
+          if (!activeCompany) activeCompany = nextActive;
+        } catch (dbErr) {
+          discoveryError = dbErr instanceof Error ? dbErr.message : String(dbErr);
+          if (!activeCompany) activeCompany = discoveredCompanies[0];
+        }
+      }
+    } catch (err) {
+      discoveryError = err instanceof Error ? err.message : String(err);
+    }
+    const connected = discoveredCompanies.length > 0 || Boolean(activeCompany);
+    return new Response(JSON.stringify({
+      connected,
+      action,
+      edgeBuildId: EDGE_BUILD_ID,
+      activeCompany,
+      discoveredCompanies,
+      discoveryError,
+      discoveryRawSample: (discoveredCompanies.length === 0 && !discoveryError) ? discoveryRawSample : null,
+      diagnostics: snapshotDiagnostics(),
     }), { headers: jsonHeaders });
   }
 
