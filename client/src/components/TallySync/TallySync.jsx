@@ -4,12 +4,12 @@ import SectionHeader from '../common/SectionHeader';
 import SyncProgress from '../common/SyncProgress';
 import { fmt } from '../../utils/format';
 import { useAuth } from '../../context/AuthContext';
+import { useTallyData } from '../../context/TallyDataContext';
 import {
   TALLY_BACKEND, tallyAvailable, syncFromTally,
-  getStatus, getDataSummary, loadFromSnapshot, getCompanies,
+  getStatus, getDataSummary, getCompanies,
 } from '../../lib/tallyClient';
 import { transformTallyLedgers, transformTallyFull } from '../../lib/tallyTransformer';
-import { saveLiveCustomers, loadLiveCustomers, clearLiveCustomers } from '../../lib/liveData';
 import { availableRanges, rangeByKey } from '../../utils/dateRange';
 
 const TALLY_CONFIG_KEY = 'b2b_tally_config';
@@ -62,6 +62,7 @@ function loadTallyConfig() {
 
 export default function TallySync() {
   const { isDemo, user } = useAuth();
+  const { customers: liveCustomers, syncedAt: liveSyncedAt, source: liveSource, refresh: refreshTallyData } = useTallyData();
   const [status, setStatus] = useState(null);
   const [summary, setSummary] = useState(null);
   const [syncing, setSyncing] = useState(false);
@@ -75,7 +76,10 @@ export default function TallySync() {
   const [syncResult, setSyncResult] = useState(null);
   const [config, setConfig] = useState(loadTallyConfig);
   const [rangeKey, setRangeKey] = useState('all');
-  const [snapshotInfo, setSnapshotInfo] = useState(null);
+  // `snapshotInfo` reflects the latest cloud snapshot's metadata; sourced
+  // straight from the shared Tally data context so the TallySync card
+  // agrees with every other dashboard about what's currently loaded.
+  const snapshotInfo = liveSyncedAt ? { updatedAt: liveSyncedAt, source: liveSource } : null;
   const [activeCompany, setActiveCompany] = useState('');
   const [knownCompanies, setKnownCompanies] = useState([]);
 
@@ -209,20 +213,13 @@ export default function TallySync() {
       results.set(name, r);
     }
 
-    // Decide whose customer list powers the dashboards on this browser.
-    // Preference: the company the user has pinned in the CompanySwitcher
-    // (activeCompany state). Otherwise the first company we synced.
+    // Pick the "primary" company for the result panel's headline counts —
+    // the one the user has pinned, otherwise the first we synced. The
+    // edge function has already written every company's data to
+    // tally_snapshots on the server, so dashboards refresh from there
+    // below; no per-browser localStorage write needed.
     const preferred = activeCompany || firstCompany || companiesToSync[0];
     const primary = results.get(preferred) || first;
-
-    if (primary?._customers?.length) {
-      saveLiveCustomers(user?.email, primary._customers, {
-        ...primary._totals,
-        range: activeRange.label || 'All data',
-        fromDate: activeRange.fromDate,
-        toDate: activeRange.toDate,
-      });
-    }
 
     // Aggregated result used by the sync-result panel + progress reconcile.
     // Counts are summed across all companies; collectionErrors show which
@@ -265,43 +262,13 @@ export default function TallySync() {
       }
     }
 
-    // Fallback: if nothing landed with real customers, pull the cloud
-    // snapshot so dashboards still hydrate (another PC or the cron
-    // workflow may have written one recently).
-    let r = agg;
-    if (!r.dealersStored) {
-      try {
-        const snap = await loadFromSnapshot();
-        if (snap?.success && snap?.raw) {
-          const { customers, totals, diagnostics } = transformTallyFull(snap.raw);
-          if (customers.length) {
-            saveLiveCustomers(user?.email, customers, {
-              ...totals,
-              range: activeRange.label || 'All data',
-              fromDate: activeRange.fromDate,
-              toDate: activeRange.toDate,
-              source: `snapshot (${snap.source})`,
-              syncedAt: snap.updatedAt,
-            });
-            r = {
-              ...r,
-              success: true,
-              fellBackToSnapshot: true,
-              dealersStored: customers.length,
-              diagnostics: { ...(r.diagnostics || {}), ...diagnostics },
-              ledgers: snap.ledgers || r.ledgers,
-              salesVouchers: snap.salesVouchers || r.salesVouchers,
-              receiptVouchers: snap.receiptVouchers || r.receiptVouchers,
-              stockItems: snap.stockItems || r.stockItems,
-              stockGroups: snap.stockGroups || r.stockGroups,
-            };
-            setSnapshotInfo({ updatedAt: snap.updatedAt, source: snap.source });
-          }
-        }
-      } catch { /* keep the original error */ }
-    }
-
-    setSyncResult(r);
+    setSyncResult(agg);
+    // Pull the fresh snapshot from Supabase into the context — every dashboard
+    // reads from there, so a single refresh here propagates the new data to
+    // the whole app. If the live sync itself returned nothing, the cloud row
+    // is still the canonical source (it may have been populated by another
+    // PC or the cron job), so this also covers the fallback case.
+    try { await refreshTallyData(); } catch { /* non-fatal — dashboards will retry */ }
     try {
       const s = await getStatus();
       if (s) setStatus(s);
@@ -315,101 +282,21 @@ export default function TallySync() {
     setSyncStartedAt(null);
   };
 
-  // Pull the cloud snapshot only when it's MEANINGFULLY newer than what
-  // localStorage holds — "meaningful" means beyond the natural client/server
-  // clock-drift window (30s). Without that buffer a fresh local Sync Now
-  // would trigger a spurious refresh on every tab-return because the server
-  // clock is usually a handful of seconds ahead of the browser clock.
-  //
-  // This serves two flows:
-  //   (1) multi-PC: sync on PC A → PC B picks up on next tab-return.
-  //   (2) background-tab recovery: Chrome throttles in-flight fetches on
-  //       hidden tabs, so a Sync Now kicked off pre-switch may never see its
-  //       response land, but the edge function persists server-side. Pulling
-  //       on visibility-return recovers that completed state.
-  // Refs (not state) keep in-flight sync metadata visible to the handler
-  // without re-subscribing the listener on every syncing toggle — that used
-  // to tear down + re-create the effect dozens of times per sync.
-  const FRESHNESS_MS = 5 * 60_000;       // skip cloud pull if local is younger than this
-  const CLOCK_DRIFT_MS = 30_000;         // cloud must beat local by at least this
+  // Multi-PC + background-tab recovery: if a sync started on this browser,
+  // but the response got throttled (hidden-tab fetch suspend) or a *different*
+  // PC ran the sync, we still want THIS tab to pick up the result. Gating on
+  // visibility-return, not window-focus (too aggressive — flickers on every
+  // alt-tab). Refs (not state) keep in-flight metadata visible without
+  // re-subscribing the listener every toggle.
   const MIN_HIDDEN_MS = 15_000;          // ignore brief tab-switches
   const syncingRef = useRef(false);
   const syncStartedAtRef = useRef(null);
-  const refreshInFlightRef = useRef(false);
   const hiddenSinceRef = useRef(null);
   useEffect(() => { syncingRef.current = syncing; }, [syncing]);
   useEffect(() => { syncStartedAtRef.current = syncStartedAt; }, [syncStartedAt]);
 
-  const refreshFromCloudIfNewer = async (trigger) => {
-    if (!available || isDemo || !user?.email) return;
-    if (refreshInFlightRef.current) return;
-    refreshInFlightRef.current = true;
-    try {
-      const local = loadLiveCustomers(user?.email);
-      const localAt = local?.syncedAt ? new Date(local.syncedAt).getTime() : 0;
-      const syncingNow = syncingRef.current;
-      // On a plain tab-return (not the post-sync recovery path), skip the
-      // whole cloud roundtrip when local is fresh — this is the fix for
-      // "data shifts every time I click a tab". No fetch, no transform, no
-      // re-render.
-      if (trigger !== 'sync-recovery' && !syncingNow
-          && localAt && (Date.now() - localAt) < FRESHNESS_MS) {
-        return;
-      }
-      const r = await loadFromSnapshot();
-      if (!r?.success || !r?.raw || !r?.updatedAt) return;
-      const cloudAt = new Date(r.updatedAt).getTime();
-      const startedAt = syncStartedAtRef.current;
-      const syncLandedInBackground = syncingNow && startedAt && cloudAt >= startedAt;
-      // During an in-flight sync, only finalize if the cloud snapshot is
-      // from after the sync started. Otherwise the pre-sync snapshot would
-      // clobber what the user expects once the promise resolves.
-      if (syncingNow && !syncLandedInBackground) return;
-      // Require meaningful time delta to absorb server-vs-client clock drift.
-      // Equal or slightly-newer cloud snapshots are treated as "same data".
-      if (!syncLandedInBackground && cloudAt <= localAt + CLOCK_DRIFT_MS) return;
-      const { customers, totals } = transformTallyFull(r.raw);
-      if (customers.length) {
-        saveLiveCustomers(user?.email, customers, {
-          ...totals,
-          range: activeRange.label || 'All data',
-          fromDate: activeRange.fromDate,
-          toDate: activeRange.toDate,
-          source: `snapshot (${r.source})`,
-          // Store cloud's server-time verbatim so the next equality check is
-          // exact — avoids a slow drift that would otherwise keep refreshing.
-          syncedAt: r.updatedAt,
-        });
-      }
-      setSnapshotInfo({ updatedAt: r.updatedAt, source: r.source });
-      if (syncLandedInBackground) {
-        setSyncing(false);
-        setSyncStartedAt(null);
-        setSyncResult({
-          success: true,
-          mode: 'full',
-          note: 'Sync finished in the background while this tab was hidden — data loaded from the cloud snapshot.',
-          ledgers: r.ledgers,
-          salesVouchers: r.salesVouchers,
-          receiptVouchers: r.receiptVouchers,
-          stockItems: r.stockItems,
-          stockGroups: r.stockGroups,
-          dealersStored: customers.length,
-        });
-      }
-    } catch { /* non-fatal */ } finally {
-      refreshInFlightRef.current = false;
-    }
-  };
-
-  // On mount + on visibility-return (NOT on window-focus — window.focus is
-  // too aggressive, it fires on the slightest alt-tab / click-into-window and
-  // was causing the "data changes when I click a tab" flicker). We also gate
-  // visibilitychange on the tab having been hidden long enough that something
-  // plausibly happened server-side.
   useEffect(() => {
     if (!available || isDemo) return;
-    refreshFromCloudIfNewer('mount');
     const onVisibilityChange = () => {
       if (document.visibilityState === 'hidden') {
         hiddenSinceRef.current = Date.now();
@@ -417,30 +304,45 @@ export default function TallySync() {
       }
       const since = hiddenSinceRef.current;
       hiddenSinceRef.current = null;
-      // Pull only if we were hidden long enough OR a sync is in flight (the
-      // background-recovery path should fire regardless of how briefly the
-      // tab was hidden).
       const longEnough = since && Date.now() - since > MIN_HIDDEN_MS;
       if (longEnough || syncingRef.current) {
-        refreshFromCloudIfNewer(syncingRef.current ? 'sync-recovery' : 'tab-return');
+        // Ask the shared context to re-pull the cloud snapshot. Every
+        // dashboard reads from there, so a single refresh propagates.
+        refreshTallyData();
+        // If a sync was in-flight and the tab came back, assume the server
+        // landed it while we were hidden and clear the spinner.
+        if (syncingRef.current) {
+          setSyncing(false);
+          setSyncStartedAt(null);
+          setSyncResult((r) => r || {
+            success: true,
+            mode: 'full',
+            note: 'Sync finished in the background while this tab was hidden — data loaded from the cloud snapshot.',
+          });
+        }
       }
     };
     document.addEventListener('visibilitychange', onVisibilityChange);
-    return () => {
-      document.removeEventListener('visibilitychange', onVisibilityChange);
-    };
-  }, [available, isDemo, user?.email]);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+  }, [available, isDemo, refreshTallyData]);
 
+  // "Clear local" no longer has a localStorage cache to wipe — the only
+  // mutable state is the cloud snapshot, which should be re-pulled, not
+  // deleted. The button now just re-pulls and surfaces confirmation.
   const handleClearLiveData = () => {
     if (isDemo) return;
-    clearLiveCustomers(user?.email);
+    refreshTallyData();
     setSyncResult({ success: true, cleared: true });
   };
 
-  const liveSnapshot = !isDemo ? loadLiveCustomers(user?.email) : null;
+  // Surface the cloud snapshot using the same shape the old code expected —
+  // rest of the component reads `liveSnapshot.customers.length` etc.
+  const liveSnapshot = !isDemo && liveCustomers.length
+    ? { customers: liveCustomers, syncedAt: liveSyncedAt, source: liveSource }
+    : null;
 
-  // A saved live snapshot counts as "connected" regardless of backend, since
-  // the whole point of the banner is "do the dashboards have real data".
+  // A populated cloud snapshot counts as "connected" — the banner's job is
+  // to tell the user whether their dashboards actually have real data.
   const isConnected = Boolean(status?.connected) || Boolean(liveSnapshot);
   const lastSyncAt = status?.lastAttempt || liveSnapshot?.syncedAt;
 

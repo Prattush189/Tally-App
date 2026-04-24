@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { FiltersProvider } from './context/FiltersContext';
+import { TallyDataProvider, useTallyData } from './context/TallyDataContext';
 import LoginPage from './components/Auth/LoginPage';
 import Sidebar from './components/Layout/Sidebar';
 import Header from './components/Layout/Header';
@@ -27,18 +28,17 @@ import InventoryBudget from './components/InventoryBudget/InventoryBudget';
 import MarketingBudget from './components/MarketingBudget/MarketingBudget';
 import DealerProfile from './components/DealerProfile/DealerProfile';
 import NoDataNotice from './components/common/NoDataNotice';
-import { loadLiveCustomers } from './lib/liveData';
+import LoadingSpinner from './components/common/LoadingSpinner';
 
 const ACTIVE_PAGE_KEY = 'b2b_active_page';
 
 function DashboardApp() {
   const { user } = useAuth();
-  // Everyone — demo account included — must have a live Tally snapshot
-  // before the dashboards unlock. Previously the demo account bypassed
-  // this gate and rendered pages against a mock fixture; we removed that
-  // path so no user ever sees fabricated numbers. Demo accounts now see
-  // the same "sync Tally first" card as a fresh real account.
-  const hasLiveData = !!loadLiveCustomers(user?.email)?.customers?.length;
+  // Snapshot comes from Supabase now — no localStorage cache. `hasLiveData`
+  // flips true as soon as the cloud snapshot lands, so dashboards unlock
+  // automatically (no per-browser storage quota, no staleness between tabs).
+  const { customers, loading: tallyLoading, refresh: refreshTally } = useTallyData();
+  const hasLiveData = customers.length > 0;
   const [active, setActive] = useState(() => {
     try { return localStorage.getItem(ACTIVE_PAGE_KEY) || 'overview'; }
     catch { return 'overview'; }
@@ -55,14 +55,16 @@ function DashboardApp() {
 
   const handleRefresh = () => {
     setSyncing(true);
-    setTimeout(() => setSyncing(false), 1500);
+    refreshTally().finally(() => setSyncing(false));
   };
 
   const renderModule = () => {
     // Tally Sync is always accessible — it's how users wire up their data.
-    // Every other module needs real data; without a live snapshot we show a
-    // "sync Tally first" card rather than any fabricated numbers.
-    if (!hasLiveData && active !== 'tally') {
+    // While the first cloud fetch is in flight show a spinner instead of the
+    // empty-state notice, so the Overview page doesn't flash "no data synced"
+    // for the ~500 ms the snapshot takes to land.
+    if (active !== 'tally' && !hasLiveData) {
+      if (tallyLoading) return <LoadingSpinner message="Loading your Tally snapshot..." />;
       return <NoDataNotice onNavigate={setActive} />;
     }
     switch (active) {
@@ -108,9 +110,11 @@ function DashboardApp() {
 export default function App() {
   return (
     <AuthProvider>
-      <FiltersProvider>
-        <DashboardApp />
-      </FiltersProvider>
+      <TallyDataProvider>
+        <FiltersProvider>
+          <DashboardApp />
+        </FiltersProvider>
+      </TallyDataProvider>
     </AuthProvider>
   );
 }

@@ -1,8 +1,7 @@
 import { useState, useEffect } from 'react';
 import api, { HAS_BACKEND } from '../utils/api';
 import { runAnalytics } from '../lib/analyticsEngine';
-import { loadLiveCustomers } from '../lib/liveData';
-import { useAuth } from '../context/AuthContext';
+import { useTallyData } from '../context/TallyDataContext';
 import { useFilters, applyFilters } from '../context/FiltersContext';
 
 // Core analytics hook — never uses mock data. Returns `data: null` when no
@@ -10,7 +9,7 @@ import { useFilters, applyFilters } from '../context/FiltersContext';
 // state. The top-level gate in App.jsx catches unsynced users and routes
 // them to the Tally Sync page before individual dashboards mount.
 export function useAnalytics(endpoint) {
-  const { user } = useAuth();
+  const { customers, syncedAt } = useTallyData();
   const { year, dealerId } = useFilters();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -22,14 +21,11 @@ export function useAnalytics(endpoint) {
       if (HAS_BACKEND) {
         const res = await api.get(`/analytics/${endpoint}`, { params: { year, dealerId } });
         setData(res.data);
+      } else if (customers.length) {
+        const filtered = applyFilters(customers, { year, dealerId });
+        setData(runAnalytics(endpoint, { customers: filtered }));
       } else {
-        const live = loadLiveCustomers(user?.email);
-        if (live && live.customers?.length) {
-          const filtered = applyFilters(live.customers, { year, dealerId });
-          setData(runAnalytics(endpoint, { customers: filtered }));
-        } else {
-          setData(null);
-        }
+        setData(null);
       }
       setError(null);
     } catch (err) {
@@ -39,7 +35,7 @@ export function useAnalytics(endpoint) {
     }
   };
 
-  useEffect(() => { fetchData(); }, [endpoint, user?.email, year, dealerId]);
+  useEffect(() => { fetchData(); }, [endpoint, syncedAt, year, dealerId]);
 
   return { data, loading, error, refresh: fetchData };
 }

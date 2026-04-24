@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import { Search, RefreshCw, Clock, Calendar, User } from 'lucide-react';
 import { NAV_ITEMS } from './Sidebar';
 import { useAuth } from '../../context/AuthContext';
-import { loadLiveCustomers } from '../../lib/liveData';
+import { useTallyData } from '../../context/TallyDataContext';
 import { useFilters, deriveFilterOptions } from '../../context/FiltersContext';
 import CompanySwitcher from './CompanySwitcher';
 
@@ -21,20 +21,19 @@ function timeAgo(iso) {
 }
 
 export default function Header({ active, searchQuery, onSearchChange, onRefresh, syncing }) {
-  const { user, isDemo } = useAuth();
+  const { isDemo } = useAuth();
+  const { customers, syncedAt, totals } = useTallyData();
   const { year, setYear, dealerId, setDealerId } = useFilters();
   const currentPage = NAV_ITEMS.find(n => n.id === active);
-  const live = loadLiveCustomers(user?.email);
-  const lastSync = live?.syncedAt;
-  const rangeLabel = live?.totals?.range;
-  const statusLabel = isDemo ? 'Demo' : live ? 'Live' : 'No data';
-  const dotClass = isDemo ? 'bg-indigo-400' : live ? 'bg-emerald-500' : 'bg-gray-500';
+  const hasLive = customers.length > 0;
+  const rangeLabel = totals?.range;
+  const statusLabel = isDemo ? 'Demo' : hasLive ? 'Live' : 'No data';
+  const dotClass = isDemo ? 'bg-indigo-400' : hasLive ? 'bg-emerald-500' : 'bg-gray-500';
 
-  // Option lists derived from whichever live snapshot this user has. Cheap
-  // — only recomputed when the snapshot itself changes.
+  // Option lists derived from the current cloud snapshot.
   const { years, dealers } = useMemo(
-    () => deriveFilterOptions(live?.customers || []),
-    [live?.syncedAt]
+    () => deriveFilterOptions(customers),
+    [syncedAt, customers]
   );
 
   return (
@@ -53,7 +52,7 @@ export default function Header({ active, searchQuery, onSearchChange, onRefresh,
           />
         </div>
         <CompanySwitcher />
-        {live && (
+        {hasLive && (
           <>
             <div className="flex items-center gap-1 bg-gray-800/60 border border-gray-700/50 rounded-lg pl-2 pr-1 py-1" title="Filter dashboards by year">
               <Calendar size={12} className="text-gray-500" />
@@ -82,11 +81,11 @@ export default function Header({ active, searchQuery, onSearchChange, onRefresh,
         <button onClick={onRefresh} className="p-2 rounded-lg text-gray-400 hover:text-white hover:bg-gray-800/50 transition-all" title="Refresh data">
           <RefreshCw size={16} className={syncing ? 'animate-spin' : ''} />
         </button>
-        {lastSync && (
-          <div className="flex items-center gap-1.5 text-xs text-gray-400" title={`Last synced at ${new Date(lastSync).toLocaleString()}`}>
+        {syncedAt && (
+          <div className="flex items-center gap-1.5 text-xs text-gray-400" title={`Last synced at ${new Date(syncedAt).toLocaleString()}`}>
             <Clock size={13} className="text-indigo-300" />
             <span>
-              {rangeLabel ? `${rangeLabel} · ` : ''}synced {timeAgo(lastSync)}
+              {rangeLabel ? `${rangeLabel} · ` : ''}synced {timeAgo(syncedAt)}
             </span>
           </div>
         )}
