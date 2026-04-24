@@ -662,7 +662,7 @@ const COLLECTION_TTL_MS: Record<string, number> = {
 // tell which edge-function revision it's talking to. Bump manually when
 // deploys need verification; the value is purely informational. Useful
 // when diagnosing "is my fix live yet?" without digging into Actions logs.
-const EDGE_BUILD_ID = '2026-04-24-daybook-only';
+const EDGE_BUILD_ID = '2026-04-24-per-job-persist';
 
 // Merge a new sync result into the existing tally_snapshots row. Idempotent
 // — collections not included in `incoming.data` retain their prior values
@@ -1381,6 +1381,14 @@ Deno.serve(async (req) => {
     }
 
     const deadline = Date.now() + 140000;
+    // `data` still gets populated for response-side diagnostics (the client's
+    // transformer runs against ledgers + accountingGroups to compute parent-
+    // group stats) — BUT we deliberately skip the Day Book payload from this
+    // in-memory map. Day Book dwarfs every other response (~50-200 MB parsed
+    // for a 5-year distributor), and keeping it resident along with seven
+    // other parse trees is what blew the Edge Function's compute cap. The
+    // client reads vouchers back via get-snapshot, not the sync-full response.
+    const HEAVY_KEYS = new Set(['dayBook']);
     const data: Record<string, unknown> = {};
     const counts: Record<string, number> = {};
     const errors: Record<string, string> = {};
@@ -1397,7 +1405,6 @@ Deno.serve(async (req) => {
       first = false;
       const budget = deadline - Date.now();
       if (budget <= 1000) {
-        data[job.key] = null;
         counts[job.key] = 0;
         errors[job.key] = 'Skipped — wall-clock budget exhausted by earlier queries';
         continue;
@@ -1430,42 +1437,70 @@ Deno.serve(async (req) => {
         }
       }
       if (lastErr) {
-        data[job.key] = null;
         counts[job.key] = 0;
         errors[job.key] = lastErr instanceof Error ? lastErr.message : String(lastErr);
       } else {
-        data[job.key] = result;
         counts[job.key] = countNode(result, job.node);
         anyConnected = true;
+        // Persist immediately so we can drop the parse tree from Deno
+        // memory before the next job's XML lands. Peak memory becomes ONE
+        // response's parse tree rather than all eight accumulated, which
+        // is what was tripping Supabase's 150 MB compute cap.
+        if (db) {
+          const { error: mergeErr } = await mergeSnapshotIntoTable(db, tenantKey, activeCompany, {
+            data: { [job.key]: result },
+            counts: { [job.key]: counts[job.key] },
+            errors: {},
+            source: 'sync-full',
+          });
+          if (mergeErr) {
+            errors['__persist__'] = `Failed to persist ${job.key}: ${mergeErr.message}`;
+          }
+        }
+        // Keep light jobs around for the response's diagnostics block; the
+        // client transformer uses ledgers + accountingGroups to compute
+        // parent-group counts and sample chains in the sync-result panel.
+        // Heavy jobs (Day Book) are NEVER kept in-memory past persistence;
+        // the client reads them back via get-snapshot when a dashboard
+        // mounts. Without this gate, stringify()'ing the response would
+        // itself blow the compute cap.
+        if (!HEAVY_KEYS.has(job.key)) {
+          data[job.key] = result;
+        }
+        result = null;
       }
     }
 
-    // Persist into tally_snapshots so the same sync-full call hydrates every
-    // browser + dashboard, not just the tab that ran it. mergeSnapshotIntoTable
-    // is idempotent — null entries (failed collections) are skipped, fresh
-    // errors update meta, succeeded collections overwrite prior data.
+    // Read back just counts / errors / collection_meta. Deliberately NOT
+    // pulling `data` — it's been populated collection-by-collection already
+    // and the client reads it via get-snapshot when a dashboard mounts.
+    // Hauling the full `data` JSONB back into Deno memory here is what put
+    // us right back over the compute cap.
     let mergedResponse: {
       counts: Record<string, number>;
       errors: Record<string, string>;
-      data: Record<string, unknown>;
       collectionMeta: Record<string, unknown>;
     } | null = null;
     if (db && (anyConnected || Object.keys(errors).length)) {
-      const { error: mergeErr, counts: mergedCounts, errors: mergedErrors, data: mergedData, collectionMeta } =
+      if (Object.keys(errors).length) {
         await mergeSnapshotIntoTable(db, tenantKey, activeCompany, {
-          data,
-          counts,
+          data: {},
+          counts: {},
           errors,
           source: 'sync-full',
         });
-      if (mergeErr) {
-        errors['__persist__'] = `Failed to persist snapshot: ${mergeErr.message}`;
-      } else {
+      }
+      const { data: row } = await db
+        .from('tally_snapshots')
+        .select('counts, errors, collection_meta')
+        .eq('tenant_key', tenantKey)
+        .eq('company', activeCompany)
+        .maybeSingle();
+      if (row) {
         mergedResponse = {
-          counts: mergedCounts as Record<string, number>,
-          errors: mergedErrors as Record<string, string>,
-          data: mergedData as Record<string, unknown>,
-          collectionMeta: collectionMeta as Record<string, unknown>,
+          counts: (row.counts || {}) as Record<string, number>,
+          errors: (row.errors || {}) as Record<string, string>,
+          collectionMeta: (row.collection_meta || {}) as Record<string, unknown>,
         };
       }
     }
@@ -1475,7 +1510,7 @@ Deno.serve(async (req) => {
       action,
       edgeBuildId: EDGE_BUILD_ID,
       counts: mergedResponse?.counts ?? counts,
-      data: mergedResponse?.data ?? data,
+      data,
       errors: mergedResponse?.errors ?? errors,
       collectionMeta: mergedResponse?.collectionMeta ?? {},
       skipped,
