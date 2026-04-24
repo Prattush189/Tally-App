@@ -686,7 +686,7 @@ const COLLECTION_TTL_MS: Record<string, number> = {
 // tell which edge-function revision it's talking to. Bump manually when
 // deploys need verification; the value is purely informational. Useful
 // when diagnosing "is my fix live yet?" without digging into Actions logs.
-const EDGE_BUILD_ID = '2026-04-24-lite-vouchers';
+const EDGE_BUILD_ID = '2026-04-24-server-side-merge';
 
 // Merge a new sync result into the existing tally_snapshots row. Idempotent
 // — collections not included in `incoming.data` retain their prior values
@@ -1464,16 +1464,24 @@ Deno.serve(async (req) => {
       } else {
         counts[job.key] = countNode(result, job.node);
         anyConnected = true;
-        // Persist immediately so we can drop the parse tree from Deno
-        // memory before the next job's XML lands. Peak memory becomes ONE
-        // response's parse tree rather than all eight accumulated, which
-        // is what was tripping Supabase's 150 MB compute cap.
+        // Persist via a server-side JSONB merge RPC. Previously this called
+        // mergeSnapshotIntoTable(), which does SELECT data + spread-copy +
+        // UPSERT full row — meaning every per-job merge re-downloaded the
+        // entire accumulating snapshot (including the tens-of-MB Day Book
+        // once it had landed) and re-uploaded it. That re-download was the
+        // real cause of the "Function failed due to not having enough
+        // compute resources" error: peak memory ended up being the fresh
+        // parse tree PLUS the full existing snapshot PLUS the spread copy.
+        // merge_tally_snapshot_key pushes the jsonb || jsonb merge into
+        // PostgreSQL so the edge worker only sends the new key's value.
         if (db) {
-          const { error: mergeErr } = await mergeSnapshotIntoTable(db, tenantKey, activeCompany, {
-            data: { [job.key]: result },
-            counts: { [job.key]: counts[job.key] },
-            errors: {},
-            source: 'sync-full',
+          const { error: mergeErr } = await db.rpc('merge_tally_snapshot_key', {
+            p_tenant_key: tenantKey,
+            p_company: activeCompany,
+            p_key: job.key,
+            p_data: result,
+            p_count: counts[job.key],
+            p_source: 'sync-full',
           });
           if (mergeErr) {
             errors['__persist__'] = `Failed to persist ${job.key}: ${mergeErr.message}`;
@@ -1505,11 +1513,15 @@ Deno.serve(async (req) => {
     } | null = null;
     if (db && (anyConnected || Object.keys(errors).length)) {
       if (Object.keys(errors).length) {
-        await mergeSnapshotIntoTable(db, tenantKey, activeCompany, {
-          data: {},
-          counts: {},
-          errors,
-          source: 'sync-full',
+        // Errors-only flush via a dedicated RPC so we never pull `data`
+        // back into Deno memory at the tail of the run. mergeSnapshotInto
+        // Table would SELECT data here too and undo the memory savings
+        // from the per-job merge RPC above.
+        await db.rpc('record_tally_snapshot_errors', {
+          p_tenant_key: tenantKey,
+          p_company: activeCompany,
+          p_errors: errors,
+          p_source: 'sync-full',
         });
       }
       const { data: row } = await db
