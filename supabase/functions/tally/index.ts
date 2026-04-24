@@ -103,21 +103,48 @@ function dateFilter(cfg: { fromDate: string; toDate: string }) {
 // past the tunnel's payload ceiling and trips "connection closed before
 // message completed". 90 days is enough for churn / aging / DSO.
 //
-// Opt in to all-history via `allData: true` on the request body (the UI's
-// "All data" range switcher sets this). We send an explicit wide window
-// rather than omitting the filter — Tally defaults to the company's current
-// period when no SVFROMDATE/SVTODATE is provided, which is usually the
-// current FY, not all-time.
+// Opt in to "all history" via `allData: true` on the request body (the UI's
+// "All data" range switcher sets this). We don't use 1900→2100 — Tally Prime
+// silently returns EMPTY for extremely wide ranges on voucher-type reports
+// (Sales/Receipt Register etc.), even though master-data reports honour them
+// fine. A 10-year window is wide enough to cover any real business history
+// and is reliably accepted.
+//
+// We also set SVCURRENTPERIODFROM / SVCURRENTPERIODTO alongside SVFROMDATE /
+// SVTODATE. Several Tally reports respect the company's "current period"
+// over the explicit date filter unless both pairs are set — which was our
+// bug: the date filter was correct but Tally was still scoping every voucher
+// query to the company's default FY, returning 0 rows for tenants whose
+// current period was mis-set.
+function fmtTallyDate(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}${m}${day}`;
+}
+
 function voucherDateFilter(cfg: { fromDate: string; toDate: string; allData?: boolean }) {
-  if (cfg.fromDate || cfg.toDate) return dateFilter(cfg);
-  if (cfg.allData) {
-    return `<SVFROMDATE Type="Date">19000101</SVFROMDATE><SVTODATE Type="Date">21001231</SVTODATE>`;
+  let from: string;
+  let to: string;
+  if (cfg.fromDate || cfg.toDate) {
+    from = cfg.fromDate || fmtTallyDate(new Date(1990, 0, 1));
+    to = cfg.toDate || fmtTallyDate(new Date(new Date().getFullYear() + 1, 11, 31));
+  } else if (cfg.allData) {
+    const today = new Date();
+    from = fmtTallyDate(new Date(today.getFullYear() - 10, 0, 1));
+    to = fmtTallyDate(new Date(today.getFullYear() + 1, 11, 31));
+  } else {
+    const d = new Date();
+    to = fmtTallyDate(d);
+    d.setDate(d.getDate() - 90);
+    from = fmtTallyDate(d);
   }
-  const d = new Date();
-  const to = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
-  d.setDate(d.getDate() - 90);
-  const from = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
-  return `<SVFROMDATE Type="Date">${from}</SVFROMDATE><SVTODATE Type="Date">${to}</SVTODATE>`;
+  return [
+    `<SVFROMDATE Type="Date">${from}</SVFROMDATE>`,
+    `<SVTODATE Type="Date">${to}</SVTODATE>`,
+    `<SVCURRENTPERIODFROM Type="Date">${from}</SVCURRENTPERIODFROM>`,
+    `<SVCURRENTPERIODTO Type="Date">${to}</SVCURRENTPERIODTO>`,
+  ].join('');
 }
 
 // Accept either a bare "host" / "host:port" or a full URL ("https://host:port/path").
