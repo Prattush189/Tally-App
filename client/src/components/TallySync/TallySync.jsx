@@ -383,6 +383,22 @@ export default function TallySync() {
       }
     }
 
+    // Tally-side "no company really loaded" heuristic. When Tally's
+    // XML server is up but no company is actually open (e.g. the
+    // Select Company screen is showing on top of a c0000005 crash
+    // dialog), every collection still answers — but with synthetic
+    // defaults: 1 root "Primary" group, 1 built-in ledger, 1 stub
+    // stock entry, and zero P&L / BS / TB rows. The counts all land
+    // as ~0-1 even though the phase-level sync reports "connected".
+    // We detect that pattern and surface a clear "Tally isn't
+    // serving real data" note so this stops looking like our bug.
+    const lookSuspect = agg.ledgers <= 1 && agg.stockItems <= 1 && agg.stockGroups <= 1
+      && !Object.keys(agg.collectionErrors).length;
+    if (lookSuspect && (agg.success || agg.fetched.length)) {
+      agg.tallyNotServingRealData = true;
+      agg.note = 'Tally answered every phase but returned only placeholder counts (1 ledger / 1 group / 0 vouchers). This almost always means no company is actually open in TallyPrime — usually because a "c0000005 Memory Access Violation" dialog is blocking the Select Company screen. On the Tally machine: click OK on the error dialog, open a working company, and sync again. If every company crashes, the Tally data files are likely corrupt — restore from a backup or contact Tally Solutions support.';
+    }
+
     setSyncResult(agg);
 
     // Per-year Day Book completion pass used to live here to re-run years
@@ -418,19 +434,30 @@ export default function TallySync() {
   // alt-tab). Refs (not state) keep in-flight metadata visible without
   // re-subscribing the listener every toggle.
   //
-  // MIN_HIDDEN_MS was 15s, and the gate used `longEnough || syncingRef` —
-  // which meant ANY brief tab-switch during sync (including 1-2 s
-  // alt-tabs to read another panel) force-stopped the live progress UI
-  // and repainted it with the recovery stub. Real syncs take 60-140 s,
-  // so 15 s almost always hijacked an in-flight run. Bumped to 75 s and
-  // gated with AND — we only fire recovery once we're genuinely past the
-  // point where a normal sync would have come back.
+  // The recovery path is designed for the old single-call sync-full model
+  // where the edge function owned the whole run and the browser was just
+  // awaiting one fetch. Under client-chained sync the browser itself is
+  // driving phase-by-phase, and `livePhase` acts as a heartbeat — as long
+  // as livePhase.currentKey or a per-phase 'running' status is moving, the
+  // run is healthy even if the tab was briefly hidden. We only fire
+  // recovery when the chain has been silent longer than MIN_HIDDEN_MS
+  // without a phase transition, which is a real "something got wedged"
+  // signal rather than "user alt-tabbed while background cooldowns got
+  // throttled by Chrome".
   const MIN_HIDDEN_MS = 75_000;
   const syncingRef = useRef(false);
   const syncStartedAtRef = useRef(null);
   const hiddenSinceRef = useRef(null);
+  const livePhaseActivityAtRef = useRef(null);
   useEffect(() => { syncingRef.current = syncing; }, [syncing]);
   useEffect(() => { syncStartedAtRef.current = syncStartedAt; }, [syncStartedAt]);
+  // Track "last time we saw a phase transition". Any change to livePhase
+  // (new currentKey, new keyStatus entry, cooldown toggle) counts as a
+  // heartbeat. If the tab comes back and this is recent, we know the
+  // chain is still marching and recovery shouldn't fire.
+  useEffect(() => {
+    if (livePhase) livePhaseActivityAtRef.current = Date.now();
+  }, [livePhase]);
 
   useEffect(() => {
     if (!available || isDemo) return;
@@ -442,13 +469,19 @@ export default function TallySync() {
       const since = hiddenSinceRef.current;
       hiddenSinceRef.current = null;
       const longEnough = since && Date.now() - since > MIN_HIDDEN_MS;
-      // Only run recovery when the tab was really hidden long enough that
-      // Chrome might have suspended the fetch — AND either the original
-      // sync is still showing as active (we need to unstick it) or we
-      // genuinely want to repoll the cloud to catch a sync that happened
-      // on a different PC. OR-ing syncingRef alone here (the old shape)
-      // meant every brief alt-tab torpedoed an in-flight sync.
-      if (longEnough) {
+      // Under client-chained sync, THIS tab is the only thing driving
+      // the phase chain — there is no backgrounded edge-function call
+      // whose response we might have missed. Chrome throttles
+      // background setTimeouts but doesn't kill them, so the chain
+      // keeps marching while the tab is hidden and will call
+      // setSyncing(false) itself when it finishes. Firing the cloud-
+      // recovery path on top of that was the regression: the banner
+      // ("Sync did not return data while this tab was hidden") showed
+      // up even though the chain was still live in the same tab.
+      // Skip recovery whenever a client-chained sync is in flight;
+      // it only makes sense for the legacy single-call sync-full path.
+      const clientChainedActive = syncingRef.current && livePhaseActivityAtRef.current != null;
+      if (longEnough && !clientChainedActive) {
         // Re-pull from cloud AND wait so we can populate real record counts
         // in the recovery banner instead of the misleading "No records
         // returned" placeholder. Every dashboard reads via the context, so
@@ -769,6 +802,31 @@ export default function TallySync() {
                 progressCompany={progressCompany}
                 livePhase={livePhase}
               />
+            )}
+
+            {/* Tally-side "no company open" banner. Distinct from
+                tallyNotRunning (which fires when every query timed out)
+                — this one fires when queries ALL succeeded but came
+                back with Tally's built-in defaults, meaning the XML
+                server is alive but no real company is loaded. Almost
+                always the c0000005 Memory Access Violation dialog is
+                blocking the UI. */}
+            {syncResult?.tallyNotServingRealData && (
+              <div className="p-3 rounded-lg border text-sm bg-amber-500/10 border-amber-500/30 text-amber-300 space-y-1">
+                <div className="font-semibold">⚠ Tally is up but no company is actually open</div>
+                <div className="text-xs text-amber-200/90">
+                  Every sync phase answered, but with only placeholder counts ({syncResult.ledgers || 0} ledger / {syncResult.stockGroups || 0} group / 0 vouchers). That pattern means TallyPrime's XML server is responding with its built-in defaults — there's no loaded company to actually read from.
+                </div>
+                <div className="text-xs text-amber-200/90 pt-1">Most likely cause right now:</div>
+                <ul className="text-xs text-amber-200/80 list-disc list-inside pt-0.5 space-y-0.5">
+                  <li>A <b>&quot;Software Exception c0000005 (Memory Access Violation)&quot;</b> dialog is blocking the Tally UI — on the Tally machine, click <b>OK</b> to dismiss it, then open a company.</li>
+                  <li>Try a <b>different company</b> from the list — the crash is usually specific to one corrupted data file. E.g. if <code>GIRNAR KIDS PLAY LLP (from 1-Apr-25)</code> crashes, try the <code>(from 1-Apr-26)</code> one or <code>UNITED AGENCIES DISTRIBUTORS LLP</code>.</li>
+                  <li>If <b>every</b> company crashes with c0000005, the Tally data files are corrupt — restore from the last good backup, or contact Tally Solutions support for a repair.</li>
+                </ul>
+                <div className="text-xs text-amber-200/80 pt-1">
+                  You can also paste the exact company name into the <b>Company name</b> field above to bypass Tally's auto-detect (useful if the crashing company is the one Tally keeps defaulting to).
+                </div>
+              </div>
             )}
 
             {/* Sync Result */}
