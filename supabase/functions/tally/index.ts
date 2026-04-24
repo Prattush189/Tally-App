@@ -504,17 +504,41 @@ function countNode(tree: unknown, target: string): number {
 // budget. The transformer splits Day Book output by VOUCHERTYPENAME, which
 // produces the same per-type arrays the dashboards consume.
 
-// Day Book — Tally's canonical "every voucher in the period" report. This
-// is the only voucher fetch we run now; earlier revisions also fetched
-// Sales/Receipt/Payment/Journal/Contra Registers in parallel, which on
-// large tenants triple-counted the same vouchers in the Deno worker's
-// memory and tripped the Edge Function compute limit. Day Book returns
-// every voucher type in one pass; the transformer splits by
-// VOUCHERTYPENAME client-side. Respects SVFROMDATE/SVTODATE +
-// SVCURRENTPERIODFROM/SVCURRENTPERIODTO consistently across every Tally
-// Prime version we've tested.
+// Custom lightweight voucher COLLECTION. The built-in Day Book report
+// returns every voucher with its full line-item tree (ALLINVENTORYENTRIES,
+// ALLLEDGERENTRIES, BILLALLOCATIONS, etc.) — for a 5-year distributor that
+// balloons to 200+ MB of JSON, blowing the Edge Function's 150 MB memory
+// cap even after per-job persist. This collection uses NATIVEMETHOD to
+// return ONLY the fields the transformer actually reads: date, number,
+// type, party, amount. Client splits by VOUCHERTYPENAME as before. Trade-
+// off: no SKU-level line items, so the per-customer purchasedCategories
+// / skuPenetration / catPenetration metrics degrade to zero. Revenue,
+// aging, DSO, churn — everything that matters for the initial launch —
+// still works because those only need the voucher header.
 function dayBookRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
-  return reportWithVoucherDates('Day Book', cfg);
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>B2BIntelVouchers</ID></HEADER>
+  <BODY><DESC>
+    <STATICVARIABLES>
+      <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      ${companyFilter(cfg.company)}
+      ${voucherDateFilter(cfg)}
+    </STATICVARIABLES>
+    <TDL><TDLMESSAGE>
+      <COLLECTION NAME="B2BIntelVouchers" ISMODIFY="No">
+        <TYPE>Voucher</TYPE>
+        <NATIVEMETHOD>Date</NATIVEMETHOD>
+        <NATIVEMETHOD>VoucherNumber</NATIVEMETHOD>
+        <NATIVEMETHOD>VoucherTypeName</NATIVEMETHOD>
+        <NATIVEMETHOD>PartyLedgerName</NATIVEMETHOD>
+        <NATIVEMETHOD>Amount</NATIVEMETHOD>
+        <NATIVEMETHOD>Reference</NATIVEMETHOD>
+        <NATIVEMETHOD>Narration</NATIVEMETHOD>
+      </COLLECTION>
+    </TDLMESSAGE></TDL>
+  </DESC></BODY>
+</ENVELOPE>`;
 }
 
 // Management-accounting reports. P&L and Balance Sheet are Tally's built-in
@@ -662,7 +686,7 @@ const COLLECTION_TTL_MS: Record<string, number> = {
 // tell which edge-function revision it's talking to. Bump manually when
 // deploys need verification; the value is purely informational. Useful
 // when diagnosing "is my fix live yet?" without digging into Actions logs.
-const EDGE_BUILD_ID = '2026-04-24-delete-fixed';
+const EDGE_BUILD_ID = '2026-04-24-lite-vouchers';
 
 // Merge a new sync result into the existing tally_snapshots row. Idempotent
 // — collections not included in `incoming.data` retain their prior values
