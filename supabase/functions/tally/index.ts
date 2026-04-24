@@ -130,8 +130,14 @@ function voucherDateFilter(cfg: { fromDate: string; toDate: string; allData?: bo
     from = cfg.fromDate || fmtTallyDate(new Date(1990, 0, 1));
     to = cfg.toDate || fmtTallyDate(new Date(new Date().getFullYear() + 1, 11, 31));
   } else if (cfg.allData) {
+    // 5 years is the sweet spot: covers practically every B2B business's
+    // historical window worth looking at, and keeps the Day Book XML
+    // payload small enough (hundreds of KB, not tens of MB) to parse in
+    // the Supabase Edge Function's compute budget. Earlier revisions
+    // used 10 years → compute-resource failures on tenants with heavy
+    // daily voucher volume.
     const today = new Date();
-    from = fmtTallyDate(new Date(today.getFullYear() - 10, 0, 1));
+    from = fmtTallyDate(new Date(today.getFullYear() - 5, 0, 1));
     to = fmtTallyDate(new Date(today.getFullYear() + 1, 11, 31));
   } else {
     const d = new Date();
@@ -491,37 +497,22 @@ function countNode(tree: unknown, target: string): number {
 // fraction of the size (only one voucher type each), and — because sales
 // and receipts no longer fire the same query back-to-back — the second
 // call doesn't land while the tunnel is still flushing the first.
-// Sales/Receipt/Payment/Journal/Contra Register — Tally's type-specific
-// voucher reports. We send these AND Day Book below. In practice:
-//  * Some Tally tenants return data from the type-specific registers but
-//    0 rows from Day Book (old tenants with classic voucher types).
-//  * Other tenants return data from Day Book but 0 from the registers
-//    (happens when voucher type names don't exactly match what Tally's
-//    built-in registers filter on — e.g. "Tax Invoice" vs "Sales").
-// Running both and splitting Day Book client-side by VOUCHERTYPENAME
-// guarantees we capture whichever path actually has the data. The client
-// transformer merges + dedupes by (date|number|type).
-function salesVouchersRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
-  return reportWithVoucherDates('Sales Register', cfg);
-}
-function receiptVouchersRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
-  return reportWithVoucherDates('Receipt Register', cfg);
-}
-function paymentVouchersRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
-  return reportWithVoucherDates('Payment Register', cfg);
-}
-function journalVouchersRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
-  return reportWithVoucherDates('Journal Register', cfg);
-}
-function contraVouchersRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
-  return reportWithVoucherDates('Contra Register', cfg);
-}
+// Voucher fetch is a single Day Book call — see dayBookRequest below. The
+// five type-specific registers (Sales/Receipt/Payment/Journal/Contra) used
+// to run alongside it; they're gone now because they triple-counted the
+// same rows in Deno worker memory and busted the Edge Function's compute
+// budget. The transformer splits Day Book output by VOUCHERTYPENAME, which
+// produces the same per-type arrays the dashboards consume.
 
-// Day Book — Tally's canonical "every voucher in the period" report.
-// Respects SVFROMDATE/SVTODATE + SVCURRENTPERIODFROM/SVCURRENTPERIODTO
-// consistently across every Tally Prime version; the type-specific
-// registers above sometimes return 0 for tenants whose voucher type
-// names don't match the built-in filters. Client splits by VOUCHERTYPENAME.
+// Day Book — Tally's canonical "every voucher in the period" report. This
+// is the only voucher fetch we run now; earlier revisions also fetched
+// Sales/Receipt/Payment/Journal/Contra Registers in parallel, which on
+// large tenants triple-counted the same vouchers in the Deno worker's
+// memory and tripped the Edge Function compute limit. Day Book returns
+// every voucher type in one pass; the transformer splits by
+// VOUCHERTYPENAME client-side. Respects SVFROMDATE/SVTODATE +
+// SVCURRENTPERIODFROM/SVCURRENTPERIODTO consistently across every Tally
+// Prime version we've tested.
 function dayBookRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
   return reportWithVoucherDates('Day Book', cfg);
 }
@@ -658,11 +649,6 @@ function sundryDebtorsRequest(cfg: { company: string; fromDate: string; toDate: 
 // tunnel from re-pulling MBs of XML that didn't change.
 const COLLECTION_TTL_MS: Record<string, number> = {
   ledgers: 30 * 60_000,
-  salesVouchers: 10 * 60_000,
-  receiptVouchers: 10 * 60_000,
-  paymentVouchers: 10 * 60_000,
-  journalVouchers: 10 * 60_000,
-  contraVouchers: 10 * 60_000,
   dayBook: 10 * 60_000,
   stockItems: 30 * 60_000,
   stockGroups: 30 * 60_000,
@@ -676,7 +662,7 @@ const COLLECTION_TTL_MS: Record<string, number> = {
 // tell which edge-function revision it's talking to. Bump manually when
 // deploys need verification; the value is purely informational. Useful
 // when diagnosing "is my fix live yet?" without digging into Actions logs.
-const EDGE_BUILD_ID = '2026-04-24-daybook-fallback';
+const EDGE_BUILD_ID = '2026-04-24-daybook-only';
 
 // Merge a new sync result into the existing tally_snapshots row. Idempotent
 // — collections not included in `incoming.data` retain their prior values
@@ -1359,20 +1345,14 @@ Deno.serve(async (req) => {
       { key: 'profitLoss' as const, xml: profitLossRequest(queryCfg), node: 'DSPACCNAME', timeoutMs: 15000 },
       { key: 'balanceSheet' as const, xml: balanceSheetRequest(queryCfg), node: 'DSPACCNAME', timeoutMs: 15000 },
       { key: 'trialBalance' as const, xml: trialBalanceRequest(queryCfg), node: 'DSPACCNAME', timeoutMs: 18000 },
-      // Voucher registers last — big, tunnel-sensitive. Type-specific (not
-      // Day Book) keeps each payload small enough to stream in one TCP window.
-      { key: 'salesVouchers' as const, xml: salesVouchersRequest(queryCfg), node: 'VOUCHER', timeoutMs: 45000 },
-      { key: 'receiptVouchers' as const, xml: receiptVouchersRequest(queryCfg), node: 'VOUCHER', timeoutMs: 35000 },
-      { key: 'paymentVouchers' as const, xml: paymentVouchersRequest(queryCfg), node: 'VOUCHER', timeoutMs: 30000 },
-      { key: 'journalVouchers' as const, xml: journalVouchersRequest(queryCfg), node: 'VOUCHER', timeoutMs: 25000 },
-      { key: 'contraVouchers' as const, xml: contraVouchersRequest(queryCfg), node: 'VOUCHER', timeoutMs: 20000 },
-      // Day Book is the safety-net. If any of the type-specific registers
-      // above returned 0 because Tally didn't recognise the voucher-type
-      // name, Day Book still pulls everything and the client splits by
-      // VOUCHERTYPENAME. Larger payload, so it runs LAST — if the wall-
-      // clock budget is tight we'd rather have the type-specific results
-      // than nothing, but in practice 140s is plenty for both.
-      { key: 'dayBook' as const, xml: dayBookRequest(queryCfg), node: 'VOUCHER', timeoutMs: 60000 },
+      // Single voucher source: Day Book. Previous revision ran Day Book AND
+      // five type-specific registers (Sales/Receipt/Payment/Journal/Contra)
+      // — triple-counting the same vouchers in the Deno worker's memory and
+      // tripping the Supabase Edge Function compute limit for large tenants.
+      // Day Book is Tally's canonical "every voucher" report; the transformer
+      // splits by VOUCHERTYPENAME, so sales/receipts/payments/journals/
+      // contra/debit notes/credit notes all still land — just parsed once.
+      { key: 'dayBook' as const, xml: dayBookRequest(queryCfg), node: 'VOUCHER', timeoutMs: 75000 },
     ];
 
     const skipped: Record<string, { reason: string; updatedAt: string }> = {};
