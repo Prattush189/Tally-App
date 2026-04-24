@@ -662,7 +662,7 @@ const COLLECTION_TTL_MS: Record<string, number> = {
 // tell which edge-function revision it's talking to. Bump manually when
 // deploys need verification; the value is purely informational. Useful
 // when diagnosing "is my fix live yet?" without digging into Actions logs.
-const EDGE_BUILD_ID = '2026-04-24-per-job-persist';
+const EDGE_BUILD_ID = '2026-04-24-delete-fixed';
 
 // Merge a new sync result into the existing tally_snapshots row. Idempotent
 // — collections not included in `incoming.data` retain their prior values
@@ -1113,7 +1113,21 @@ Deno.serve(async (req) => {
       return new Response(JSON.stringify({ connected: true, action, activeCompany: next }), { headers: jsonHeaders });
     }
 
-    // get-snapshot
+    // Nuke the snapshot for this tenant (+ optional company) so the next
+    // sync starts from a blank slate. MUST come before the get-snapshot
+    // default tail below — that tail returns for ANY unmatched action in
+    // the dbActions set, so delete-snapshot was falling through to it and
+    // never running the actual DELETE.
+    if (action === 'delete-snapshot') {
+      const q = db.from('tally_snapshots').delete().eq('tenant_key', tenantKey);
+      const { error: delErr } = company ? await q.eq('company', company) : await q;
+      if (delErr) {
+        return new Response(JSON.stringify({ connected: false, error: `Failed to delete snapshot: ${delErr.message}` }), { status: 500, headers: jsonHeaders });
+      }
+      return new Response(JSON.stringify({ connected: true, action, deleted: true, company: company || '(all)' }), { headers: jsonHeaders });
+    }
+
+    // get-snapshot — default tail of the dbActions block. Must run LAST.
     // Resolve which company to read: explicit body.company > active_company
     // saved in tally_companies > empty string (back-compat with the single-
     // company row that existed before the compound-PK migration).
@@ -1155,22 +1169,6 @@ Deno.serve(async (req) => {
       updatedAt: row.updated_at,
       collectionMeta: row.collection_meta || {},
     }), { headers: jsonHeaders });
-  }
-
-  // Nuke the snapshot for this tenant (+ optional company) so the next sync
-  // starts from a blank slate. The client's "Clear" button hits this when the
-  // user wants to force-refresh everything — handy when a bad sync left stale
-  // counts in collection_meta that the skipFresh optimisation keeps honouring.
-  if (action === 'delete-snapshot') {
-    if (!db) {
-      return new Response(JSON.stringify({ connected: false, error: 'Supabase service role key not configured.' }), { status: 500, headers: jsonHeaders });
-    }
-    const q = db.from('tally_snapshots').delete().eq('tenant_key', tenantKey);
-    const { error: delErr } = company ? await q.eq('company', company) : await q;
-    if (delErr) {
-      return new Response(JSON.stringify({ connected: false, error: `Failed to delete snapshot: ${delErr.message}` }), { status: 500, headers: jsonHeaders });
-    }
-    return new Response(JSON.stringify({ connected: true, action, deleted: true, company: company || '(all)' }), { headers: jsonHeaders });
   }
 
   if (action === 'sync-full') {
