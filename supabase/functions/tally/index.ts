@@ -1533,15 +1533,53 @@ Deno.serve(async (req) => {
     } catch (err) {
       discoveryError = err instanceof Error ? err.message : String(err);
     }
+    // Fallback: "List of Companies" only returns companies that are
+    // CURRENTLY LOADED in TallyPrime. If the user is sitting on the
+    // "Select Company" screen (e.g. right after dismissing the c0000005
+    // Internal Error dialog), the probe returns empty even though the
+    // XML server is healthy. In that case we reuse the list we
+    // persisted from the last successful run so the sync can proceed —
+    // Tally accepts the old company name in SVCURRENTCOMPANY and will
+    // auto-load it on the first report query.
+    let usedCachedCompanies = false;
+    if (db && !discoveredCompanies.length) {
+      try {
+        const { data: row } = await db
+          .from('tally_companies')
+          .select('companies, active_company')
+          .eq('tenant_key', tenantKey)
+          .maybeSingle();
+        const cached = (row?.companies as string[] | null) || [];
+        if (cached.length) {
+          discoveredCompanies = cached;
+          usedCachedCompanies = true;
+          if (!activeCompany) {
+            activeCompany = row?.active_company && cached.includes(row.active_company)
+              ? row.active_company
+              : cached[0];
+          }
+        }
+      } catch { /* non-fatal — we'll surface the no-companies error below */ }
+    }
     const connected = discoveredCompanies.length > 0 || Boolean(activeCompany);
+    // Build an actionable error when we genuinely have nothing. The
+    // common cause here is TallyPrime showing the "Select Company"
+    // screen — the server answers pings but has no open company, so
+    // every report request returns an empty tree. Telling the user
+    // exactly what to click beats the old generic "no companies".
+    let resolvedError: string | null = discoveryError;
+    if (!connected && !resolvedError) {
+      resolvedError = 'TallyPrime is reachable but no company is open. In Tally, pick a company from "List of Companies" (Gateway of Tally → Select Company) and try again.';
+    }
     return new Response(JSON.stringify({
       connected,
       action,
       edgeBuildId: EDGE_BUILD_ID,
       activeCompany,
       discoveredCompanies,
-      discoveryError,
+      discoveryError: resolvedError,
       discoveryRawSample: (discoveredCompanies.length === 0 && !discoveryError) ? discoveryRawSample : null,
+      usedCachedCompanies,
       diagnostics: snapshotDiagnostics(),
     }), { headers: jsonHeaders });
   }

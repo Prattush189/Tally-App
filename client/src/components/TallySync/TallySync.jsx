@@ -794,7 +794,9 @@ export default function TallySync() {
                       <div className="text-xs pt-1">
                         {syncResult.discoveredCompanies.length > 0 ? (
                           <div className="text-cyan-300/80">
-                            Detected {syncResult.discoveredCompanies.length} company{syncResult.discoveredCompanies.length === 1 ? '' : 'ies'}: {syncResult.discoveredCompanies.join(', ')}. Active: <b>{syncResult.activeCompany || '(none)'}</b>.
+                            {syncResult.usedCachedCompanies
+                              ? <>Using cached company list ({syncResult.discoveredCompanies.length}): {syncResult.discoveredCompanies.join(', ')}. Active: <b>{syncResult.activeCompany || '(none)'}</b>. TallyPrime didn't report any loaded companies — pick one on the "Select Company" screen for a fresh detection.</>
+                              : <>Detected {syncResult.discoveredCompanies.length} company{syncResult.discoveredCompanies.length === 1 ? '' : 'ies'}: {syncResult.discoveredCompanies.join(', ')}. Active: <b>{syncResult.activeCompany || '(none)'}</b>.</>}
                           </div>
                         ) : syncResult.discoveryError ? (
                           <div className="text-amber-300/80">
