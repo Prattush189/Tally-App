@@ -661,6 +661,33 @@ function stockItemsRequest(cfg: { company: string }) {
 // We need the Name→Parent map so the transformer can walk each ledger's
 // ancestry and detect "is this ledger somewhere under Sundry Debtors?",
 // even when the direct parent is a city/region sub-group.
+// Custom TDL COLLECTION query that lists Company objects directly.
+// Used as a fallback to the built-in "List of Companies" report
+// because that report only returns companies currently LOADED in
+// TallyPrime — a hosted-Tally tenant sitting on the Select Company
+// screen produces an empty response even though the XML server
+// itself is healthy. A bare Company collection is often answered
+// correctly in that state, because it enumerates company objects
+// rather than running a report pipeline.
+function companiesRequest(cfg: { company: string }) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>B2BIntelCompanies</ID></HEADER>
+  <BODY><DESC>
+    <STATICVARIABLES>
+      <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      ${companyFilter(cfg.company)}
+    </STATICVARIABLES>
+    <TDL><TDLMESSAGE>
+      <COLLECTION NAME="B2BIntelCompanies" ISMODIFY="No">
+        <TYPE>Company</TYPE>
+        <NATIVEMETHOD>Name</NATIVEMETHOD>
+      </COLLECTION>
+    </TDLMESSAGE></TDL>
+  </DESC></BODY>
+</ENVELOPE>`;
+}
+
 function accountingGroupsRequest(cfg: { company: string }) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <ENVELOPE>
@@ -1474,12 +1501,11 @@ Deno.serve(async (req) => {
     let discoveredCompanies: string[] = [];
     let discoveryError: string | null = null;
     let discoveryRawSample: string | null = null;
-    try {
-      const probeXml = reportRequest('List of Companies', '');
-      const parsed = await tallyRequest(probeXml, cfg, 15000);
-      try {
-        discoveryRawSample = JSON.stringify(parsed).slice(0, 1500);
-      } catch { /* ignore */ }
+
+    // Shared walker — finds every COMPANY node in a parsed tree and
+    // extracts the Name attribute / element regardless of which shape
+    // Tally used (attribute, text node, #text wrapper).
+    const walkForCompanies = (parsed: unknown): string[] => {
       const seen = new Set<string>();
       const walk = (node: unknown) => {
         if (!node) return;
@@ -1506,32 +1532,70 @@ Deno.serve(async (req) => {
         }
       };
       walk(parsed);
-      discoveredCompanies = Array.from(seen).sort();
-      if (db && discoveredCompanies.length) {
-        try {
-          const { data: prior } = await db
-            .from('tally_companies')
-            .select('active_company')
-            .eq('tenant_key', tenantKey)
-            .maybeSingle();
-          const nextActive = prior?.active_company
-            && discoveredCompanies.includes(prior.active_company)
-              ? prior.active_company
-              : discoveredCompanies[0];
-          await db.from('tally_companies').upsert({
-            tenant_key: tenantKey,
-            companies: discoveredCompanies,
-            active_company: nextActive,
-            updated_at: new Date().toISOString(),
-          }, { onConflict: 'tenant_key' });
-          if (!activeCompany) activeCompany = nextActive;
-        } catch (dbErr) {
-          discoveryError = dbErr instanceof Error ? dbErr.message : String(dbErr);
-          if (!activeCompany) activeCompany = discoveredCompanies[0];
-        }
-      }
+      return Array.from(seen).sort();
+    };
+
+    // Probe 1: built-in "List of Companies" report. Works when a
+    // company is already open in TallyPrime.
+    try {
+      const probeXml = reportRequest('List of Companies', '');
+      const parsed = await tallyRequest(probeXml, cfg, 15000);
+      try {
+        discoveryRawSample = JSON.stringify(parsed).slice(0, 1500);
+      } catch { /* ignore */ }
+      discoveredCompanies = walkForCompanies(parsed);
     } catch (err) {
       discoveryError = err instanceof Error ? err.message : String(err);
+    }
+
+    // Probe 2: custom TDL COLLECTION of Company objects. Enumerates
+    // Tally's internal company registry directly and often answers
+    // even when the built-in report returns an empty tree (which is
+    // what hosted-Tally does when the Select Company screen is up).
+    if (!discoveredCompanies.length) {
+      try {
+        const probeXml = companiesRequest({ company: '' });
+        const parsed = await tallyRequest(probeXml, cfg, 15000);
+        try {
+          const sample = JSON.stringify(parsed).slice(0, 1500);
+          discoveryRawSample = discoveryRawSample
+            ? `${discoveryRawSample}\n---\nProbe 2 (TDL Company collection):\n${sample}`
+            : sample;
+        } catch { /* ignore */ }
+        const found = walkForCompanies(parsed);
+        if (found.length) {
+          discoveredCompanies = found;
+          discoveryError = null;
+        }
+      } catch (err) {
+        if (!discoveryError) discoveryError = err instanceof Error ? err.message : String(err);
+      }
+    }
+
+    if (discoveredCompanies.length && db) {
+      try {
+        const { data: prior } = await db
+          .from('tally_companies')
+          .select('active_company')
+          .eq('tenant_key', tenantKey)
+          .maybeSingle();
+        const nextActive = prior?.active_company
+          && discoveredCompanies.includes(prior.active_company)
+            ? prior.active_company
+            : discoveredCompanies[0];
+        await db.from('tally_companies').upsert({
+          tenant_key: tenantKey,
+          companies: discoveredCompanies,
+          active_company: nextActive,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: 'tenant_key' });
+        if (!activeCompany) activeCompany = nextActive;
+      } catch (dbErr) {
+        discoveryError = dbErr instanceof Error ? dbErr.message : String(dbErr);
+        if (!activeCompany) activeCompany = discoveredCompanies[0];
+      }
+    } else if (discoveredCompanies.length && !activeCompany) {
+      activeCompany = discoveredCompanies[0];
     }
     // Fallback: "List of Companies" only returns companies that are
     // CURRENTLY LOADED in TallyPrime. If the user is sitting on the

@@ -38,7 +38,7 @@ function composeHost(ip, port) {
 function loadTallyConfig() {
   try {
     const raw = localStorage.getItem(TALLY_CONFIG_KEY);
-    if (!raw) return { ip: '', port: '', username: '', password: '', portalUsername: '', portalPassword: '' };
+    if (!raw) return { ip: '', port: '', username: '', password: '', portalUsername: '', portalPassword: '', manualCompany: '' };
     const parsed = JSON.parse(raw);
     const split = (parsed.ip || parsed.port)
       ? { ip: parsed.ip || '', port: parsed.port || '' }
@@ -55,9 +55,17 @@ function loadTallyConfig() {
       // `UNITED5`) — without the split the auto-login fails silently.
       portalUsername: parsed.portalUsername || '',
       portalPassword: parsed.portalPassword || '',
+      // Optional override for the company name. Set this when Tally's
+      // "List of Companies" auto-discover returns nothing — which
+      // happens on hosted setups where the XML server answers pings
+      // but refuses report queries until a company is explicitly
+      // addressed. With a manualCompany set we skip discovery and
+      // pass the name straight to every SVCURRENTCOMPANY filter, so
+      // Tally auto-loads it on the first report call.
+      manualCompany: parsed.manualCompany || '',
     };
   } catch {
-    return { ip: '', port: '', username: '', password: '', portalUsername: '', portalPassword: '' };
+    return { ip: '', port: '', username: '', password: '', portalUsername: '', portalPassword: '', manualCompany: '' };
   }
 }
 
@@ -130,7 +138,15 @@ export default function TallySync() {
     // edge function falls back to the XML username / password.
     portalUsername: config.portalUsername,
     portalPassword: config.portalPassword,
+    // Manual company override. Sent as `company` so the edge function's
+    // resolveConfig() picks it up as cfg.company, which feeds every
+    // SVCURRENTCOMPANY filter. Blank means "rely on auto-discovery",
+    // which only works when Tally has a company already open in the
+    // UI and its "List of Companies" report returns a parseable shape.
+    company: (config.manualCompany || '').trim(),
   });
+
+  const manualCompany = (config.manualCompany || '').trim();
 
   // Multi-company sync progress. Each Sync press iterates through every
   // company Tally detected on the first round-trip — each company gets
@@ -208,7 +224,7 @@ export default function TallySync() {
     try {
       r = await syncAllPhases({
         config: backendCreds(),
-        company: companyName || undefined,
+        company: companyName || manualCompany || undefined,
         allData: Boolean(activeRange.allData),
         fromDate: activeRange.fromDate,
         toDate: activeRange.toDate,
@@ -669,6 +685,22 @@ export default function TallySync() {
               <p className="text-[11px] text-gray-500 -mt-2">
                 Optional. The hosted-Tally portal login (<code className="text-gray-300">/cgi-bin/hb.exe</code>) often takes different credentials than the XML server on <code className="text-gray-300">:{config.port || '9007'}</code>. Leave blank to reuse the Tally credentials above.
               </p>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">
+                  Company name <span className="text-gray-600">(override auto-detect)</span>
+                </label>
+                <input
+                  type="text"
+                  value={config.manualCompany}
+                  disabled={isDemo || syncing}
+                  onChange={e => setConfig(c => ({ ...c, manualCompany: e.target.value }))}
+                  className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                  placeholder="e.g. UNITED AGENCIES DISTRIBUTORS LLP - (from 1-Apr-26)"
+                />
+                <p className="text-[11px] text-gray-500 mt-1">
+                  Fill this in if Tally's &quot;List of Companies&quot; auto-detect comes back empty (hosted-Tally often does unless a company is already open in the UI). The exact name Tally shows on the Select Company screen works best. When set, every sync phase addresses this company directly and skips discovery.
+                </p>
+              </div>
               <div>
                 <label className="block text-xs text-gray-500 mb-1">Date range</label>
                 <select

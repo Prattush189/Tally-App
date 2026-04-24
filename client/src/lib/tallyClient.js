@@ -384,24 +384,43 @@ export async function syncAllPhases({
     toDate,
   };
 
-  // 1) Company discovery — cheap probe, single invocation.
+  // 1) Company discovery — cheap probe, single invocation. When the
+  //    caller already has a company name (manual override), discovery
+  //    is optional: we still try it for the diagnostics / tally_companies
+  //    cache, but a failure no longer blocks the run. Hosted-Tally
+  //    setups frequently refuse the "List of Companies" report until a
+  //    company is open in the UI, yet individual report queries work
+  //    fine once SVCURRENTCOMPANY is explicit — that's the whole reason
+  //    the manual override exists.
   onPhase?.({ type: 'discover-start' });
-  let discovery;
+  let discovery = {
+    connected: false,
+    activeCompany: explicitCompany || '',
+    discoveredCompanies: [],
+    discoveryError: null,
+    discoveryRawSample: null,
+    usedCachedCompanies: false,
+    diagnostics: null,
+    edgeBuildId: null,
+  };
   try {
     discovery = await syncDiscover({ ...config, company: explicitCompany });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    onPhase?.({ type: 'discover-done', error: msg });
-    return {
-      success: false,
-      error: `Could not reach Tally: ${msg}`,
-      partial: true,
-      discoveredCompanies: [],
-      activeCompany: '',
-      diagnostics: null,
-      collectionErrors: { discover: msg },
-      phaseResults: {},
-    };
+    discovery.discoveryError = msg;
+    if (!explicitCompany) {
+      onPhase?.({ type: 'discover-done', error: msg });
+      return {
+        success: false,
+        error: `Could not reach Tally: ${msg}`,
+        partial: true,
+        discoveredCompanies: [],
+        activeCompany: '',
+        diagnostics: null,
+        collectionErrors: { discover: msg },
+        phaseResults: {},
+      };
+    }
   }
   onPhase?.({ type: 'discover-done', discovery });
 
