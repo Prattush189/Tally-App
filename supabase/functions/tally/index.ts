@@ -35,6 +35,12 @@ type TallyConfig = {
   company?: string;
   fromDate?: string;  // Tally format: YYYYMMDD (e.g. 20250401)
   toDate?: string;
+  // When true, voucher queries pull the entire history (Tally current-period
+  // default is ignored; we send an explicit 1900-01-01 → 2100-12-31 window).
+  // Set by the client when the user picks "All data" in the range switcher —
+  // otherwise an empty fromDate/toDate still falls back to the 90-day window
+  // below.
+  allData?: boolean;
 };
 
 const corsHeaders = {
@@ -81,7 +87,8 @@ function resolveConfig(overrides: TallyConfig): Required<TallyConfig> {
   const company = nonEmpty(overrides.company) || Deno.env.get('TALLY_COMPANY') || '';
   const fromDate = nonEmpty(overrides.fromDate) || '';
   const toDate = nonEmpty(overrides.toDate) || '';
-  return { host, username, password, portalUsername, portalPassword, company, fromDate, toDate };
+  const allData = overrides.allData === true;
+  return { host, username, password, portalUsername, portalPassword, company, fromDate, toDate, allData };
 }
 
 function dateFilter(cfg: { fromDate: string; toDate: string }) {
@@ -95,8 +102,17 @@ function dateFilter(cfg: { fromDate: string; toDate: string }) {
 // Pulling all-time history (years of invoices + line items) regularly blows
 // past the tunnel's payload ceiling and trips "connection closed before
 // message completed". 90 days is enough for churn / aging / DSO.
-function voucherDateFilter(cfg: { fromDate: string; toDate: string }) {
+//
+// Opt in to all-history via `allData: true` on the request body (the UI's
+// "All data" range switcher sets this). We send an explicit wide window
+// rather than omitting the filter — Tally defaults to the company's current
+// period when no SVFROMDATE/SVTODATE is provided, which is usually the
+// current FY, not all-time.
+function voucherDateFilter(cfg: { fromDate: string; toDate: string; allData?: boolean }) {
   if (cfg.fromDate || cfg.toDate) return dateFilter(cfg);
+  if (cfg.allData) {
+    return `<SVFROMDATE Type="Date">19000101</SVFROMDATE><SVTODATE Type="Date">21001231</SVTODATE>`;
+  }
   const d = new Date();
   const to = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
   d.setDate(d.getDate() - 90);
@@ -353,7 +369,7 @@ function reportWithDates(reportId: string, cfg: { company: string; fromDate: str
 </ENVELOPE>`;
 }
 
-function reportWithVoucherDates(reportId: string, cfg: { company: string; fromDate: string; toDate: string }) {
+function reportWithVoucherDates(reportId: string, cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <ENVELOPE>
   <HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Data</TYPE><ID>${reportId}</ID></HEADER>
@@ -448,11 +464,11 @@ function countNode(tree: unknown, target: string): number {
 // fraction of the size (only one voucher type each), and — because sales
 // and receipts no longer fire the same query back-to-back — the second
 // call doesn't land while the tunnel is still flushing the first.
-function salesVouchersRequest(cfg: { company: string; fromDate: string; toDate: string }) {
+function salesVouchersRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
   return reportWithVoucherDates('Sales Register', cfg);
 }
 
-function receiptVouchersRequest(cfg: { company: string; fromDate: string; toDate: string }) {
+function receiptVouchersRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
   return reportWithVoucherDates('Receipt Register', cfg);
 }
 
