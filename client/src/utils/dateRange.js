@@ -24,7 +24,10 @@ export function availableRanges() {
   const now = new Date();
   const fyStart = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
   return [
-    { key: 'all', label: 'All data', fromDate: '', toDate: '' },
+    // `allData: true` tells the edge function to skip its 90-day voucher
+    // fallback — otherwise empty fromDate/toDate silently caps history at
+    // the last 90 days, which leaves every churn/DSO/aging metric blank.
+    { key: 'all', label: 'All data', fromDate: '', toDate: '', allData: true },
     financialYearRange(fyStart),
     financialYearRange(fyStart - 1),
     financialYearRange(fyStart - 2),

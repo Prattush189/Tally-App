@@ -142,6 +142,7 @@ export default function TallySync() {
   // this company's data as the dashboards' active customer list.
   const syncOneCompany = async (companyName) => {
     const body = { ...backendCreds(), fromDate: activeRange.fromDate, toDate: activeRange.toDate };
+    if (activeRange.allData) body.allData = true;
     if (companyName) body.company = companyName;
     let r = null;
     try {

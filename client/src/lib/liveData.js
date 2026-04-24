@@ -36,14 +36,36 @@ function slimPayload(payload) {
   };
 }
 
+// Last-resort trim when even the slim payload overflows the quota. Drops
+// per-customer invoiceHistory / paymentHistory (by far the next-heaviest
+// fields after missedCategories — 12 month buckets × 2500 dealers × two
+// arrays ≈ a few MB on its own). Consumers that iterate these arrays already
+// tolerate `|| []`, so the dashboards degrade gracefully: dealer lists,
+// outstanding balances, churn scores still render; the time-series charts
+// go flat until the user picks a smaller range.
+function ultraSlimPayload(payload) {
+  const stripped = (payload.customers || []).map((c) => {
+    if (!c) return c;
+    return { ...c, invoiceHistory: [], paymentHistory: [] };
+  });
+  return { ...slimPayload({ ...payload, customers: stripped }), ultraSlim: true };
+}
+
 function expandPayload(payload) {
   if (!payload || !Array.isArray(payload.customers)) return payload;
   if (!Array.isArray(payload.allCategories)) return payload;
   const all = payload.allCategories;
   const expanded = payload.customers.map((c) => {
-    if (!c || Array.isArray(c.missedCategories)) return c;
-    const purchased = new Set(c.purchasedCategories || []);
-    return { ...c, missedCategories: all.filter((cat) => !purchased.has(cat)) };
+    if (!c) return c;
+    const next = Array.isArray(c.missedCategories)
+      ? c
+      : { ...c, missedCategories: all.filter((cat) => !new Set(c.purchasedCategories || []).has(cat)) };
+    // Make sure history arrays always exist — ultra-slim saves strip them,
+    // and downstream consumers access `.slice(-3)` without an `|| []` guard
+    // in a couple of places.
+    if (!Array.isArray(next.invoiceHistory)) next.invoiceHistory = [];
+    if (!Array.isArray(next.paymentHistory)) next.paymentHistory = [];
+    return next;
   });
   return { ...payload, customers: expanded };
 }
@@ -78,10 +100,17 @@ export function saveLiveCustomers(userEmail, customers, totals) {
   }
   try {
     trySet(key, slimPayload(payload));
+    return;
   } catch (err) {
-    // Slim also failed — nothing else to try. Surface loudly so the next
-    // dashboard render doesn't silently pretend the sync produced nothing.
-    console.error('[liveData] slim save also failed:', err?.name || err);
+    console.warn('[liveData] slim save failed, retrying ultra-slim:', err?.name || err);
+  }
+  try {
+    trySet(key, ultraSlimPayload(payload));
+  } catch (err) {
+    // Nothing else to trim without losing dealer identity. Surface loudly so
+    // the next dashboard render doesn't silently pretend the sync produced
+    // nothing — the user can then pick a smaller date range and retry.
+    console.error('[liveData] ultra-slim save also failed:', err?.name || err);
   }
 }
 
