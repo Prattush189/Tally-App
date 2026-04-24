@@ -38,12 +38,7 @@ const STEPS = [
   { key: 'profitLoss', label: 'Fetching Profit & Loss', etaMs: 15000 },
   { key: 'balanceSheet', label: 'Fetching Balance Sheet', etaMs: 15000 },
   { key: 'trialBalance', label: 'Fetching Trial Balance', etaMs: 18000 },
-  { key: 'salesVouchers', label: 'Fetching invoices (sales vouchers)', etaMs: 45000 },
-  { key: 'receiptVouchers', label: 'Fetching receipts (receipt vouchers)', etaMs: 35000 },
-  { key: 'paymentVouchers', label: 'Fetching payments (payment vouchers)', etaMs: 30000 },
-  { key: 'journalVouchers', label: 'Fetching journal vouchers', etaMs: 25000 },
-  { key: 'contraVouchers', label: 'Fetching contra entries', etaMs: 20000 },
-  { key: 'dayBook', label: 'Fetching Day Book (all vouchers)', etaMs: 60000 },
+  { key: 'dayBook', label: 'Fetching Day Book (sales, receipts, payments, journals, contra)', etaMs: 75000 },
   { key: 'persist', label: 'Persisting snapshot to cloud', etaMs: 4000 },
 ];
 
