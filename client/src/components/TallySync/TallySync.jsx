@@ -62,7 +62,7 @@ function loadTallyConfig() {
 
 export default function TallySync() {
   const { isDemo, user } = useAuth();
-  const { customers: liveCustomers, syncedAt: liveSyncedAt, source: liveSource, refresh: refreshTallyData } = useTallyData();
+  const { customers: liveCustomers, totals: liveTotals, syncedAt: liveSyncedAt, source: liveSource, refresh: refreshTallyData } = useTallyData();
   const [status, setStatus] = useState(null);
   const [summary, setSummary] = useState(null);
   const [syncing, setSyncing] = useState(false);
@@ -306,20 +306,29 @@ export default function TallySync() {
       hiddenSinceRef.current = null;
       const longEnough = since && Date.now() - since > MIN_HIDDEN_MS;
       if (longEnough || syncingRef.current) {
-        // Ask the shared context to re-pull the cloud snapshot. Every
-        // dashboard reads from there, so a single refresh propagates.
-        refreshTallyData();
-        // If a sync was in-flight and the tab came back, assume the server
-        // landed it while we were hidden and clear the spinner.
-        if (syncingRef.current) {
-          setSyncing(false);
-          setSyncStartedAt(null);
-          setSyncResult((r) => r || {
-            success: true,
-            mode: 'full',
-            note: 'Sync finished in the background while this tab was hidden — data loaded from the cloud snapshot.',
-          });
-        }
+        // Re-pull from cloud AND wait so we can populate real record counts
+        // in the recovery banner instead of the misleading "No records
+        // returned" placeholder. Every dashboard reads via the context, so
+        // one refresh propagates.
+        const wasSyncing = syncingRef.current;
+        refreshTallyData().finally(() => {
+          if (wasSyncing) {
+            setSyncing(false);
+            setSyncStartedAt(null);
+            setSyncResult((r) => r || {
+              success: true,
+              mode: 'full',
+              note: 'Sync finished in the background while this tab was hidden — data loaded from the cloud snapshot.',
+              dealersStored: liveCustomers.length,
+              ledgers: liveTotals?.ledgers,
+              salesVouchers: liveTotals?.salesVouchers,
+              receiptVouchers: liveTotals?.receiptVouchers,
+              paymentVouchers: liveTotals?.paymentVouchers,
+              stockItems: liveTotals?.stockItems,
+              stockGroups: liveTotals?.stockGroups,
+            });
+          }
+        });
       }
     };
     document.addEventListener('visibilitychange', onVisibilityChange);
