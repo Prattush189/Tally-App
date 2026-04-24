@@ -7,7 +7,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useTallyData } from '../../context/TallyDataContext';
 import {
   TALLY_BACKEND, tallyAvailable, syncFromTally,
-  getStatus, getDataSummary, getCompanies, deleteSnapshot, loadFromSnapshot,
+  getStatus, getDataSummary, getCompanies, deleteSnapshot, loadFromSnapshot, syncCollection,
 } from '../../lib/tallyClient';
 import { transformTallyLedgers, transformTallyFull } from '../../lib/tallyTransformer';
 import { availableRanges, rangeByKey } from '../../utils/dateRange';
@@ -58,6 +58,41 @@ function loadTallyConfig() {
   } catch {
     return { ip: '', port: '', username: '', password: '', portalUsername: '', portalPassword: '' };
   }
+}
+
+// Walk the first-pass sync result and return every (company, year)
+// pair whose Day Book shard didn't land. Used by the completion pass
+// to retry just those years via sync-collection. A year counts as
+// "missing" if the collectionErrors map has a dayBook entry AND the
+// count came back as 0 — successful empty years (a business that
+// genuinely had no vouchers that year) are left alone so we don't
+// hammer the tunnel retrying confirmed-empty windows. Yields the
+// full dayBook_YYYY keys so callers can pass them straight to
+// sync-collection.
+function computeMissingDayBookYears(resultsMap) {
+  const today = new Date();
+  const startYear = today.getFullYear() - 5;
+  const endYear = today.getFullYear() + 1;
+  const out = [];
+  for (const [name, res] of resultsMap.entries()) {
+    const companyName = name === '(default)' ? '' : name;
+    if (!companyName) continue;
+    const errs = res?.collectionErrors || {};
+    const hadDayBookError = /aborted|budget|compute|connection|timeout|size/i.test(String(errs.dayBook || ''));
+    const dayBookCount = Number(res?.dayBook || 0);
+    // If either the aggregated Day Book errored OR the count is
+    // suspiciously low (0 for a tenant with real ledgers), retry
+    // every year defensively. Dedup is cheap — merge_tally_snapshot_key
+    // overwrites per-key, so re-running a year that did land is a
+    // no-op in steady state.
+    const ledgerCount = Number(res?.ledgers || 0);
+    const suspicious = ledgerCount > 10 && dayBookCount === 0;
+    if (!hadDayBookError && !suspicious) continue;
+    for (let y = startYear; y <= endYear; y++) {
+      out.push({ company: companyName, year: y, key: `dayBook_${y}` });
+    }
+  }
+  return out;
 }
 
 export default function TallySync() {
@@ -263,6 +298,45 @@ export default function TallySync() {
     }
 
     setSyncResult(agg);
+
+    // Per-year Day Book completion pass. sync-full's single 150 s
+    // budget can only land 1-2 yearly chunks before it exhausts —
+    // the remaining years come back with "budget exhausted" or a
+    // timeout, so tenants with 3k+ ledgers and multi-year history
+    // were ending up with incomplete voucher coverage. Now we walk
+    // every year that didn't land cleanly in the first pass and run
+    // it through sync-collection, which gives EACH year its own
+    // fresh 150 s / 150 MB isolate. The count runs in series so we
+    // don't hammer the RemoteApp tunnel with parallel XML POSTs
+    // (those drop connections on shared-host tunnels); for most
+    // tenants this adds 1-2 extra minutes but gets every voucher
+    // year into the cloud instead of a truncated prefix.
+    try {
+      const missingYears = computeMissingDayBookYears(results);
+      if (missingYears.length && firstCompany) {
+        const dayBookErrors = { ...agg.collectionErrors };
+        for (const { company: cName, year, key } of missingYears) {
+          setProgressCompany({
+            name: `${cName} — Day Book ${year}`,
+            index: 1,
+            total: missingYears.length,
+          });
+          try {
+            const res = await syncCollection({
+              key,
+              company: cName,
+              config: { ...backendCreds(), allData: true, fromDate: activeRange.fromDate, toDate: activeRange.toDate },
+            });
+            if (res?.error) dayBookErrors[`${key}@${cName}`] = res.error;
+            else delete dayBookErrors[`${key}@${cName}`];
+          } catch (err) {
+            dayBookErrors[`${key}@${cName}`] = err instanceof Error ? err.message : String(err);
+          }
+        }
+        setSyncResult({ ...agg, collectionErrors: dayBookErrors });
+      }
+    } catch { /* non-fatal — primary sync already produced a result */ }
+
     // Pull the fresh snapshot from Supabase into the context — every dashboard
     // reads from there, so a single refresh here propagates the new data to
     // the whole app. If the live sync itself returned nothing, the cloud row

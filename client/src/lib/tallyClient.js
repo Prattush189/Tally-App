@@ -195,6 +195,34 @@ export async function syncFromTally(config = {}) {
   throw new Error('Tally is not available on this deployment.');
 }
 
+// Fetch + persist ONE named collection via the edge function's
+// sync-collection action. Runs in a fresh isolate with its own 150 s
+// wall clock and 150 MB compute budget, which is how heavy Day Book
+// years (dayBook_2023, dayBook_2024, ...) each get their own ceiling
+// instead of competing for sync-full's single pool. Returns the raw
+// response object so callers can inspect { count, error, edgeBuildId,
+// diagnostics } per-year and decide whether to keep marching or
+// surface a failure.
+export async function syncCollection({ key, company, config = {} }) {
+  if (TALLY_BACKEND !== 'supabase') {
+    throw new Error('Per-collection sync requires the Supabase backend.');
+  }
+  if (!key) throw new Error('syncCollection: missing collection key.');
+  if (!company) throw new Error('syncCollection: missing company name.');
+  return supabaseInvoke('sync-collection', {
+    key,
+    company,
+    allData: config.allData === true,
+    fromDate: config.fromDate,
+    toDate: config.toDate,
+    host: config.host,
+    username: config.username,
+    password: config.password,
+    portalUsername: config.portalUsername,
+    portalPassword: config.portalPassword,
+  });
+}
+
 // Fetch status (is sync configured, when was the last snapshot, what are the
 // counts) — anon-key gated, no secrets returned. Safe to call on page load.
 export async function getSyncStatus(tenantKey = 'default') {

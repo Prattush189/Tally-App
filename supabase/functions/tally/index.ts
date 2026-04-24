@@ -748,12 +748,128 @@ const COLLECTION_TTL_MS: Record<string, number> = {
   trialBalance: 15 * 60_000,
 };
 
+// Maps a collection key (ledgers, dayBook_2023, ...) to the XML payload,
+// count-node tag, and timeout the sync-collection action should use.
+// Keeps the spec in one place so both sync-full's job list and the
+// per-collection action stay in sync. Returns null for unknown keys so
+// the caller can 400 cleanly.
+function buildCollectionJob(
+  key: string,
+  cfg: Required<TallyConfig>,
+): { xml: string; node: string; timeoutMs: number } | null {
+  if (key === 'ledgers') return { xml: sundryDebtorsRequest(cfg), node: 'LEDGER', timeoutMs: 120000 };
+  if (key === 'accountingGroups') return { xml: accountingGroupsRequest(cfg), node: 'GROUP', timeoutMs: 60000 };
+  if (key === 'stockItems') return { xml: stockItemsRequest(cfg), node: 'STOCKITEM', timeoutMs: 60000 };
+  if (key === 'stockGroups') return { xml: stockGroupsRequest(cfg), node: 'STOCKGROUP', timeoutMs: 30000 };
+  if (key === 'profitLoss') return { xml: profitLossRequest(cfg), node: 'DSPACCNAME', timeoutMs: 30000 };
+  if (key === 'balanceSheet') return { xml: balanceSheetRequest(cfg), node: 'DSPACCNAME', timeoutMs: 30000 };
+  if (key === 'trialBalance') return { xml: trialBalanceRequest(cfg), node: 'DSPACCNAME', timeoutMs: 45000 };
+  if (key === 'dayBook') {
+    return { xml: dayBookRequest(cfg), node: 'VOUCHER', timeoutMs: 120000 };
+  }
+  const yearMatch = /^dayBook_(\d{4})$/.exec(key);
+  if (yearMatch) {
+    const year = Number(yearMatch[1]);
+    if (year >= 1990 && year <= 2100) {
+      const from = `${year}0101`;
+      const to = `${year}1231`;
+      return {
+        xml: dayBookRequestForWindow(cfg.company, from, to, Boolean(cfg.allData)),
+        node: 'VOUCHER',
+        // Give a full year its own 120 s budget. Each sync-collection
+        // call runs in a fresh Edge Function isolate with its own
+        // 150 s wall clock, so a heavy year can breathe without
+        // starving the rest of the sync.
+        timeoutMs: 120000,
+      };
+    }
+  }
+  return null;
+}
+
 // Per-year Day Book sub-keys (dayBook_2020, dayBook_2021, ...) use the
 // same TTL as the canonical dayBook key — the year-level split is a
 // server-side memory optimisation and shouldn't affect refresh cadence.
 function ttlForKey(key: string): number {
   if (key.startsWith('dayBook_')) return COLLECTION_TTL_MS.dayBook;
   return COLLECTION_TTL_MS[key] ?? 30 * 60_000;
+}
+
+// Module-level guard so we only log the "RPC missing" fallback message
+// once per Deno isolate warm-up instead of on every persist call.
+let mergeRpcMissingLogged = false;
+
+// Persist a single collection key to tally_snapshots. Prefers the
+// server-side merge RPC (merge_tally_snapshot_key) so Deno only sends
+// the new key's value; falls back to a read-modify-write upsert when the
+// RPC is missing from the schema cache. The missing-RPC case is a real
+// production hazard: the migration (20260424000100_merge_snapshot_rpcs)
+// lives under supabase/migrations but deploy-supabase.yml runs
+// `supabase db push` with continue-on-error, so any migration-history
+// drift silently skips the RPC install — and every per-collection
+// persist then fails with "Could not find the function ... in the
+// schema cache". Users saw counts of 1/1/1 on fresh syncs while
+// dashboards stayed empty because nothing was actually landing in
+// tally_snapshots. The fallback path keeps the app functional even
+// with migration skew; the primary path still runs first whenever
+// the RPC is available.
+async function persistSnapshotKey(
+  db: ReturnType<typeof createClient>,
+  tenantKey: string,
+  company: string,
+  key: string,
+  data: unknown,
+  count: number,
+): Promise<string | null> {
+  const { error: rpcErr } = await db.rpc('merge_tally_snapshot_key', {
+    p_tenant_key: tenantKey,
+    p_company: company,
+    p_key: key,
+    p_data: data,
+    p_count: count,
+    p_source: 'sync-full',
+  });
+  if (!rpcErr) return null;
+  const rpcMsg = rpcErr.message || String(rpcErr);
+  const rpcMissing = /schema cache|Could not find the function|does not exist/i.test(rpcMsg);
+  if (!rpcMissing) return rpcMsg;
+  if (!mergeRpcMissingLogged) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[tally] merge_tally_snapshot_key RPC missing — falling back to direct upsert. Run `supabase db push` to apply the 20260424000100_merge_snapshot_rpcs migration. Dashboards will still populate via the fallback path but compute-memory safety of the server-side merge is lost.',
+    );
+    mergeRpcMissingLogged = true;
+  }
+  // Fallback: SELECT existing row, merge the new key in Deno, UPSERT
+  // the full row back. This reintroduces the old memory pressure for
+  // heavy collections (Day Book shards), but it's strictly better than
+  // the current behaviour of persisting nothing at all.
+  const nowIso = new Date().toISOString();
+  const { data: existing, error: selErr } = await db
+    .from('tally_snapshots')
+    .select('data, counts, errors, collection_meta')
+    .eq('tenant_key', tenantKey)
+    .eq('company', company)
+    .maybeSingle();
+  if (selErr) return `fallback select failed: ${selErr.message}`;
+  const existingData = (existing?.data as Record<string, unknown>) || {};
+  const existingCounts = (existing?.counts as Record<string, number>) || {};
+  const existingErrors = (existing?.errors as Record<string, string>) || {};
+  const existingMeta = (existing?.collection_meta as Record<string, { updated_at?: string; count?: number; error?: string | null }>) || {};
+  const nextErrors = { ...existingErrors };
+  delete nextErrors[key];
+  const { error: upErr } = await db.from('tally_snapshots').upsert({
+    tenant_key: tenantKey,
+    company,
+    data: { ...existingData, [key]: data },
+    counts: { ...existingCounts, [key]: count },
+    errors: nextErrors,
+    collection_meta: { ...existingMeta, [key]: { updated_at: nowIso, count, error: null } },
+    source: 'sync-full',
+    updated_at: nowIso,
+  }, { onConflict: 'tenant_key,company' });
+  if (upErr) return `fallback upsert failed: ${upErr.message}`;
+  return null;
 }
 
 function isDayBookSubKey(key: string): boolean {
@@ -829,7 +945,7 @@ function rollupDayBookList(keys: string[]): string[] {
 // tell which edge-function revision it's talking to. Bump manually when
 // deploys need verification; the value is purely informational. Useful
 // when diagnosing "is my fix live yet?" without digging into Actions logs.
-const EDGE_BUILD_ID = '2026-04-24-xml-size-guard';
+const EDGE_BUILD_ID = '2026-04-24-per-collection-action';
 
 // Merge a new sync result into the existing tally_snapshots row. Idempotent
 // — collections not included in `incoming.data` retain their prior values
@@ -1530,14 +1646,19 @@ Deno.serve(async (req) => {
       // single "dayBook" chunk to stay byte-compatible with legacy
       // snapshots already in storage.
       //
-      // Per-chunk timeout is 30s rather than the old 75s monolith —
-      // one year of lean vouchers is fast to produce, and a tighter
-      // timeout frees wall-clock budget for retries.
+      // Per-chunk timeout was 30s but real tenants with 3k+ ledgers
+      // produce Day Book XML faster than the tunnel can transfer it
+      // — a typical heavy year hit the 30s abort even though the data
+      // was flowing. That aborted chunk tripped the fast-bail and
+      // killed every subsequent year, leaving the cloud with zero
+      // voucher data. 60s gives each year enough room for the actual
+      // transfer; the deadline loop at the top of this for(job) caps
+      // total Day Book time by skipping late chunks when budget < 1s.
       ...dayBookChunks.map((c) => ({
         key: c.key,
         xml: dayBookRequestForWindow(activeCompany, c.from, c.to, Boolean(cfg.allData)),
         node: 'VOUCHER',
-        timeoutMs: 30000,
+        timeoutMs: 60000,
       })),
     ];
 
@@ -1646,14 +1767,19 @@ Deno.serve(async (req) => {
         counts[job.key] = 0;
         const errMsg = lastErr instanceof Error ? lastErr.message : String(lastErr);
         errors[job.key] = errMsg;
-        // Flip the Day Book fast-bail when the FIRST shard dies with a
-        // connection-class error. We don't want to short-circuit on a
-        // 4xx/5xx from Tally (that's a config / permission issue we
-        // should surface per-shard) or on an already-aborted deadline.
+        // Flip the Day Book fast-bail when a shard dies with a real
+        // tunnel-dead error (reset / refused / closed / DNS). An aborted
+        // signal just means the per-chunk timeout hit — the tunnel is
+        // still up, the year just had more voucher volume than the
+        // budget allowed, and the next year may be smaller / succeed.
+        // Previously "signal has been aborted" was on the fast-bail
+        // list, which meant one heavy year killed the other six even
+        // though they might have landed cleanly — the user then saw
+        // zero Day Book data even for years the tunnel could serve.
         if (
           !dayBookShortCircuit
           && dayBookSubKeySet.has(job.key)
-          && /reset by peer|ECONNRESET|network error|signal has been aborted|fetch failed|connection closed/i.test(errMsg)
+          && /reset by peer|ECONNRESET|network error|fetch failed|connection closed|connection refused/i.test(errMsg)
         ) {
           dayBookShortCircuit = errMsg.slice(0, 120);
         }
@@ -1671,16 +1797,9 @@ Deno.serve(async (req) => {
         // merge_tally_snapshot_key pushes the jsonb || jsonb merge into
         // PostgreSQL so the edge worker only sends the new key's value.
         if (db) {
-          const { error: mergeErr } = await db.rpc('merge_tally_snapshot_key', {
-            p_tenant_key: tenantKey,
-            p_company: activeCompany,
-            p_key: job.key,
-            p_data: result,
-            p_count: counts[job.key],
-            p_source: 'sync-full',
-          });
-          if (mergeErr) {
-            errors['__persist__'] = `Failed to persist ${job.key}: ${mergeErr.message}`;
+          const persistErr = await persistSnapshotKey(db, tenantKey, activeCompany, job.key, result, counts[job.key]);
+          if (persistErr) {
+            errors['__persist__'] = `Failed to persist ${job.key}: ${persistErr}`;
           }
         }
         // Keep light jobs around for the response's diagnostics block; the
@@ -1712,13 +1831,40 @@ Deno.serve(async (req) => {
         // Errors-only flush via a dedicated RPC so we never pull `data`
         // back into Deno memory at the tail of the run. mergeSnapshotInto
         // Table would SELECT data here too and undo the memory savings
-        // from the per-job merge RPC above.
-        await db.rpc('record_tally_snapshot_errors', {
+        // from the per-job merge RPC above. Same fallback as
+        // persistSnapshotKey — if the RPC is missing from the schema
+        // cache (migration not applied), UPSERT the errors map
+        // directly so the next sync run sees which collections
+        // previously errored.
+        const { error: recErr } = await db.rpc('record_tally_snapshot_errors', {
           p_tenant_key: tenantKey,
           p_company: activeCompany,
           p_errors: errors,
           p_source: 'sync-full',
         });
+        if (recErr && /schema cache|Could not find the function|does not exist/i.test(recErr.message || String(recErr))) {
+          const nowIso = new Date().toISOString();
+          const { data: existing } = await db
+            .from('tally_snapshots')
+            .select('errors, collection_meta')
+            .eq('tenant_key', tenantKey)
+            .eq('company', activeCompany)
+            .maybeSingle();
+          const nextMeta: Record<string, { updated_at?: string; error?: string | null }> = {
+            ...((existing?.collection_meta as Record<string, { updated_at?: string; error?: string | null }>) || {}),
+          };
+          for (const [k, v] of Object.entries(errors)) {
+            nextMeta[k] = { ...(nextMeta[k] || {}), error: v };
+          }
+          await db.from('tally_snapshots').upsert({
+            tenant_key: tenantKey,
+            company: activeCompany,
+            errors: { ...((existing?.errors as Record<string, string>) || {}), ...errors },
+            collection_meta: nextMeta,
+            source: 'sync-full',
+            updated_at: nowIso,
+          }, { onConflict: 'tenant_key,company' });
+        }
       }
       const { data: row } = await db
         .from('tally_snapshots')
@@ -1764,6 +1910,113 @@ Deno.serve(async (req) => {
       // Per-invocation diagnostics so the client progress panel can announce
       // "Portal session revived via auto-login" when the hb.exe cp retry
       // kicked in.
+      diagnostics: snapshotDiagnostics(),
+    }), { headers: jsonHeaders });
+  }
+
+  // sync-collection: fetch + persist ONE named collection in a fresh
+  // Edge Function isolate. Exists so heavy Day Book years can each get
+  // their own 150 s wall clock and 150 MB compute budget instead of
+  // sharing sync-full's single pool. Without this, tenants with 3k+
+  // ledgers and multi-year history always ended up with partial voucher
+  // coverage — the first 1-2 years landed and the rest got skipped
+  // with "budget exhausted". Now the client orchestrates a separate
+  // sync-collection call per year after sync-full's discovery + light
+  // collections finish, so every shard lands under its own isolate's
+  // resource ceiling.
+  //
+  // Body: { action: 'sync-collection', key: 'dayBook_2023' | 'ledgers' | ...,
+  //         company, ...creds, allData?, fromDate?, toDate? }
+  // Returns: { connected, action, key, count, error, source, company }
+  if (action === 'sync-collection') {
+    const dbUrl = Deno.env.get('SUPABASE_URL') || '';
+    const dbRole = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
+    const db = (dbUrl && dbRole) ? createClient(dbUrl, dbRole, { auth: { persistSession: false } }) : null;
+    if (!db) {
+      return new Response(JSON.stringify({
+        connected: false, action,
+        error: 'Supabase service role not configured — sync-collection requires it to persist the per-collection result.',
+      }), { headers: jsonHeaders });
+    }
+    const key = String(body.key || '').trim();
+    if (!key) {
+      return new Response(JSON.stringify({
+        connected: false, action,
+        error: 'Missing "key" field for action="sync-collection" (e.g. "ledgers", "dayBook_2023").',
+      }), { status: 400, headers: jsonHeaders });
+    }
+    const target = cfg.company || company || '';
+    if (!target) {
+      return new Response(JSON.stringify({
+        connected: false, action, key,
+        error: 'Missing company for action="sync-collection" — pass `company` in the body.',
+      }), { status: 400, headers: jsonHeaders });
+    }
+    const queryCfg = { ...cfg, company: target };
+    const job = buildCollectionJob(key, queryCfg);
+    if (!job) {
+      return new Response(JSON.stringify({
+        connected: false, action, key,
+        error: `Unknown collection key "${key}". Expected one of: ledgers, accountingGroups, stockItems, stockGroups, profitLoss, balanceSheet, trialBalance, dayBook, dayBook_<YYYY>.`,
+      }), { status: 400, headers: jsonHeaders });
+    }
+    let result: unknown;
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        result = await tallyRequest(job.xml, cfg, Math.max(15000, Math.floor(job.timeoutMs / (2 - attempt))));
+        lastErr = null;
+        break;
+      } catch (err) {
+        lastErr = err;
+        const msg = err instanceof Error ? err.message : String(err);
+        const wasReset = /reset by peer|ECONNRESET/i.test(msg);
+        const retriable = wasReset || /network error|signal has been aborted|fetch failed/i.test(msg);
+        if (!retriable) break;
+        await new Promise((r) => setTimeout(r, wasReset ? 8000 : 2000));
+      }
+    }
+    if (lastErr) {
+      const errMsg = lastErr instanceof Error ? lastErr.message : String(lastErr);
+      const { error: recErr } = await db.rpc('record_tally_snapshot_errors', {
+        p_tenant_key: tenantKey,
+        p_company: target,
+        p_errors: { [key]: errMsg },
+        p_source: 'sync-collection',
+      });
+      if (recErr && /schema cache|Could not find the function|does not exist/i.test(recErr.message || String(recErr))) {
+        const nowIso = new Date().toISOString();
+        const { data: existing } = await db
+          .from('tally_snapshots')
+          .select('errors, collection_meta')
+          .eq('tenant_key', tenantKey)
+          .eq('company', target)
+          .maybeSingle();
+        const nextMeta = {
+          ...((existing?.collection_meta as Record<string, { updated_at?: string; error?: string | null }>) || {}),
+          [key]: { error: errMsg },
+        };
+        await db.from('tally_snapshots').upsert({
+          tenant_key: tenantKey,
+          company: target,
+          errors: { ...((existing?.errors as Record<string, string>) || {}), [key]: errMsg },
+          collection_meta: nextMeta,
+          source: 'sync-collection',
+          updated_at: nowIso,
+        }, { onConflict: 'tenant_key,company' });
+      }
+      return new Response(JSON.stringify({
+        connected: false, action, key, company: target,
+        count: 0, error: errMsg, edgeBuildId: EDGE_BUILD_ID,
+        diagnostics: snapshotDiagnostics(),
+      }), { headers: jsonHeaders });
+    }
+    const count = countNode(result, job.node);
+    const persistErr = await persistSnapshotKey(db, tenantKey, target, key, result, count);
+    return new Response(JSON.stringify({
+      connected: true, action, key, company: target,
+      count, error: persistErr, source: 'sync-collection',
+      edgeBuildId: EDGE_BUILD_ID,
       diagnostics: snapshotDiagnostics(),
     }), { headers: jsonHeaders });
   }
