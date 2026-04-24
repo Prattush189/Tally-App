@@ -491,20 +491,22 @@ function countNode(tree: unknown, target: string): number {
 // fraction of the size (only one voucher type each), and — because sales
 // and receipts no longer fire the same query back-to-back — the second
 // call doesn't land while the tunnel is still flushing the first.
+// Sales/Receipt/Payment/Journal/Contra Register — Tally's type-specific
+// voucher reports. We send these AND Day Book below. In practice:
+//  * Some Tally tenants return data from the type-specific registers but
+//    0 rows from Day Book (old tenants with classic voucher types).
+//  * Other tenants return data from Day Book but 0 from the registers
+//    (happens when voucher type names don't exactly match what Tally's
+//    built-in registers filter on — e.g. "Tax Invoice" vs "Sales").
+// Running both and splitting Day Book client-side by VOUCHERTYPENAME
+// guarantees we capture whichever path actually has the data. The client
+// transformer merges + dedupes by (date|number|type).
 function salesVouchersRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
   return reportWithVoucherDates('Sales Register', cfg);
 }
-
 function receiptVouchersRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
   return reportWithVoucherDates('Receipt Register', cfg);
 }
-
-// Additional voucher-type registers so "all entry data" is populated, not
-// just sales + receipts. Payment Register = money out (vendor payments,
-// expense reimbursements). Journal Register = adjustment entries (accruals,
-// depreciation, inter-book transfers). Contra Register = bank/cash transfers.
-// Each is its own type-specific report — same rationale as sales/receipts:
-// smaller payloads than Day Book, faster through the shared-host tunnel.
 function paymentVouchersRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
   return reportWithVoucherDates('Payment Register', cfg);
 }
@@ -513,6 +515,15 @@ function journalVouchersRequest(cfg: { company: string; fromDate: string; toDate
 }
 function contraVouchersRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
   return reportWithVoucherDates('Contra Register', cfg);
+}
+
+// Day Book — Tally's canonical "every voucher in the period" report.
+// Respects SVFROMDATE/SVTODATE + SVCURRENTPERIODFROM/SVCURRENTPERIODTO
+// consistently across every Tally Prime version; the type-specific
+// registers above sometimes return 0 for tenants whose voucher type
+// names don't match the built-in filters. Client splits by VOUCHERTYPENAME.
+function dayBookRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
+  return reportWithVoucherDates('Day Book', cfg);
 }
 
 // Management-accounting reports. P&L and Balance Sheet are Tally's built-in
@@ -652,6 +663,7 @@ const COLLECTION_TTL_MS: Record<string, number> = {
   paymentVouchers: 10 * 60_000,
   journalVouchers: 10 * 60_000,
   contraVouchers: 10 * 60_000,
+  dayBook: 10 * 60_000,
   stockItems: 30 * 60_000,
   stockGroups: 30 * 60_000,
   accountingGroups: 30 * 60_000,
@@ -659,6 +671,12 @@ const COLLECTION_TTL_MS: Record<string, number> = {
   balanceSheet: 15 * 60_000,
   trialBalance: 15 * 60_000,
 };
+
+// Stamped into every sync-full / get-snapshot response so the client can
+// tell which edge-function revision it's talking to. Bump manually when
+// deploys need verification; the value is purely informational. Useful
+// when diagnosing "is my fix live yet?" without digging into Actions logs.
+const EDGE_BUILD_ID = '2026-04-24-daybook-fallback';
 
 // Merge a new sync result into the existing tally_snapshots row. Idempotent
 // — collections not included in `incoming.data` retain their prior values
@@ -814,7 +832,7 @@ Deno.serve(async (req) => {
   // syncs from the UI (save-config + trigger-sync + get-status).
   const dbActions = new Set([
     'get-config', 'save-config', 'ingest', 'get-snapshot', 'get-status', 'trigger-sync',
-    'list-companies', 'get-companies', 'set-active-company',
+    'list-companies', 'get-companies', 'set-active-company', 'delete-snapshot',
   ]);
   if (dbActions.has(action)) {
     const supabaseUrl = Deno.env.get('SUPABASE_URL') || '';
@@ -1153,6 +1171,22 @@ Deno.serve(async (req) => {
     }), { headers: jsonHeaders });
   }
 
+  // Nuke the snapshot for this tenant (+ optional company) so the next sync
+  // starts from a blank slate. The client's "Clear" button hits this when the
+  // user wants to force-refresh everything — handy when a bad sync left stale
+  // counts in collection_meta that the skipFresh optimisation keeps honouring.
+  if (action === 'delete-snapshot') {
+    if (!db) {
+      return new Response(JSON.stringify({ connected: false, error: 'Supabase service role key not configured.' }), { status: 500, headers: jsonHeaders });
+    }
+    const q = db.from('tally_snapshots').delete().eq('tenant_key', tenantKey);
+    const { error: delErr } = company ? await q.eq('company', company) : await q;
+    if (delErr) {
+      return new Response(JSON.stringify({ connected: false, error: `Failed to delete snapshot: ${delErr.message}` }), { status: 500, headers: jsonHeaders });
+    }
+    return new Response(JSON.stringify({ connected: true, action, deleted: true, company: company || '(all)' }), { headers: jsonHeaders });
+  }
+
   if (action === 'sync-full') {
     // Serial, not parallel. Shared-host Tally tunnels (ngrok free, cloudflare
     // quick tunnels, etc.) often only allow 1-2 concurrent connections; 5 at
@@ -1332,6 +1366,13 @@ Deno.serve(async (req) => {
       { key: 'paymentVouchers' as const, xml: paymentVouchersRequest(queryCfg), node: 'VOUCHER', timeoutMs: 30000 },
       { key: 'journalVouchers' as const, xml: journalVouchersRequest(queryCfg), node: 'VOUCHER', timeoutMs: 25000 },
       { key: 'contraVouchers' as const, xml: contraVouchersRequest(queryCfg), node: 'VOUCHER', timeoutMs: 20000 },
+      // Day Book is the safety-net. If any of the type-specific registers
+      // above returned 0 because Tally didn't recognise the voucher-type
+      // name, Day Book still pulls everything and the client splits by
+      // VOUCHERTYPENAME. Larger payload, so it runs LAST — if the wall-
+      // clock budget is tight we'd rather have the type-specific results
+      // than nothing, but in practice 140s is plenty for both.
+      { key: 'dayBook' as const, xml: dayBookRequest(queryCfg), node: 'VOUCHER', timeoutMs: 60000 },
     ];
 
     const skipped: Record<string, { reason: string; updatedAt: string }> = {};
@@ -1452,6 +1493,7 @@ Deno.serve(async (req) => {
     return new Response(JSON.stringify({
       connected: anyConnected,
       action,
+      edgeBuildId: EDGE_BUILD_ID,
       counts: mergedResponse?.counts ?? counts,
       data: mergedResponse?.data ?? data,
       errors: mergedResponse?.errors ?? errors,

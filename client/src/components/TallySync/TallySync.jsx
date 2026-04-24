@@ -7,7 +7,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useTallyData } from '../../context/TallyDataContext';
 import {
   TALLY_BACKEND, tallyAvailable, syncFromTally,
-  getStatus, getDataSummary, getCompanies,
+  getStatus, getDataSummary, getCompanies, deleteSnapshot,
 } from '../../lib/tallyClient';
 import { transformTallyLedgers, transformTallyFull } from '../../lib/tallyTransformer';
 import { availableRanges, rangeByKey } from '../../utils/dateRange';
@@ -326,13 +326,21 @@ export default function TallySync() {
     return () => document.removeEventListener('visibilitychange', onVisibilityChange);
   }, [available, isDemo, refreshTallyData]);
 
-  // "Clear local" no longer has a localStorage cache to wipe — the only
-  // mutable state is the cloud snapshot, which should be re-pulled, not
-  // deleted. The button now just re-pulls and surfaces confirmation.
-  const handleClearLiveData = () => {
+  // "Clear" wipes the cloud snapshot for this tenant — that's where
+  // dashboards read from. Local browser state is already reactive to the
+  // context refresh that follows. Used when a bad sync leaves stale counts
+  // in collection_meta and the TTL-based skipFresh optimisation keeps
+  // honouring them.
+  const handleClearLiveData = async () => {
     if (isDemo) return;
-    refreshTallyData();
-    setSyncResult({ success: true, cleared: true });
+    setSyncResult(null);
+    const r = await deleteSnapshot();
+    if (r.success) {
+      await refreshTallyData();
+      setSyncResult({ success: true, cleared: true });
+    } else {
+      setSyncResult({ success: false, error: r.error || 'Failed to clear snapshot.' });
+    }
   };
 
   // Surface the cloud snapshot using the same shape the old code expected —
@@ -557,7 +565,14 @@ export default function TallySync() {
               <div className={`p-3 rounded-lg border text-sm ${syncResult.success ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' : 'bg-red-500/10 border-red-500/20 text-red-400'}`}>
                 {syncResult.success ? (
                   <div className="space-y-1">
-                    <div>{syncResult.cleared ? '✓ Local Tally data cleared' : '✓ Synced successfully from Tally'}</div>
+                    <div className="flex items-center justify-between gap-3">
+                      <span>{syncResult.cleared ? '✓ Cloud snapshot cleared' : '✓ Synced successfully from Tally'}</span>
+                      {syncResult.edgeBuildId && (
+                        <span className="text-[10px] text-emerald-300/60 font-mono" title="Edge function build that handled this sync">
+                          edge: {syncResult.edgeBuildId}
+                        </span>
+                      )}
+                    </div>
                     {!syncResult.cleared && (
                       <div className="text-xs text-emerald-300/80">
                         {[
