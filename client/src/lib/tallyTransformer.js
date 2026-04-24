@@ -551,7 +551,21 @@ export function transformTallyFull(bundle, options = {}) {
   // Day Book is a safety-net catch-all: if any type-specific register
   // returned 0 because Tally didn't recognise the voucher-type name,
   // Day Book still pulls everything and we split by VOUCHERTYPENAME below.
-  const dayBookTree = bundle?.dayBook ?? null;
+  //
+  // Starting with edge build 2026-04-24-daybook-yearly-chunks, the server
+  // stores each calendar year under its own sub-key (dayBook_2021,
+  // dayBook_2022, ...) so no single parse tree blows the 150 MB Edge
+  // Function compute cap. Collect every shard — legacy "dayBook" key for
+  // sub-year / pre-chunking snapshots, plus dayBook_YYYY for the new
+  // chunked shape — and flatten into one voucher list. Dedup on
+  // (date|number|type) downstream catches any overlap.
+  const dayBookTrees = [];
+  if (bundle && typeof bundle === 'object') {
+    for (const [k, v] of Object.entries(bundle)) {
+      if (v == null) continue;
+      if (k === 'dayBook' || k.startsWith('dayBook_')) dayBookTrees.push(v);
+    }
+  }
   const stockItemsTree = bundle?.stockItems ?? null;
   const stockGroupsTree = bundle?.stockGroups ?? null;
   const profitLossTree = bundle?.profitLoss ?? null;
@@ -585,7 +599,7 @@ export function transformTallyFull(bundle, options = {}) {
     ...extractCollection(paymentsTree, 'VOUCHER'),
     ...extractCollection(journalsTree, 'VOUCHER'),
     ...extractCollection(contrasTree, 'VOUCHER'),
-    ...extractCollection(dayBookTree, 'VOUCHER'),
+    ...dayBookTrees.flatMap((tree) => extractCollection(tree, 'VOUCHER')),
   ];
   const seenKeys = new Set();
   const dedupedVouchers = [];
