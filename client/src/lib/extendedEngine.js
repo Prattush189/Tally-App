@@ -157,47 +157,96 @@ export function getToyCategories(overrides) {
 // "waiting for voucher sync" state instead of fabricated predictions.
 export function getForecast(overrides) {
   const purchases = overrides?.financials?.purchases || null;
-  const monthlySpend = purchases?.monthly || [];
-  const topSuppliers = purchases?.topSuppliers || [];
+  const supplierMonthly = purchases?.supplierMonthly || [];
+  const monthsAxis = purchases?.monthsAxis || [];
 
-  // Project the next 8 months from each top supplier's actual purchase
-  // history. Per-supplier monthly buckets aren't in financials.purchases
-  // (we only kept the supplier total to avoid bloating the snapshot), so
-  // we approximate each supplier's monthly trend by allocating the
-  // overall monthly purchase total proportionally to the supplier's
-  // share of total spend. That gives us a per-line trend that reflects
-  // both real seasonality (driven by monthly totals) and supplier
-  // concentration (driven by the spend share). Better than the previous
-  // "wait for sales-derived purchasedCategories" path which never fired
-  // because purchasedCategories needs sales vouchers.
-  const totalSpend = topSuppliers.reduce((s, x) => s + (x.value || 0), 0);
-  if (!monthlySpend.length || !topSuppliers.length || totalSpend <= 0) {
-    return { forecasts: [], totalForecast: 0, months: 0, source: monthlySpend.length ? 'waiting-for-suppliers' : 'waiting-for-purchase-register' };
+  if (!supplierMonthly.length || !monthsAxis.length) {
+    return {
+      forecasts: [],
+      totalForecast: 0,
+      months: 0,
+      source: purchases ? 'waiting-for-suppliers' : 'waiting-for-purchase-register',
+    };
   }
 
+  // Project 8 months forward per supplier from each supplier's actual
+  // monthly history. Use the last 12 months of activity (Holt-Winters
+  // would be nicer but isn't worth the cost here): trailing-3 baseline
+  // + simple linear trend (last-half mean - first-half mean). Peak
+  // months are flagged when their predicted spend is in the top
+  // tertile of the projection — useful signal for "stock up before X".
   const projMonths = 8;
-  const recentMonths = monthlySpend.slice(-12);
-  const forecasts = topSuppliers.slice(0, 8).map((s) => {
-    const share = s.value / totalSpend;
-    const series = recentMonths.map((m) => Math.round((m.value || 0) * share));
-    const half = Math.max(1, Math.floor(series.length / 2));
-    const first = series.slice(0, half).reduce((a, v) => a + v, 0) / half;
-    const last = series.slice(-half).reduce((a, v) => a + v, 0) / half;
+
+  // Convert YYYYMM month keys into human-friendly month labels so the
+  // chart x-axis reads "Jan '25" instead of "202501".
+  const fmtMonth = (yyyymm) => {
+    if (!yyyymm || yyyymm.length < 6) return yyyymm || '';
+    const y = yyyymm.slice(2, 4);
+    const m = Number(yyyymm.slice(4, 6));
+    const names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return `${names[m - 1] || '?'} '${y}`;
+  };
+
+  // Project forward starting one month after the most recent observed
+  // month so the timeline is contiguous.
+  const lastObserved = monthsAxis[monthsAxis.length - 1];
+  const futureKeys = (() => {
+    const keys = [];
+    if (!lastObserved) {
+      const now = new Date();
+      for (let i = 1; i <= projMonths; i++) {
+        const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
+        keys.push(`${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}`);
+      }
+      return keys;
+    }
+    const y = Number(lastObserved.slice(0, 4));
+    const m = Number(lastObserved.slice(4, 6));
+    for (let i = 1; i <= projMonths; i++) {
+      const d = new Date(y, (m - 1) + i, 1);
+      keys.push(`${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}`);
+    }
+    return keys;
+  })();
+
+  const forecasts = supplierMonthly.slice(0, 8).map((s) => {
+    const window = s.months.slice(-12);
+    const half = Math.max(1, Math.floor(window.length / 2));
+    const first = window.slice(0, half).reduce((a, v) => a + v, 0) / half;
+    const last = window.slice(-half).reduce((a, v) => a + v, 0) / half;
     const growthPerMonth = (last - first) / Math.max(1, half);
-    const baseline = series.slice(-Math.min(3, series.length)).reduce((a, v) => a + v, 0) / Math.min(3, series.length || 1);
-    const nextMonths = Array.from({ length: projMonths }, (_, i) => {
-      const predicted = Math.max(0, Math.round(baseline + growthPerMonth * (i + 1)));
+    const baseline = window.slice(-Math.min(3, window.length)).reduce((a, v) => a + v, 0) / Math.min(3, window.length || 1);
+
+    const rawPredictions = futureKeys.map((_, i) => Math.max(0, Math.round(baseline + growthPerMonth * (i + 1))));
+    const peakThreshold = (() => {
+      const sorted = [...rawPredictions].sort((a, b) => b - a);
+      return sorted[Math.floor(sorted.length / 3)] || 0;
+    })();
+    const nextMonths = futureKeys.map((mKey, i) => {
+      const predicted = rawPredictions[i];
+      // Confidence shrinks with distance + tightens around suppliers
+      // with more observed history. Floor at 50 so the chart's
+      // confidence band stays meaningful even for sparse history.
+      const historyMonths = window.filter((v) => v > 0).length;
+      const decay = Math.max(50, Math.round(85 - i * 3 - Math.max(0, 8 - historyMonths) * 2));
+      const spread = Math.max(0.1, 0.4 - historyMonths * 0.025);
       return {
-        month: `+${i + 1}m`,
+        month: fmtMonth(mKey),
         predicted,
-        confidence: Math.max(60, Math.round(85 - i * 3)),
-        isPeak: false,
-        lower: Math.round(predicted * 0.8),
-        upper: Math.round(predicted * 1.2),
+        confidence: decay,
+        isPeak: predicted > 0 && predicted >= peakThreshold,
+        lower: Math.max(0, Math.round(predicted * (1 - spread))),
+        upper: Math.round(predicted * (1 + spread)),
       };
     });
-    return { category: s.name, avgPrice: 0, forecasts: nextMonths, totalForecast: nextMonths.reduce((a, f) => a + f.predicted, 0) };
+    return {
+      category: s.name,
+      avgPrice: 0,
+      forecasts: nextMonths,
+      totalForecast: nextMonths.reduce((a, f) => a + f.predicted, 0),
+    };
   });
+
   const totalForecast = forecasts.reduce((s, f) => s + f.totalForecast, 0);
   return { forecasts, totalForecast, months: projMonths, source: 'purchase-register' };
 }

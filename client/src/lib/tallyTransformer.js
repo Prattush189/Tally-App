@@ -703,32 +703,54 @@ export function transformTallyFull(bundle, options = {}) {
   // Aggregate purchase spend so the InventoryBudget / inventory views
   // can show actuals next to projections without rerunning the
   // classification on every render. Sums VOUCHER AMOUNT (Tally serialises
-  // the AMOUNT element as a negative number for purchases — `Math.abs` on
-  // each row keeps the totals user-facing).
+  // the AMOUNT element as a negative number for purchases — `Math.abs`
+  // on each row keeps the totals user-facing). Also tracks per-supplier
+  // per-month buckets so getForecast() can do an actual time-series
+  // projection per supplier rather than allocating a global monthly
+  // trend by spend share (which made every supplier's forecast look
+  // alike).
   const purchaseTotals = (() => {
     let total = 0;
     const byMonth = new Map();
     const bySupplier = new Map();
+    const bySupplierMonth = new Map();
+    const allMonthsSet = new Set();
     for (const v of purchaseVouchers) {
       const amt = Math.abs(parseAmount(readField(v, 'AMOUNT')));
       if (!Number.isFinite(amt)) continue;
       total += amt;
       const monthKey = readField(v, 'DATE').slice(0, 6);
-      if (monthKey) byMonth.set(monthKey, (byMonth.get(monthKey) || 0) + amt);
+      if (monthKey) {
+        byMonth.set(monthKey, (byMonth.get(monthKey) || 0) + amt);
+        allMonthsSet.add(monthKey);
+      }
       const supplier = readField(v, 'PARTYLEDGERNAME').trim() || '(unspecified)';
       bySupplier.set(supplier, (bySupplier.get(supplier) || 0) + amt);
+      if (monthKey) {
+        const supMap = bySupplierMonth.get(supplier) || new Map();
+        supMap.set(monthKey, (supMap.get(monthKey) || 0) + amt);
+        bySupplierMonth.set(supplier, supMap);
+      }
     }
+    const allMonths = Array.from(allMonthsSet).sort();
     const topSuppliers = Array.from(bySupplier.entries())
       .map(([name, value]) => ({ name, value: Math.round(value) }))
       .sort((a, b) => b.value - a.value)
       .slice(0, 10);
-    const monthlySeries = Array.from(byMonth.entries())
-      .sort((a, b) => a[0].localeCompare(b[0]))
-      .map(([month, value]) => ({ month, value: Math.round(value) }));
+    const monthlySeries = allMonths.map((month) => ({ month, value: Math.round(byMonth.get(month) || 0) }));
+    // Per-supplier monthly series, padded so every supplier shares the
+    // same month axis. Lets the forecast see real seasonality per
+    // supplier rather than scaling a single global trend.
+    const supplierMonthly = topSuppliers.map(({ name }) => ({
+      name,
+      months: allMonths.map((m) => Math.round((bySupplierMonth.get(name)?.get(m)) || 0)),
+    }));
     return {
       total: Math.round(total),
       monthly: monthlySeries,
+      monthsAxis: allMonths,
       topSuppliers,
+      supplierMonthly,
     };
   })();
 

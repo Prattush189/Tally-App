@@ -415,12 +415,16 @@ function trialBalanceRequest(cfg: { company: string; fromDate: string; toDate: s
 // avoids the c0000005 crash that took every-voucher iteration down on
 // real distributor data files.
 //
-// Bare-minimum NATIVEMETHOD list — only the fields the transformer + the
-// downstream analytics actually read. Reference / Narration are long
-// free-text fields that easily double the parse tree size on heavy
-// tenants; dropping them was the difference between Sales Register
-// fitting under the 150 MB Edge Function cap and erroring with
-// "not having enough compute resources".
+// FETCH (not NATIVEMETHOD) is what actually restricts what Tally puts
+// in the XML response. NATIVEMETHOD just lists which methods to
+// compute — Tally still ships the voucher's full sub-collections
+// (LEDGERENTRIES.LIST, INVENTORYENTRIES.LIST, BILLALLOCATIONS.LIST,
+// BATCHALLOCATIONS.LIST, etc.) on every row. On a Sales Register
+// pull that's the difference between a 50 MB and a 400+ MB response
+// and the real reason the previous slim-NATIVEMETHODS build still
+// OOMed the 150 MB Edge Function. With FETCH listing only the five
+// header fields the transformer reads, Tally suppresses every
+// sub-collection per voucher and the parse tree stays bounded.
 function typedVoucherCollection(
   cfg: { company: string; fromDate: string; toDate: string; allData?: boolean },
   collectionName: string,
@@ -439,11 +443,7 @@ function typedVoucherCollection(
       <COLLECTION NAME="${collectionName}" ISMODIFY="No">
         <TYPE>Voucher</TYPE>
         <FILTERS>${collectionName}Filter</FILTERS>
-        <NATIVEMETHOD>Date</NATIVEMETHOD>
-        <NATIVEMETHOD>VoucherNumber</NATIVEMETHOD>
-        <NATIVEMETHOD>VoucherTypeName</NATIVEMETHOD>
-        <NATIVEMETHOD>PartyLedgerName</NATIVEMETHOD>
-        <NATIVEMETHOD>Amount</NATIVEMETHOD>
+        <FETCH>Date, VoucherNumber, VoucherTypeName, PartyLedgerName, Amount</FETCH>
       </COLLECTION>
       <SYSTEM TYPE="Formulae" NAME="${collectionName}Filter">${classFormula}</SYSTEM>
     </TDLMESSAGE></TDL>
