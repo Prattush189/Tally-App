@@ -138,12 +138,9 @@ export default function TallySync() {
     // edge function falls back to the XML username / password.
     portalUsername: config.portalUsername,
     portalPassword: config.portalPassword,
-    // Manual company override. Sent as `company` so the edge function's
-    // resolveConfig() picks it up as cfg.company, which feeds every
-    // SVCURRENTCOMPANY filter. Blank means "rely on auto-discovery",
-    // which only works when Tally has a company already open in the
-    // UI and its "List of Companies" report returns a parseable shape.
-    company: (config.manualCompany || '').trim(),
+    // Don't send `company` here — the orchestrator passes it
+    // per-iteration via syncAllPhases({ company }). If we set it
+    // here too, multi-company runs would all use the first entry.
   });
 
   const manualCompany = (config.manualCompany || '').trim();
@@ -230,7 +227,10 @@ export default function TallySync() {
     try {
       r = await syncAllPhases({
         config: backendCreds(),
-        company: companyName || manualCompany || undefined,
+        // Always explicit. The handleSync caller filtered the
+        // user-supplied company list before iterating, so every
+        // entry here is a non-empty name we expect Tally to know.
+        company: companyName || undefined,
         allData: Boolean(activeRange.allData),
         fromDate: activeRange.fromDate,
         toDate: activeRange.toDate,
@@ -307,28 +307,42 @@ export default function TallySync() {
       loadCompanyError: null,
     });
 
-    // 1st pass — no explicit company so syncAllPhases picks up whichever
-    // active_company the edge function resolves during discovery and
-    // returns the full discoveredCompanies list so the loop below covers
-    // every tenant.
-    setProgressCompany({ name: '', index: 1, total: 1 });
-    let first = await syncOneCompany('');
-    const discovered = first?.discoveredCompanies || [];
-    const firstCompany = first?.activeCompany || discovered[0] || '';
-    const companiesToSync = discovered.length
-      ? discovered
-      : (firstCompany ? [firstCompany] : ['']);
+    // Drive the sync off the user-supplied company list. TallyPrime's
+    // built-in "List of Companies" auto-detect is unreliable on hosted
+    // setups — it only returns companies currently LOADED in Tally,
+    // so a fresh tunnel sitting on the Select Company screen answers
+    // empty and the sync silently runs against placeholder data ("1
+    // record" everywhere). Asking the user to paste the exact names
+    // once removes that whole class of failure: every company we sync
+    // is one we know Tally can find.
+    const manualList = manualCompany
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (!manualList.length) {
+      setSyncResult({
+        success: false,
+        error: 'Add at least one company name to the Companies field above. Use the exact name TallyPrime shows on the Select Company screen, one per line.',
+        partial: true,
+        mode: 'client-chained',
+        collectionErrors: { config: 'No company name configured.' },
+      });
+      setProgressCompany({ name: '', index: 0, total: 1 });
+      setLivePhase(null);
+      setSyncing(false);
+      setSyncStartedAt(null);
+      return;
+    }
+
+    const companiesToSync = manualList;
+    const firstCompany = companiesToSync[0];
 
     const results = new Map();
-    results.set(firstCompany || '(default)', first);
-
-    // 2nd...Nth passes — every company except the one already covered by
-    // the first pass. Each pass runs the full per-phase chain with its
-    // own cooldowns, so a Tally crash on company B's Day Book 2022
-    // doesn't torpedo company C's sync.
+    // Each company gets its own load + phase chain. Per-company errors
+    // don't block the next company — every entry runs to completion
+    // (or its own per-phase failures) before we move on.
     for (let i = 0; i < companiesToSync.length; i++) {
       const name = companiesToSync[i];
-      if (name === firstCompany) continue;
       setProgressCompany({ name, index: results.size + 1, total: companiesToSync.length });
       setLivePhase({
         currentKey: null,
@@ -737,18 +751,19 @@ export default function TallySync() {
               </p>
               <div>
                 <label className="block text-xs text-gray-500 mb-1">
-                  Company name <span className="text-gray-600">(override auto-detect)</span>
+                  Companies to sync <span className="text-gray-600">(one per line — required)</span>
                 </label>
-                <input
-                  type="text"
+                <textarea
                   value={config.manualCompany}
                   disabled={isDemo || syncing}
                   onChange={e => setConfig(c => ({ ...c, manualCompany: e.target.value }))}
-                  className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
-                  placeholder="e.g. UNITED AGENCIES DISTRIBUTORS LLP - (from 1-Apr-26)"
+                  rows={4}
+                  className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm font-mono focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                  placeholder={`GIRNAR KIDS PLAY LLP - (from 1-Apr-26)
+UNITED AGENCIES DISTRIBUTORS LLP - (from 1-Apr-26)`}
                 />
                 <p className="text-[11px] text-gray-500 mt-1">
-                  Fill this in if Tally's &quot;List of Companies&quot; auto-detect comes back empty (hosted-Tally often does unless a company is already open in the UI). The exact name Tally shows on the Select Company screen works best. When set, every sync phase addresses this company directly and skips discovery.
+                  Paste the exact company name(s) Tally shows on the Select Company screen, one per line. Each company is opened in Tally via a Load Company action and synced separately. Required — TallyPrime&apos;s &quot;List of Companies&quot; auto-detect is unreliable on hosted setups (it only returns companies that are already loaded), so we always drive the sync from this list.
                 </p>
               </div>
               <div>
