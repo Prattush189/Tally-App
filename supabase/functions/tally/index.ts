@@ -626,6 +626,7 @@ async function persistSnapshotKey(
   key: string,
   data: unknown,
   count: number,
+  source: 'sync-full' | 'sync-collection' = 'sync-full',
 ): Promise<string | null> {
   const { error: rpcErr } = await db.rpc('merge_tally_snapshot_key', {
     p_tenant_key: tenantKey,
@@ -633,7 +634,7 @@ async function persistSnapshotKey(
     p_key: key,
     p_data: data,
     p_count: count,
-    p_source: 'sync-full',
+    p_source: source,
   });
   if (!rpcErr) return null;
   const rpcMsg = rpcErr.message || String(rpcErr);
@@ -647,9 +648,9 @@ async function persistSnapshotKey(
     mergeRpcMissingLogged = true;
   }
   // Fallback: SELECT existing row, merge the new key in Deno, UPSERT
-  // the full row back. This reintroduces the old memory pressure for
-  // heavy collections (Day Book shards), but it's strictly better than
-  // the current behaviour of persisting nothing at all.
+  // the full row back. Strictly worse on memory than the server-side
+  // RPC, but better than persisting nothing when the migration hasn't
+  // been applied yet.
   const nowIso = new Date().toISOString();
   const { data: existing, error: selErr } = await db
     .from('tally_snapshots')
@@ -671,7 +672,7 @@ async function persistSnapshotKey(
     counts: { ...existingCounts, [key]: count },
     errors: nextErrors,
     collection_meta: { ...existingMeta, [key]: { updated_at: nowIso, count, error: null } },
-    source: 'sync-full',
+    source,
     updated_at: nowIso,
   }, { onConflict: 'tenant_key,company' });
   if (upErr) return `fallback upsert failed: ${upErr.message}`;
@@ -1942,7 +1943,7 @@ Deno.serve(async (req) => {
       }), { headers: jsonHeaders });
     }
     const count = countNode(result, job.node);
-    const persistErr = await persistSnapshotKey(db, tenantKey, target, key, result, count);
+    const persistErr = await persistSnapshotKey(db, tenantKey, target, key, result, count, 'sync-collection');
     return new Response(JSON.stringify({
       connected: true, action, key, company: target,
       count, error: persistErr, source: 'sync-collection',
