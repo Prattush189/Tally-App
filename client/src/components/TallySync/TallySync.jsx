@@ -179,13 +179,18 @@ export default function TallySync() {
   const syncOneCompany = async (companyName) => {
     const phaseEvents = (evt) => {
       setLivePhase((prev) => {
+        // Carry forward EVERY field from prev so per-event handlers
+        // only have to set what they're updating. The earlier shape
+        // explicitly listed each field, which silently dropped any
+        // not in the list (loadCompanyStatus / loadCompanyName /
+        // loadCompanyError) on the next event — that's why the
+        // "Opening company in Tally" row stayed pending even after
+        // the load actually fired and succeeded.
         const next = {
-          currentKey: prev?.currentKey || null,
+          ...(prev || {}),
           keyStatus: { ...(prev?.keyStatus || {}) },
           keyCounts: { ...(prev?.keyCounts || {}) },
           keyErrors: { ...(prev?.keyErrors || {}) },
-          cooldownEndsAt: prev?.cooldownEndsAt || null,
-          attempt: prev?.attempt || null,
           discoveryStatus: prev?.discoveryStatus || 'pending',
         };
         if (evt.type === 'discover-start') {
