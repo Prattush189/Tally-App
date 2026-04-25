@@ -261,17 +261,21 @@ export const CORE_SYNC_PHASES = [
   'trialBalance',
 ];
 
-// Day Book voucher queries on the GIRNAR data files were triggering
-// a TallyPrime `c0000005 (Memory Access Violation)` crash. We
-// disabled this phase to ship master-data sync first. Now that
-// the per-company Load Company step is working and UA loads
-// cleanly, re-enabled by default — the crash was specific to
-// GIRNAR's voucher tree and may not reproduce on other company
-// files. If a future sync trips the crash again on a specific
-// company, the per-company iteration in handleSync makes it
-// possible to drop just that line from the Companies textarea
-// without losing the others.
-export const INCLUDE_DAY_BOOK = true;
+// Day Book voucher queries reproducibly crash TallyPrime with a
+// `c0000005 (Memory Access Violation)` exception on the customer's
+// data files — confirmed against both GIRNAR and UA, so it's not a
+// per-file corruption, it's a Tally-side bug in this build's voucher
+// tree walk. We tried minimising the query (7 NATIVEMETHODS, no
+// inventory entries / bill allocations / batch allocations) and
+// per-year chunking; both still trigger the same crash because the
+// crash happens during Tally's iteration over the underlying voucher
+// store, not during XML serialisation. Until Tally Solutions ships a
+// patched build (or the customer restores from a clean backup)
+// vouchers cannot be fetched. Master-data dashboards still sync
+// fine; voucher-dependent panels (Customer Health revenue, Toy
+// Category Scores, Purchase Forecasting, Avg Price by Region) stay
+// empty because the underlying data physically can't be retrieved.
+export const INCLUDE_DAY_BOOK = false;
 
 // Build the per-year Day Book phase keys for the requested date window.
 // Mirrors dayBookYearChunks() on the edge function. "All data" expands to

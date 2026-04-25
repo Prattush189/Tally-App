@@ -718,6 +718,15 @@ export default function TallySync() {
                   Per <a className="underline text-amber-200" href="https://help.tallysolutions.com/pre-requisites-for-integrations/" target="_blank" rel="noopener noreferrer">TallyPrime&apos;s integration prerequisites</a>: <i>&quot;at least one company must be loaded in Tally for third-party applications to work with it.&quot;</i> Whichever company you have open in Tally is the one we&apos;ll sync — its name, current period, and data are auto-detected on every run.
                 </p>
               </div>
+              <div className="p-3 rounded-lg border text-[11px] bg-red-500/10 border-red-500/30 text-red-200 space-y-1">
+                <div className="font-semibold text-red-300">⚠ Day Book (vouchers) disabled — Tally crashes on this dataset</div>
+                <p>
+                  TallyPrime throws a <code className="text-red-200">c0000005 (Memory Access Violation)</code> exception every time we walk the voucher tree on this installation, on every company we&apos;ve tried. It&apos;s a Tally-side bug — confirmed against the slimmest possible XML shape and per-year chunked windows. Voucher fetch is disabled until Tally Solutions ships a patched build or the data files are restored from a clean backup.
+                </p>
+                <p>
+                  Until then these dashboards <b>will stay empty</b>: Customer Health revenue (per-dealer ₹/month), Purchase Forecasting (historical demand), Toy Category Scores (margin / dealer adoption), Avg Price by Region. Master-data dashboards (Customers, Stock, P&amp;L, Balance Sheet, Trial Balance) sync normally.
+                </p>
+              </div>
               <div className="bg-gray-900/50 rounded-lg p-3">
                 <p className="text-xs text-gray-500 mb-1">Companies & range</p>
                 <p className="text-sm text-white">
