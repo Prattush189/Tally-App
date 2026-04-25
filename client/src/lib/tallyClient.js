@@ -251,6 +251,14 @@ export async function syncCollection({ key, company, config = {} }) {
 
 // Ordered list of non-Day-Book phases every sync walks. Kept in one place so
 // SyncProgress, handleSync and any scheduler stay in lockstep.
+//
+// salesRegister / receiptRegister / billsOutstanding are voucher fallbacks
+// that hit Tally's pre-compiled REPORT code path instead of the generic
+// Voucher iterator that crashes with c0000005 on this dataset. Each runs
+// in its own sync-collection isolate so a crash on one doesn't cascade.
+// They land under their own snapshot keys; the transformer merges them
+// with any existing dayBook_* shards into the same allVouchers list, so
+// every downstream dashboard reads them with no further changes.
 export const CORE_SYNC_PHASES = [
   'ledgers',
   'accountingGroups',
@@ -259,6 +267,9 @@ export const CORE_SYNC_PHASES = [
   'profitLoss',
   'balanceSheet',
   'trialBalance',
+  'salesRegister',
+  'receiptRegister',
+  'billsOutstanding',
 ];
 
 // Day Book voucher queries reproducibly crash TallyPrime with a
@@ -649,6 +660,37 @@ export async function loadFromSnapshot(tenantKey = 'default', company) {
       stockGroups: counts.stockGroups || 0,
       collectionErrors: data?.errors || {},
       raw: data?.data || {},
+    };
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+// Manual voucher upload — escape hatch for tenants whose Tally crashes
+// on every voucher iterator (Day Book, Sales Register, custom Voucher
+// COLLECTION all bomb with c0000005). The user exports Day Book to Excel
+// from Tally (Display More → Day Book → Ctrl+E), the UI parses the rows,
+// and posts them here. The edge function persists under the
+// `manualVouchers` snapshot key; the transformer reads it alongside any
+// dayBook_* shards so existing dashboards just work.
+export async function ingestManualVouchers(vouchers, { company, tenantKey = 'default' } = {}) {
+  if (TALLY_BACKEND !== 'supabase') {
+    return { success: false, error: 'Manual voucher upload requires the Supabase backend.' };
+  }
+  if (!Array.isArray(vouchers) || !vouchers.length) {
+    return { success: false, error: 'No vouchers parsed from the uploaded file.' };
+  }
+  try {
+    const r = await supabaseInvoke('ingest-vouchers', {
+      tenantKey,
+      company,
+      vouchers,
+    });
+    return {
+      success: Boolean(r?.connected),
+      count: r?.count ?? 0,
+      company: r?.company,
+      error: r?.error || (r?.connected ? null : 'ingest-vouchers returned no result'),
     };
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err) };

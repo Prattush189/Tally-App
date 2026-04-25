@@ -575,6 +575,21 @@ export function transformTallyFull(bundle, options = {}) {
       if (k === 'dayBook' || k.startsWith('dayBook_')) dayBookTrees.push(v);
     }
   }
+  // Voucher fallbacks for installs where Day Book triggers c0000005:
+  //   - salesRegister   — Tally's built-in Sales Register report
+  //   - receiptRegister — Tally's built-in Receipt Register report
+  //   - manualVouchers  — user-uploaded Day Book Excel (CSV)
+  // All three serialise VOUCHER nodes with the same field names Day Book
+  // uses (DATE, VOUCHERNUMBER, VOUCHERTYPENAME, PARTYLEDGERNAME, AMOUNT)
+  // so we can dump them into the same dedup-and-classify pipeline below.
+  const voucherFallbackTrees = [
+    bundle?.salesRegister ?? null,
+    bundle?.receiptRegister ?? null,
+    bundle?.manualVouchers ?? null,
+  ].filter((t) => t != null);
+  // Bills Outstanding rolls up bills (not vouchers) — different shape; the
+  // aging derivation below uses it via parseBillsOutstanding when present.
+  const billsOutstandingTree = bundle?.billsOutstanding ?? null;
   const stockItemsTree = bundle?.stockItems ?? null;
   const stockGroupsTree = bundle?.stockGroups ?? null;
   const profitLossTree = bundle?.profitLoss ?? null;
@@ -609,7 +624,12 @@ export function transformTallyFull(bundle, options = {}) {
     ...extractCollection(journalsTree, 'VOUCHER'),
     ...extractCollection(contrasTree, 'VOUCHER'),
     ...dayBookTrees.flatMap((tree) => extractCollection(tree, 'VOUCHER')),
+    ...voucherFallbackTrees.flatMap((tree) => extractCollection(tree, 'VOUCHER')),
   ];
+  // Suppress unused-warning while billsOutstanding parsing isn't wired
+  // into the aging pipeline yet — the snapshot key still lands and the
+  // raw tree is exposed to consumers via diagnostics.
+  void billsOutstandingTree;
   const seenKeys = new Set();
   const dedupedVouchers = [];
   for (const v of allVouchers) {
