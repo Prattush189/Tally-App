@@ -9,7 +9,7 @@ import { useFilters, applyFilters } from '../context/FiltersContext';
 // top-level gate keeps unsynced users on the Tally page anyway.
 export function useExtended(endpoint) {
   const { customers, syncedAt, financials } = useTallyData();
-  const { year, dealerId } = useFilters();
+  const { dateFrom, dateTo, dealerId } = useFilters();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -18,10 +18,10 @@ export function useExtended(endpoint) {
     setLoading(true);
     try {
       if (HAS_BACKEND) {
-        const res = await api.get(`/extended/${endpoint}`, { params: { year, dealerId } });
+        const res = await api.get(`/extended/${endpoint}`, { params: { dateFrom, dateTo, dealerId } });
         setData(res.data);
       } else if (customers.length) {
-        const filtered = applyFilters(customers, { year, dealerId });
+        const filtered = applyFilters(customers, { dateFrom, dateTo, dealerId });
         setData(runExtended(endpoint, { customers: filtered, financials }));
       } else {
         setData(null);
@@ -34,7 +34,7 @@ export function useExtended(endpoint) {
     }
   };
 
-  useEffect(() => { fetchData(); }, [endpoint, syncedAt, year, dealerId]);
+  useEffect(() => { fetchData(); }, [endpoint, syncedAt, dateFrom, dateTo, dealerId]);
 
   return { data, loading, error, refresh: fetchData };
 }

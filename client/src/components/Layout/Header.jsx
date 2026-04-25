@@ -23,15 +23,17 @@ function timeAgo(iso) {
 export default function Header({ active, searchQuery, onSearchChange, onRefresh, syncing }) {
   const { isDemo } = useAuth();
   const { customers, syncedAt, totals } = useTallyData();
-  const { year, setYear, dealerId, setDealerId } = useFilters();
+  const { dateFrom, setDateFrom, dateTo, setDateTo, dealerId, setDealerId } = useFilters();
   const currentPage = NAV_ITEMS.find(n => n.id === active);
   const hasLive = customers.length > 0;
   const rangeLabel = totals?.range;
   const statusLabel = isDemo ? 'Demo' : hasLive ? 'Live' : 'No data';
   const dotClass = isDemo ? 'bg-indigo-400' : hasLive ? 'bg-emerald-500' : 'bg-gray-500';
 
-  // Option lists derived from the current cloud snapshot.
-  const { years, dealers } = useMemo(
+  // Option lists derived from the current cloud snapshot. dataSpan
+  // bounds the date pickers to actual months we have data for so
+  // the user can't accidentally narrow to an empty window.
+  const { dataSpan, dealers } = useMemo(
     () => deriveFilterOptions(customers),
     [syncedAt, customers]
   );
@@ -54,16 +56,37 @@ export default function Header({ active, searchQuery, onSearchChange, onRefresh,
         <CompanySwitcher />
         {hasLive && (
           <>
-            <div className="flex items-center gap-1 bg-gray-800/60 border border-gray-700/50 rounded-lg pl-2 pr-1 py-1" title="Filter dashboards by year">
+            <div className="flex items-center gap-1 bg-gray-800/60 border border-gray-700/50 rounded-lg pl-2 pr-2 py-1" title={dataSpan?.from ? `Data spans ${dataSpan.from} → ${dataSpan.to}` : 'Filter dashboards by date range'}>
               <Calendar size={12} className="text-gray-500" />
-              <select
-                value={year}
-                onChange={e => setYear(e.target.value)}
-                className="bg-transparent text-xs text-gray-300 focus:outline-none appearance-none pr-1"
-              >
-                <option value="all">All years</option>
-                {years.map(y => <option key={y} value={y}>{y}</option>)}
-              </select>
+              <input
+                type="date"
+                value={dateFrom}
+                min={dataSpan?.from || undefined}
+                max={dataSpan?.to || undefined}
+                onChange={e => setDateFrom(e.target.value)}
+                className="bg-transparent text-xs text-gray-300 focus:outline-none appearance-none w-32"
+                placeholder={dataSpan?.from || 'from'}
+              />
+              <span className="text-gray-500 text-xs">→</span>
+              <input
+                type="date"
+                value={dateTo}
+                min={dataSpan?.from || undefined}
+                max={dataSpan?.to || undefined}
+                onChange={e => setDateTo(e.target.value)}
+                className="bg-transparent text-xs text-gray-300 focus:outline-none appearance-none w-32"
+                placeholder={dataSpan?.to || 'to'}
+              />
+              {(dateFrom || dateTo) && (
+                <button
+                  type="button"
+                  onClick={() => { setDateFrom(''); setDateTo(''); }}
+                  className="text-[10px] text-gray-500 hover:text-gray-200 ml-1"
+                  title="Clear date filter — show full data span"
+                >
+                  ×
+                </button>
+              )}
             </div>
             <div className="flex items-center gap-1 bg-gray-800/60 border border-gray-700/50 rounded-lg pl-2 pr-1 py-1" title="Filter dashboards by dealer">
               <User size={12} className="text-gray-500" />

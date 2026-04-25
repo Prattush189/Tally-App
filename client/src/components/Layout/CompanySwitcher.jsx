@@ -1,13 +1,17 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Building2, ChevronDown, Check } from 'lucide-react';
 import { getCompanies, setActiveCompany } from '../../lib/tallyClient';
 import { useAuth } from '../../context/AuthContext';
+import { canonicalCompanyName, groupCompaniesByCanonical } from '../../utils/companyName';
 
 // Top-bar dropdown for picking which Tally company the dashboards show.
 // Reads the cached list from tally_companies (populated automatically at
-// the start of every sync-full run — no manual "Detect" step). Switching
-// is anon-safe now; anyone with the app open can change the active
-// company and everyone else's dashboards follow on next load.
+// the start of every sync run — no manual "Detect" step). Tally tends to
+// hold one "company" per financial year for the same business
+// (e.g. "ACME LLP - (from 1-Apr-25)" + "ACME LLP - (from 1-Apr-26)"); we
+// dedup by the canonical name (suffix stripped) and stitch every FY's
+// data into one logical company in storage, so the dropdown shows the
+// canonical entries once.
 
 export default function CompanySwitcher() {
   const { isDemo } = useAuth();
@@ -21,6 +25,12 @@ export default function CompanySwitcher() {
     setCompanies(res.companies || []);
     setActive(res.activeCompany || '');
   }
+
+  // Group raw Tally names by canonical, sorted by canonical name. Each
+  // group's `members` list shows the underlying FY-tagged entries so a
+  // power user can still see which FYs Tally exposed for that business.
+  const grouped = useMemo(() => groupCompaniesByCanonical(companies), [companies]);
+  const activeCanonical = canonicalCompanyName(active);
 
   useEffect(() => {
     if (isDemo) return;
@@ -38,15 +48,17 @@ export default function CompanySwitcher() {
     return () => window.removeEventListener('click', close);
   }, [open]);
 
-  async function choose(name) {
-    if (saving || name === active) { setOpen(false); return; }
+  async function choose(canonical) {
+    if (saving || canonical === activeCanonical) { setOpen(false); return; }
     setSaving(true);
     try {
-      // set-active-company is no longer token-gated; anon key is enough.
-      await setActiveCompany('', name);
-      setActive(name);
+      // Store canonical name as the active company. The edge function's
+      // get-snapshot reads by this key, and every per-FY sync writes to
+      // the canonical row, so picking the canonical surfaces the
+      // stitched multi-FY view automatically.
+      await setActiveCompany('', canonical);
+      setActive(canonical);
       setOpen(false);
-      // Reload so every dashboard fetches the new active company.
       window.location.reload();
     } catch (err) {
       // eslint-disable-next-line no-alert
@@ -56,31 +68,38 @@ export default function CompanySwitcher() {
     }
   }
 
-  if (isDemo || !companies.length) return null;
+  if (isDemo || !grouped.length) return null;
 
   return (
     <div className="__company_switcher relative">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        title="Switch Tally company — each company has its own snapshot"
+        title="Switch Tally company — each canonical entry stitches every per-FY data file together"
         className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gray-800/60 border border-gray-700/50 text-sm text-gray-200 hover:border-indigo-500/40"
       >
         <Building2 size={14} className="text-indigo-400" />
-        <span className="max-w-[16rem] truncate">{active || '(pick a company)'}</span>
+        <span className="max-w-[16rem] truncate">{activeCanonical || '(pick a company)'}</span>
         <ChevronDown size={12} className={`text-gray-500 transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
       {open && (
-        <div className="absolute right-0 top-full mt-1 bg-gray-900 border border-gray-700/60 rounded-lg shadow-xl min-w-[20rem] max-h-80 overflow-auto z-50">
-          {companies.map((name) => (
+        <div className="absolute right-0 top-full mt-1 bg-gray-900 border border-gray-700/60 rounded-lg shadow-xl min-w-[22rem] max-h-96 overflow-auto z-50">
+          {grouped.map(({ canonical, members }) => (
             <button
-              key={name}
+              key={canonical}
               type="button"
-              onClick={() => choose(name)}
-              className="w-full flex items-center justify-between text-left px-3 py-2 text-sm text-gray-200 hover:bg-indigo-500/10"
+              onClick={() => choose(canonical)}
+              className="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-indigo-500/10"
             >
-              <span className="truncate">{name}</span>
-              {name === active && <Check size={14} className="text-emerald-400 flex-shrink-0" />}
+              <div className="flex items-center justify-between gap-2">
+                <span className="truncate font-medium">{canonical}</span>
+                {canonical === activeCanonical && <Check size={14} className="text-emerald-400 flex-shrink-0" />}
+              </div>
+              {members.length > 1 && (
+                <div className="text-[11px] text-gray-500 mt-0.5">
+                  {members.length} FY files: {members.map((m) => m.fy?.label || '?').filter(Boolean).join(' · ')}
+                </div>
+              )}
             </button>
           ))}
         </div>

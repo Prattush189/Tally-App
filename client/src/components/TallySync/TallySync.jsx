@@ -3,6 +3,7 @@ import { RefreshCw, CheckCircle, AlertTriangle, Wifi, WifiOff, Database, Users, 
 import SectionHeader from '../common/SectionHeader';
 import SyncProgress from '../common/SyncProgress';
 import { fmt } from '../../utils/format';
+import { canonicalCompanyName, extractFyFromName } from '../../utils/companyName';
 import { useAuth } from '../../context/AuthContext';
 import { useTallyData } from '../../context/TallyDataContext';
 import {
@@ -197,16 +198,32 @@ export default function TallySync() {
 
     let r;
     try {
+      // Bound the voucher queries by the FY encoded in the company name
+      // suffix ("(from 1-Apr-26)" → 2026-04-01 through 2027-03-31).
+      // Each Tally "company" is one FY's data file by convention; without
+      // an explicit period filter Tally returns whatever range happens
+      // to be loaded in the GUI which on a fresh open of an FY company
+      // can OOM Sales Register's parse tree. The FY suffix gives us a
+      // safe, deterministic period that strictly matches what's in
+      // that data file.
+      const fy = extractFyFromName(companyName);
       r = await syncAllPhases({
         config: backendCreds(),
-        // companyName is set when iterating discovered companies; if
-        // empty, syncAllPhases falls back to whichever company Tally
-        // has open (no SVCURRENTCOMPANY filter on the queries).
+        // companyName is the literal Tally name (with the suffix); used
+        // verbatim in SVCURRENTCOMPANY. If empty, syncAllPhases falls
+        // back to whichever company Tally has open.
         company: companyName || undefined,
-        // No date override. Tally already has the company's books-from
-        // / current-period set; we accept whatever rows Tally serves
-        // for that period rather than slicing by year (which was
-        // OOMing the Sales register isolate on a 5-year window).
+        // canonicalCompany is the storage key on tally_snapshots — every
+        // FY of the same business writes to the same canonical row so
+        // the dashboards stitch them together transparently.
+        canonicalCompany: canonicalCompanyName(companyName) || undefined,
+        // FY tag becomes a sub-key suffix for voucher data (e.g.
+        // salesRegister_2526) so multiple FYs for the same canonical
+        // business can coexist under one snapshot row without
+        // overwriting each other.
+        fyTag: fy ? fy.label : null,
+        fromDate: fy?.fromDate,
+        toDate: fy?.toDate,
         onPhase: phaseEvents,
       });
     } catch (err) {

@@ -1928,6 +1928,23 @@ Deno.serve(async (req) => {
         error: 'Missing company for action="sync-collection" — pass `company` in the body.',
       }), { status: 400, headers: jsonHeaders });
     }
+    // canonicalCompany / fyTag let multi-FY tenants stitch their per-FY
+    // Tally companies into a single dashboard view. The literal `target`
+    // (e.g. "ACME LLP - (from 1-Apr-26)") is what Tally needs in
+    // SVCURRENTCOMPANY; the canonical name (e.g. "ACME LLP") is what
+    // the snapshot row is keyed under so all FYs land in the same row;
+    // the FY tag (e.g. "FY26-27") becomes a sub-key suffix on voucher
+    // collection keys so different FYs of sales / purchase / receipts
+    // coexist instead of overwriting each other.
+    const canonicalCompany = (typeof body.canonicalCompany === 'string' && body.canonicalCompany.trim())
+      || target;
+    const fyTag = (typeof body.fyTag === 'string' && body.fyTag.trim()) || '';
+    // Vouchers get the FY suffix; master data (ledgers, stock items,
+    // P&L, BS, TB) stays on the bare key — those are either identical
+    // across FYs (master data) or already period-scoped by Tally
+    // itself (financial statements, scoped by the per-call SVFROMDATE).
+    const VOUCHER_KEYS = new Set(['salesRegister', 'purchaseRegister', 'receiptRegister', 'billsOutstanding']);
+    const storageKey = (fyTag && VOUCHER_KEYS.has(key)) ? `${key}_${fyTag}` : key;
     const queryCfg = { ...cfg, company: target };
     const job = buildCollectionJob(key, queryCfg);
     if (!job) {
@@ -1956,8 +1973,8 @@ Deno.serve(async (req) => {
       const errMsg = lastErr instanceof Error ? lastErr.message : String(lastErr);
       const { error: recErr } = await db.rpc('record_tally_snapshot_errors', {
         p_tenant_key: tenantKey,
-        p_company: target,
-        p_errors: { [key]: errMsg },
+        p_company: canonicalCompany,
+        p_errors: { [storageKey]: errMsg },
         p_source: 'sync-collection',
       });
       if (recErr && /schema cache|Could not find the function|does not exist/i.test(recErr.message || String(recErr))) {
@@ -1966,31 +1983,31 @@ Deno.serve(async (req) => {
           .from('tally_snapshots')
           .select('errors, collection_meta')
           .eq('tenant_key', tenantKey)
-          .eq('company', target)
+          .eq('company', canonicalCompany)
           .maybeSingle();
         const nextMeta = {
           ...((existing?.collection_meta as Record<string, { updated_at?: string; error?: string | null }>) || {}),
-          [key]: { error: errMsg },
+          [storageKey]: { error: errMsg },
         };
         await db.from('tally_snapshots').upsert({
           tenant_key: tenantKey,
-          company: target,
-          errors: { ...((existing?.errors as Record<string, string>) || {}), [key]: errMsg },
+          company: canonicalCompany,
+          errors: { ...((existing?.errors as Record<string, string>) || {}), [storageKey]: errMsg },
           collection_meta: nextMeta,
           source: 'sync-collection',
           updated_at: nowIso,
         }, { onConflict: 'tenant_key,company' });
       }
       return new Response(JSON.stringify({
-        connected: false, action, key, company: target,
+        connected: false, action, key, storageKey, company: canonicalCompany, sourceCompany: target, fyTag: fyTag || null,
         count: 0, error: errMsg, edgeBuildId: EDGE_BUILD_ID,
         diagnostics: snapshotDiagnostics(),
       }), { headers: jsonHeaders });
     }
     const count = countNode(result, job.node);
-    const persistErr = await persistSnapshotKey(db, tenantKey, target, key, result, count, 'sync-collection');
+    const persistErr = await persistSnapshotKey(db, tenantKey, canonicalCompany, storageKey, result, count, 'sync-collection');
     return new Response(JSON.stringify({
-      connected: true, action, key, company: target,
+      connected: true, action, key, storageKey, company: canonicalCompany, sourceCompany: target, fyTag: fyTag || null,
       count, error: persistErr, source: 'sync-collection',
       edgeBuildId: EDGE_BUILD_ID,
       diagnostics: snapshotDiagnostics(),

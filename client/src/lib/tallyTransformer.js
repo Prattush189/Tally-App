@@ -552,29 +552,41 @@ export function transformTallyFull(bundle, options = {}) {
   const now = options.now instanceof Date ? options.now : new Date();
   const ledgerTree = bundle?.ledgers ?? null;
   const accountingGroupsTree = bundle?.accountingGroups ?? null;
-  // Voucher feeds — every dashboard reads vouchers from typed Voucher
-  // COLLECTION fetches (Sales / Purchase / Receipt Register). Tolerate
-  // any salesRegister_YYYY key that an older snapshot may still have
-  // (we no longer write them) so previously-synced tenants don't lose
-  // sales history when reading their existing snapshot.
-  const salesShardTrees = [];
-  if (bundle && typeof bundle === 'object') {
+  // Voucher feeds. Collect every FY-suffixed shard for each register so
+  // multi-FY tenants (one Tally company per FY, all stitched under the
+  // canonical company name) get a unified voucher list across years.
+  // Bare keys (no _FY suffix) work too — single-FY tenants and the
+  // legacy snapshot shape land there. The matcher accepts either the
+  // exact key or `${key}_<anything>` so future per-period shards keep
+  // working without transformer changes.
+  const collectShards = (baseKey) => {
+    const out = [];
+    if (!bundle || typeof bundle !== 'object') return out;
     for (const [k, v] of Object.entries(bundle)) {
       if (v == null) continue;
-      if (k === 'salesRegister' || k.startsWith('salesRegister_')) salesShardTrees.push(v);
+      if (k === baseKey || k.startsWith(`${baseKey}_`)) out.push(v);
     }
-  }
+    return out;
+  };
+  const salesShardTrees = collectShards('salesRegister');
+  const purchaseShardTrees = collectShards('purchaseRegister');
+  const receiptShardTrees = collectShards('receiptRegister');
+  const billsShardTrees = collectShards('billsOutstanding');
   const voucherFeedTrees = [
     ...salesShardTrees,
-    bundle?.purchaseRegister ?? null,
-    bundle?.receiptRegister ?? null,
+    ...purchaseShardTrees,
+    ...receiptShardTrees,
   ].filter((t) => t != null);
   const salesRegisterVouchers = salesShardTrees.flatMap((tree) => extractCollection(tree, 'VOUCHER'));
-  const purchaseRegisterVouchers = extractCollection(bundle?.purchaseRegister ?? null, 'VOUCHER');
-  const receiptRegisterVouchers = extractCollection(bundle?.receiptRegister ?? null, 'VOUCHER');
+  const purchaseRegisterVouchers = purchaseShardTrees.flatMap((tree) => extractCollection(tree, 'VOUCHER'));
+  const receiptRegisterVouchers = receiptShardTrees.flatMap((tree) => extractCollection(tree, 'VOUCHER'));
   // Bills Outstanding rolls up bills (not vouchers) — different shape; the
   // aging derivation below uses it via parseBillsOutstanding when present.
-  const billsOutstandingTree = bundle?.billsOutstanding ?? null;
+  // Bills Outstanding now also gets shard-collected for multi-FY tenants
+  // (billsOutstanding, billsOutstanding_FY26-27, ...). The first non-null
+  // shard is enough for the aging derivation below — keeping a list so
+  // we don't lose visibility when the transformer's aging path lands.
+  const billsOutstandingTree = billsShardTrees[0] ?? null;
   const stockItemsTree = bundle?.stockItems ?? null;
   const stockGroupsTree = bundle?.stockGroups ?? null;
   const profitLossTree = bundle?.profitLoss ?? null;

@@ -229,7 +229,7 @@ export async function loadCompany(company, config = {}) {
 // for sync-full's single pool. Returns the raw response object so
 // callers can inspect { count, error, edgeBuildId, diagnostics } and
 // decide whether to keep marching or surface a failure.
-export async function syncCollection({ key, company, config = {} }) {
+export async function syncCollection({ key, company, canonicalCompany, fyTag, config = {} }) {
   if (TALLY_BACKEND !== 'supabase') {
     throw new Error('Per-collection sync requires the Supabase backend.');
   }
@@ -238,6 +238,8 @@ export async function syncCollection({ key, company, config = {} }) {
   return supabaseInvoke('sync-collection', {
     key,
     company,
+    canonicalCompany,
+    fyTag,
     allData: config.allData === true,
     fromDate: config.fromDate,
     toDate: config.toDate,
@@ -301,12 +303,12 @@ function isRetriableSyncError(msg) {
 // pattern, so the user has a moment to dismiss the "Internal Error" dialog
 // before we hit Tally again). Non-retriable errors bubble out immediately
 // — auth/4xx/5xx responses don't get better on retry.
-async function runPhaseWithRetry({ key, company, config, maxAttempts, retryWaitMs, onAttempt }) {
+async function runPhaseWithRetry({ key, company, canonicalCompany, fyTag, config, maxAttempts, retryWaitMs, onAttempt }) {
   let lastErr = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       onAttempt?.({ key, attempt, maxAttempts });
-      const res = await syncCollection({ key, company, config });
+      const res = await syncCollection({ key, company, canonicalCompany, fyTag, config });
       if (res?.error && isRetriableSyncError(res.error) && attempt < maxAttempts) {
         lastErr = new Error(res.error);
         await wait(retryWaitMs);
@@ -343,6 +345,8 @@ async function runPhaseWithRetry({ key, company, config, maxAttempts, retryWaitM
 export async function syncAllPhases({
   config = {},
   company: explicitCompany,
+  canonicalCompany,
+  fyTag,
   allData,
   fromDate,
   toDate,
@@ -472,6 +476,8 @@ export async function syncAllPhases({
       const res = await runPhaseWithRetry({
         key,
         company: activeCompany,
+        canonicalCompany,
+        fyTag,
         config: phaseConfig,
         maxAttempts: maxAttemptsPerPhase,
         retryWaitMs,
