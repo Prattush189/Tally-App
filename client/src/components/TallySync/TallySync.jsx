@@ -428,11 +428,38 @@ export default function TallySync() {
     // voucher-side c0000005 crash is unresolved on the customer
     // dataset, so 0 dayBook records is expected and not a signal
     // that a company isn't loaded.
+    // Tally-side "no company really loaded" heuristic. When Tally's
+    // XML server is up but no company is actually open, every
+    // collection still answers — but with synthetic defaults: 1 root
+    // "Primary" group, 1 built-in ledger, 1 stub stock entry, and
+    // zero P&L / BS / TB rows. We detect that pattern PER COMPANY so
+    // multi-company runs can call out exactly which ones the user
+    // forgot to open in Tally instead of a single generic warning.
+    // Day Book counts are intentionally excluded — we skip that phase
+    // entirely while the voucher c0000005 crash is unresolved.
+    const looksPlaceholder = (counts) =>
+      Number(counts?.ledgers || 0) <= 1
+      && Number(counts?.stockItems || 0) <= 1
+      && Number(counts?.stockGroups || 0) <= 1;
+    const notLoadedCompanies = Object.entries(agg.perCompany || {})
+      .filter(([name, c]) => name !== '(default)' && c.success && looksPlaceholder(c))
+      .map(([name]) => name);
+    const loadedCompanies = Object.entries(agg.perCompany || {})
+      .filter(([name, c]) => name !== '(default)' && c.success && !looksPlaceholder(c))
+      .map(([name]) => name);
+    if (notLoadedCompanies.length) {
+      agg.notLoadedCompanies = notLoadedCompanies;
+      agg.loadedCompanies = loadedCompanies;
+    }
+    // Keep the legacy banner for the all-companies-empty case (the
+    // user hasn't loaded ANY company in Tally), but skip it when at
+    // least one company in the run worked — the per-company list
+    // below is the precise signal in that case.
     const lookSuspect = agg.ledgers <= 1 && agg.stockItems <= 1 && agg.stockGroups <= 1
       && !Object.keys(agg.collectionErrors).length;
-    if (lookSuspect && (agg.success || agg.fetched.length)) {
+    if (lookSuspect && !loadedCompanies.length && (agg.success || agg.fetched.length)) {
       agg.tallyNotServingRealData = true;
-      agg.note = 'Tally answered every phase but returned only placeholder counts (1 ledger / 1 group). This almost always means no company is actually open in TallyPrime — usually because a "c0000005 Memory Access Violation" dialog is blocking the Select Company screen. On the Tally machine: click OK on the error dialog, open a working company, and sync again. If every company crashes, the Tally data files are likely corrupt — restore from a backup or contact Tally Solutions support.';
+      agg.note = 'Tally answered every phase but returned only placeholder counts (1 ledger / 1 group). No company appears to be loaded in TallyPrime — open one (or several) in Tally\'s Select Company screen, then sync again.';
     }
 
     setSyncResult(agg);
@@ -854,6 +881,38 @@ UNITED AGENCIES DISTRIBUTORS LLP - (from 1-Apr-26)`}
                 server is alive but no real company is loaded. Almost
                 always the c0000005 Memory Access Violation dialog is
                 blocking the UI. */}
+            {/* Per-company "not loaded in Tally" callout. Fires when
+                some companies in the textarea got real data but
+                others came back with placeholder counts — almost
+                always because the user opened one company in Tally
+                but not the others. Tally's XML interface only sees
+                companies the GUI has loaded. */}
+            {syncResult?.notLoadedCompanies?.length && !syncing && (
+              <div className="p-3 rounded-lg border text-sm bg-amber-500/10 border-amber-500/30 text-amber-300 space-y-2">
+                <div className="font-semibold">⚠ Some companies aren&apos;t loaded in Tally</div>
+                <p className="text-xs text-amber-200/90">
+                  TallyPrime returned real data for {syncResult.loadedCompanies?.length || 0} compan{syncResult.loadedCompanies?.length === 1 ? 'y' : 'ies'} and only placeholder counts for {syncResult.notLoadedCompanies.length}. Tally&apos;s XML server only exposes companies the desktop GUI has actually opened — our Load Company action XML can&apos;t open them programmatically on this build.
+                </p>
+                {syncResult.loadedCompanies?.length > 0 && (
+                  <div className="text-xs text-emerald-300/90">
+                    <span className="font-semibold">✓ Loaded (got real data):</span>
+                    <ul className="ml-4 mt-0.5 list-disc">
+                      {syncResult.loadedCompanies.map((n) => (<li key={n}><code className="text-emerald-200/90">{n}</code></li>))}
+                    </ul>
+                  </div>
+                )}
+                <div className="text-xs text-red-300/90">
+                  <span className="font-semibold">✗ Not loaded (got placeholders):</span>
+                  <ul className="ml-4 mt-0.5 list-disc">
+                    {syncResult.notLoadedCompanies.map((n) => (<li key={n}><code className="text-red-200/90">{n}</code></li>))}
+                  </ul>
+                </div>
+                <p className="text-xs text-amber-200/90">
+                  Fix: in TallyPrime, open each of the &quot;not loaded&quot; companies (Gateway of Tally → F1: Help → Select Company, repeat for each). TallyPrime supports multiple companies loaded at once. Then re-run Sync — every loaded company will pull real data.
+                </p>
+              </div>
+            )}
+
             {syncResult?.tallyNotServingRealData && (
               <div className="p-3 rounded-lg border text-sm bg-amber-500/10 border-amber-500/30 text-amber-300 space-y-1">
                 <div className="font-semibold">⚠ Tally is up but no company is actually open</div>
