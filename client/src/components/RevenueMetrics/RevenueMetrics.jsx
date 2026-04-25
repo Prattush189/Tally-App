@@ -6,18 +6,56 @@ import SectionHeader from '../common/SectionHeader';
 import LoadingSpinner from '../common/LoadingSpinner';
 import TimeGranularityToggle, { aggregateSeries } from '../common/TimeGranularityToggle';
 import { useAnalytics } from '../../hooks/useAnalytics';
+import { useTallyData } from '../../context/TallyDataContext';
 import { fmt, TOOLTIP_STYLE, CHART_COLORS } from '../../utils/format';
+
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function fmtSalesMonth(yyyymm) {
+  if (!yyyymm || yyyymm.length < 6) return yyyymm || '';
+  return `${MONTH_NAMES[Number(yyyymm.slice(4, 6)) - 1] || '?'} '${yyyymm.slice(2, 4)}`;
+}
 
 export default function RevenueMetrics() {
   const { data, loading } = useAnalytics('revenue');
+  const { financials } = useTallyData();
   const [granularity, setGranularity] = useState('month');
   if (loading || !data) return <LoadingSpinner />;
   const trendSeries = aggregateSeries(data.revenueTrends, granularity);
   const trendLabel = granularity === 'month' ? '12 Months' : granularity === 'quarter' ? 'Quarterly' : 'Yearly';
 
+  // Sales Register monthly trend — always available, even when the
+  // per-customer voucher detail isn't (Tally crashes on the per-voucher
+  // iterator on this dataset; only the pre-compiled report path is safe).
+  const salesMonthly = financials?.sales?.monthly || [];
+  const salesTotal = financials?.sales?.total || 0;
+  const peakMonth = salesMonthly.reduce((peak, m) => (m.value || 0) > (peak?.value || 0) ? m : peak, null);
+
   return (
     <div className="space-y-6">
-      <SectionHeader icon={DollarSign} title="Revenue & Retention Metrics" subtitle="NRR, GRR, LTV & cohort analysis — all from invoice history" />
+      <SectionHeader icon={DollarSign} title="Revenue & Retention Metrics" subtitle="Monthly revenue from Tally Sales Register, plus per-customer retention where voucher data permits" />
+
+      {salesMonthly.length > 0 && (
+        <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
+          <MetricCard icon={DollarSign} label="Total Revenue" value={fmt(salesTotal)} sub={`across ${salesMonthly.length} months`} color="emerald" />
+          <MetricCard icon={TrendingUp} label="Peak Month" value={peakMonth ? fmtSalesMonth(peakMonth.month) : '—'} sub={peakMonth ? fmt(peakMonth.value) : ''} color="indigo" />
+          <MetricCard icon={Activity} label="Avg Monthly Revenue" value={fmt(Math.round(salesTotal / Math.max(1, salesMonthly.length)))} color="violet" />
+        </div>
+      )}
+
+      {salesMonthly.length > 0 && (
+        <div className="glass-card p-5">
+          <h3 className="text-sm font-semibold text-gray-300 mb-4">Monthly Revenue Trend (Sales Register)</h3>
+          <ResponsiveContainer width="100%" height={280}>
+            <BarChart data={salesMonthly.map(m => ({ ...m, label: fmtSalesMonth(m.month) }))}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+              <XAxis dataKey="label" tick={{ fill: '#9ca3af', fontSize: 11 }} />
+              <YAxis tick={{ fill: '#9ca3af', fontSize: 12 }} tickFormatter={v => fmt(v)} />
+              <Tooltip contentStyle={TOOLTIP_STYLE} formatter={v => fmt(v)} />
+              <Bar dataKey="value" fill="#22c55e" radius={[6, 6, 0, 0]} name="Revenue" />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      )}
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <MetricCard icon={TrendingUp} label="Net Revenue Retention" value={`${data.latestNRR}%`} trend={2.1} color="emerald" />

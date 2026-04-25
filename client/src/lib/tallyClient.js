@@ -325,31 +325,93 @@ async function runPhaseWithRetry({ key, company, canonicalCompany, fyTag, config
   throw lastErr;
 }
 
-// Slice an FY window (from / to dates as YYYYMMDD) into 4 calendar
-// quarters. Returns [{ from, to, label }] chronologically. Indian FY
-// runs Apr-Mar, so Q1 starts Apr 1 of the FY's start year. Used to
-// fan Sales / Purchase Register into per-quarter sync-collection
-// calls when a full-FY register fetch OOMs the Edge Function isolate
-// (each quarter then runs in its own 150 MB / 150 s compute budget).
-function fyQuarters(fromDate, toDate) {
+// Slice an FY window (YYYYMMDD from / to) into N calendar buckets.
+// Indian FY runs Apr-Mar so the buckets are aligned to the FY start.
+// Used to fan heavy voucher registers into per-bucket sync-collection
+// calls so each bucket runs in its own 150 MB Edge Function isolate
+// (and so a single bucket's Tally crash / OOM doesn't take the rest
+// of that register's coverage with it).
+const pad2 = (n) => String(n).padStart(2, '0');
+const fmtDate = (y, m, d) => `${y}${pad2(m)}${pad2(d)}`;
+
+function fyMonths(fromDate, toDate) {
   if (!fromDate || !toDate || fromDate.length < 8 || toDate.length < 8) return [];
   const fy = Number(fromDate.slice(0, 4));
   if (!Number.isFinite(fy)) return [];
-  const fmt = (y, m, d) => `${y}${String(m).padStart(2, '0')}${String(d).padStart(2, '0')}`;
-  return [
-    { from: fmt(fy, 4, 1),     to: fmt(fy, 6, 30),     label: 'Q1' },
-    { from: fmt(fy, 7, 1),     to: fmt(fy, 9, 30),     label: 'Q2' },
-    { from: fmt(fy, 10, 1),    to: fmt(fy, 12, 31),    label: 'Q3' },
-    { from: fmt(fy + 1, 1, 1), to: fmt(fy + 1, 3, 31), label: 'Q4' },
-  ];
+  // 12 calendar months, Apr (FY) through Mar (FY+1).
+  const out = [];
+  for (let i = 0; i < 12; i++) {
+    const m = ((4 + i - 1) % 12) + 1;
+    const y = (4 + i) > 12 ? fy + 1 : fy;
+    const lastDay = new Date(y, m, 0).getDate();
+    out.push({
+      from: fmtDate(y, m, 1),
+      to: fmtDate(y, m, lastDay),
+      label: `M${pad2(i + 1)}`,
+    });
+  }
+  return out;
 }
 
-// Voucher classes that get fanned into quarterly chunks when an FY
-// window is set. Sales is by far the biggest (every invoice over the
-// FY); Purchase can be similarly heavy on trading-style distributors.
-// Receipt + Bills Outstanding stay single-shot — receipts have a tiny
-// payload per row and bills outstanding is a point-in-time snapshot.
-const QUARTERLY_CHUNK_PHASES = new Set(['salesRegister', 'purchaseRegister']);
+// 52 weekly buckets across an FY (intentionally unused for now — kept
+// available for the rare tenant where Purchase Register is too heavy
+// for monthly buckets). Each bucket is 7 days; the final absorbs any
+// leftover days. Switch CHUNK_STRATEGY.purchaseRegister to 'weekly' if
+// monthly OOMs.
+function fyWeeks(fromDate, toDate) {
+  if (!fromDate || !toDate || fromDate.length < 8 || toDate.length < 8) return [];
+  const fy = Number(fromDate.slice(0, 4));
+  if (!Number.isFinite(fy)) return [];
+  const start = new Date(fy, 3, 1);
+  const end = new Date(fy + 1, 2, 31);
+  const totalDays = Math.round((end - start) / 86_400_000) + 1;
+  const out = [];
+  const weeks = 52;
+  const weekDays = Math.floor(totalDays / weeks);
+  const cursor = new Date(start);
+  for (let w = 0; w < weeks; w++) {
+    const wStart = new Date(cursor);
+    cursor.setDate(cursor.getDate() + weekDays - 1);
+    if (w === weeks - 1) cursor.setTime(end.getTime());
+    out.push({
+      from: fmtDate(wStart.getFullYear(), wStart.getMonth() + 1, wStart.getDate()),
+      to: fmtDate(cursor.getFullYear(), cursor.getMonth() + 1, cursor.getDate()),
+      label: `W${pad2(w + 1)}`,
+    });
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return out;
+}
+
+// Per-phase chunking strategy. Sales is NOT chunked — it's served by
+// Tally's built-in "Sales Register" REPORT (monthly DSPACCNAME
+// summary), which goes through a pre-compiled, voucher-iterator-free
+// code path inside Tally. The custom typed Voucher COLLECTION we
+// previously used for sales reproducibly crashed TallyPrime itself
+// (c0000005 in the voucher tree walker) on real distributor data, so
+// no amount of chunking would help — every chunk was crashing Tally.
+// We now accept losing per-voucher sales detail in exchange for Tally
+// staying alive; the report still gives us monthly aggregate totals
+// for revenue trend charts.
+//
+// Purchase Register stays on the typed Voucher COLLECTION (Tally
+// handles purchase iteration without the crash), monthly chunks so a
+// long FY doesn't OOM the 150 MB Edge Function budget.
+const CHUNK_STRATEGY = {
+  purchaseRegister: 'monthly',
+};
+function bucketsFor(key, fromDate, toDate) {
+  const strategy = CHUNK_STRATEGY[key];
+  if (!strategy) return [];
+  if (strategy === 'weekly') return fyWeeks(fromDate, toDate);
+  if (strategy === 'monthly') return fyMonths(fromDate, toDate);
+  return [];
+}
+
+const CHUNK_COOLDOWN_MS = {
+  weekly: 3000,
+  monthly: 1500,
+};
 
 // Orchestrate a full multi-phase sync from the client. Replaces the
 // monolithic sync-full call with a sequence of per-phase sync-collection
@@ -498,13 +560,12 @@ export async function syncAllPhases({
   const counts = {};
   let lastDiagnostics = discovery.diagnostics;
   let anyConnected = false;
-  const quarters = (fyTag && fromDate && toDate) ? fyQuarters(fromDate, toDate) : [];
-  const runPhase = async (key, { quarterFrom, quarterTo, quarterLabel } = {}) => {
-    const effectiveFyTag = quarterLabel ? `${fyTag}_${quarterLabel}` : fyTag;
-    const effectiveConfig = quarterFrom && quarterTo
-      ? { ...phaseConfig, fromDate: quarterFrom, toDate: quarterTo }
+  const runPhase = async (key, { bucketFrom, bucketTo, bucketLabel } = {}) => {
+    const effectiveFyTag = bucketLabel ? `${fyTag}_${bucketLabel}` : fyTag;
+    const effectiveConfig = bucketFrom && bucketTo
+      ? { ...phaseConfig, fromDate: bucketFrom, toDate: bucketTo }
       : phaseConfig;
-    const livePhaseKey = quarterLabel ? `${key}_${quarterLabel}` : key;
+    const livePhaseKey = bucketLabel ? `${key}_${bucketLabel}` : key;
     onPhase?.({ type: 'phase-start', key: livePhaseKey });
     try {
       const res = await runPhaseWithRetry({
@@ -523,27 +584,31 @@ export async function syncAllPhases({
       if (res?.error) collectionErrors[livePhaseKey] = res.error;
       counts[livePhaseKey] = res?.count ?? 0;
       onPhase?.({ type: 'phase-done', key: livePhaseKey, count: counts[livePhaseKey], error: res?.error || null });
+      return res;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       collectionErrors[livePhaseKey] = msg;
       counts[livePhaseKey] = 0;
       phaseResults[livePhaseKey] = { error: msg };
       onPhase?.({ type: 'phase-done', key: livePhaseKey, count: 0, error: msg });
+      return { error: msg };
     }
   };
 
   for (let i = 0; i < phaseKeys.length; i++) {
     if (signal?.aborted) break;
     const key = phaseKeys[i];
-    const shouldChunk = QUARTERLY_CHUNK_PHASES.has(key) && quarters.length;
-    if (shouldChunk) {
-      for (let q = 0; q < quarters.length; q++) {
+    const buckets = (fyTag && fromDate && toDate) ? bucketsFor(key, fromDate, toDate) : [];
+    const strategy = CHUNK_STRATEGY[key];
+    const bucketCooldown = strategy ? (CHUNK_COOLDOWN_MS[strategy] ?? cooldownMs) : cooldownMs;
+    if (buckets.length) {
+      for (let b = 0; b < buckets.length; b++) {
         if (signal?.aborted) break;
-        const { from, to, label } = quarters[q];
-        await runPhase(key, { quarterFrom: from, quarterTo: to, quarterLabel: label });
-        if (q < quarters.length - 1) {
-          onPhase?.({ type: 'cooldown-start', ms: cooldownMs });
-          try { await wait(cooldownMs, signal); } catch { break; }
+        const { from, to, label } = buckets[b];
+        await runPhase(key, { bucketFrom: from, bucketTo: to, bucketLabel: label });
+        if (b < buckets.length - 1) {
+          onPhase?.({ type: 'cooldown-start', ms: bucketCooldown });
+          try { await wait(bucketCooldown, signal); } catch { break; }
           onPhase?.({ type: 'cooldown-done' });
         }
       }
@@ -557,12 +622,12 @@ export async function syncAllPhases({
     }
   }
 
-  // Roll up per-quarter shards (salesRegister_FY26-27_Q1, ...) into a
-  // single salesRegister total so the result panel shows one logical
-  // count per voucher class. The actual data lives under the per-quarter
-  // sub-keys on the snapshot row; the transformer's prefix-match merge
-  // takes care of stitching them on read.
-  for (const baseKey of QUARTERLY_CHUNK_PHASES) {
+  // Roll up per-bucket shards into a single total per chunked phase so
+  // the result panel shows one logical count per voucher class. The
+  // actual data lives under the sub-keys on the snapshot row; the
+  // transformer's prefix-match merge takes care of stitching them on
+  // read.
+  for (const baseKey of Object.keys(CHUNK_STRATEGY)) {
     const shardTotal = Object.entries(counts)
       .filter(([k]) => k === baseKey || k.startsWith(`${baseKey}_`))
       .reduce((sum, [, v]) => sum + (Number(v) || 0), 0);

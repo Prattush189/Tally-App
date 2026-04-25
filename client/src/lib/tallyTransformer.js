@@ -57,6 +57,49 @@ function readField(ledger, name) {
   return '';
 }
 
+// Tally's Sales Register monthly summary names rows like "1-Apr-25 to
+// 30-Apr-25" or "April 2025" depending on version. Normalise either
+// shape to a YYYYMM key so callers can sort + dedup across shards.
+const MONTH_NAME_TO_NUM = {
+  jan: 1, january: 1,
+  feb: 2, february: 2,
+  mar: 3, march: 3,
+  apr: 4, april: 4,
+  may: 5,
+  jun: 6, june: 6,
+  jul: 7, july: 7,
+  aug: 8, august: 8,
+  sep: 9, sept: 9, september: 9,
+  oct: 10, october: 10,
+  nov: 11, november: 11,
+  dec: 12, december: 12,
+};
+function monthLabelToKey(label) {
+  if (!label) return null;
+  const s = String(label).trim().toLowerCase();
+  // "1-apr-25 to 30-apr-25" → use the first date.
+  let m = s.match(/(\d{1,2})[-/\s]([a-z]{3,9})[-/\s](\d{2,4})/);
+  if (m) {
+    const month = MONTH_NAME_TO_NUM[m[2]];
+    if (!month) return null;
+    let year = Number(m[3]);
+    if (!Number.isFinite(year)) return null;
+    if (year < 100) year += 2000;
+    return `${year}${String(month).padStart(2, '0')}`;
+  }
+  // "april 2025" / "april '25" / "apr-25"
+  m = s.match(/^([a-z]{3,9})[\s\-']+(?:'?)(\d{2,4})$/);
+  if (m) {
+    const month = MONTH_NAME_TO_NUM[m[1]];
+    if (!month) return null;
+    let year = Number(m[2]);
+    if (!Number.isFinite(year)) return null;
+    if (year < 100) year += 2000;
+    return `${year}${String(month).padStart(2, '0')}`;
+  }
+  return null;
+}
+
 function stateToRegion(state) {
   const s = (state || '').toLowerCase();
   if (/(punjab|haryana|delhi|himachal|kashmir|uttarakhand|uttar pradesh|chandigarh)/.test(s)) return 'North';
@@ -577,7 +620,36 @@ export function transformTallyFull(bundle, options = {}) {
     ...purchaseShardTrees,
     ...receiptShardTrees,
   ].filter((t) => t != null);
-  const salesRegisterVouchers = salesShardTrees.flatMap((tree) => extractCollection(tree, 'VOUCHER'));
+  // Sales Register comes back as a DSPACCNAME monthly summary tree
+  // (built-in Tally report — see comment in the edge function for why
+  // we use the report path rather than a typed Voucher COLLECTION:
+  // the latter crashes Tally itself). Per-voucher / per-customer
+  // sales detail isn't available; we get monthly totals.
+  // parseFinancialStatement already knows how to walk the DSPACCNAME
+  // pattern, but its bucketing logic is for the P&L / Balance Sheet
+  // shape — for sales we want a flat [{month, value}] series.
+  const salesRegisterVouchers = []; // intentionally empty — see above
+  const salesMonthly = (() => {
+    const byMonth = new Map();
+    for (const tree of salesShardTrees) {
+      const rows = parseFinancialStatement(tree, 'sales');
+      if (!rows || !Array.isArray(rows.rows)) continue;
+      for (const row of rows.rows) {
+        const monthKey = monthLabelToKey(row?.name);
+        if (!monthKey) continue;
+        // Net debit-credit gives the period's revenue magnitude
+        // regardless of which side Tally posts to. Sales registers
+        // typically credit the sales ledger so net is negative; we
+        // normalise to a positive revenue figure.
+        const net = Math.abs(Number(row?.net ?? row?.credit ?? row?.debit ?? 0));
+        if (!Number.isFinite(net)) continue;
+        byMonth.set(monthKey, (byMonth.get(monthKey) || 0) + net);
+      }
+    }
+    return Array.from(byMonth.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([month, value]) => ({ month, value: Math.round(value) }));
+  })();
   const purchaseRegisterVouchers = purchaseShardTrees.flatMap((tree) => extractCollection(tree, 'VOUCHER'));
   const receiptRegisterVouchers = receiptShardTrees.flatMap((tree) => extractCollection(tree, 'VOUCHER'));
   // Bills Outstanding rolls up bills (not vouchers) — different shape; the
@@ -766,11 +838,20 @@ export function transformTallyFull(bundle, options = {}) {
     };
   })();
 
+  const salesTotal = salesMonthly.reduce((s, m) => s + (m.value || 0), 0);
   const financials = {
     profitLoss: parseFinancialStatement(profitLossTree, 'pl'),
     balanceSheet: parseFinancialStatement(balanceSheetTree, 'bs'),
     trialBalance: parseFinancialStatement(trialBalanceTree, 'tb'),
     purchases: purchaseTotals,
+    // Sales is monthly aggregates only on this dataset (per-voucher
+    // path crashes Tally — see edge function comment). Dashboards
+    // that want a revenue trend chart read salesMonthly directly.
+    sales: {
+      total: salesTotal,
+      monthly: salesMonthly,
+      perCustomerAvailable: false,
+    },
     vouchers: {
       sales: salesVouchers,
       purchases: purchaseVouchers,

@@ -451,8 +451,18 @@ function typedVoucherCollection(
 </ENVELOPE>`;
 }
 
+// Sales Register uses Tally's built-in REPORT path, NOT the typed
+// Voucher COLLECTION other registers use. The collection iterator
+// reproducibly hangs / crashes TallyPrime itself (Windows "Application
+// is not responding" dialog, c0000005 in the voucher tree walker) on
+// real distributor data — so no amount of date / row chunking helps,
+// every chunk crashes Tally. The built-in report path is pre-compiled
+// and aggregates server-side: it returns a DSPACCNAME tree (one row
+// per month with totals) rather than a per-voucher list, which means
+// we lose per-voucher / per-customer sales detail but Tally stays
+// alive and we still get monthly revenue trends.
 function salesRegisterRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
-  return typedVoucherCollection(cfg, 'B2BSalesVouchers', '$$IsSales:$VoucherTypeName');
+  return reportWithVoucherDates('Sales Register', cfg);
 }
 function purchaseRegisterRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
   return typedVoucherCollection(cfg, 'B2BPurchaseVouchers', '$$IsPurchase:$VoucherTypeName');
@@ -635,7 +645,12 @@ function buildCollectionJob(
   if (key === 'profitLoss') return { xml: profitLossRequest(cfg), node: 'DSPACCNAME', timeoutMs: 30000 };
   if (key === 'balanceSheet') return { xml: balanceSheetRequest(cfg), node: 'DSPACCNAME', timeoutMs: 30000 };
   if (key === 'trialBalance') return { xml: trialBalanceRequest(cfg), node: 'DSPACCNAME', timeoutMs: 45000 };
-  if (key === 'salesRegister') return { xml: salesRegisterRequest(cfg), node: 'VOUCHER', timeoutMs: 120000 };
+  // Sales returns a DSPACCNAME monthly summary tree (built-in report,
+  // doesn't crash Tally), so we count DSPACCNAME nodes instead of
+  // VOUCHER. 60s is plenty — the report is pre-aggregated server-side
+  // by Tally and the response is a few KB regardless of how many
+  // vouchers underlie each month.
+  if (key === 'salesRegister') return { xml: salesRegisterRequest(cfg), node: 'DSPACCNAME', timeoutMs: 60000 };
   if (key === 'purchaseRegister') return { xml: purchaseRegisterRequest(cfg), node: 'VOUCHER', timeoutMs: 90000 };
   if (key === 'receiptRegister') return { xml: receiptRegisterRequest(cfg), node: 'VOUCHER', timeoutMs: 90000 };
   if (key === 'billsOutstanding') return { xml: billsOutstandingRequest(cfg), node: 'BILLFIXED', timeoutMs: 60000 };
