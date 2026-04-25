@@ -436,6 +436,26 @@ function reportRequest(reportId: string, company: string) {
 </ENVELOPE>`;
 }
 
+// Tally action XML that explicitly opens a company file. Some Tally
+// setups don't auto-load on a bare SVCURRENTCOMPANY filter — when the
+// Select Company screen is showing they answer collection queries with
+// built-in placeholder data ("1 root group / 1 default ledger") instead
+// of loading the company first. Sending an explicit Load Company action
+// before the phase chain forces Tally into the company's data context
+// so subsequent queries return real records.
+function loadCompanyRequest(company: string) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER><VERSION>1</VERSION><TALLYREQUEST>Execute</TALLYREQUEST><TYPE>Action</TYPE><ID>Load Company</ID></HEADER>
+  <BODY><DESC>
+    <STATICVARIABLES>
+      <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      ${companyFilter(company)}
+    </STATICVARIABLES>
+  </DESC></BODY>
+</ENVELOPE>`;
+}
+
 // Built-in Tally report with optional date range. Used for everything
 // except the single-row test ping — it's more tunnel-friendly than custom
 // TDL COLLECTION queries (Tally hits pre-compiled code paths, no TDL
@@ -1493,6 +1513,45 @@ Deno.serve(async (req) => {
   //
   // Body: { action: 'sync-discover', ...creds }
   // Returns: { connected, activeCompany, discoveredCompanies, discoveryError, discoveryRawSample, diagnostics }
+  // Explicit "Load Company" action. Some hosted-Tally setups don't
+  // auto-load when SVCURRENTCOMPANY is set on a regular collection
+  // query — they answer with built-in placeholders until the company
+  // is actually open in the Tally UI. This action sends Tally's
+  // dedicated Load Company XML to force the open, then returns
+  // whatever Tally sent back so the caller can verify success.
+  //
+  // Body: { action: 'load-company', company, ...creds }
+  // Returns: { connected, action, company, response, error?, status?, diagnostics }
+  if (action === 'load-company') {
+    const target = String(body.company || cfg.company || company || '').trim();
+    if (!target) {
+      return new Response(JSON.stringify({
+        connected: false, action,
+        error: 'load-company requires `company` in the request body or stored config.',
+      }), { status: 400, headers: jsonHeaders });
+    }
+    let parsed: unknown = null;
+    let errMsg: string | null = null;
+    try {
+      parsed = await tallyRequest(loadCompanyRequest(target), cfg, 30000);
+    } catch (err) {
+      errMsg = err instanceof Error ? err.message : String(err);
+    }
+    let sample: string | null = null;
+    try {
+      if (parsed) sample = JSON.stringify(parsed).slice(0, 800);
+    } catch { /* ignore */ }
+    return new Response(JSON.stringify({
+      connected: !errMsg,
+      action,
+      company: target,
+      response: sample,
+      error: errMsg,
+      edgeBuildId: EDGE_BUILD_ID,
+      diagnostics: snapshotDiagnostics(),
+    }), { headers: jsonHeaders });
+  }
+
   if (action === 'sync-discover') {
     const dbUrl = Deno.env.get('SUPABASE_URL') || '';
     const dbRole = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';

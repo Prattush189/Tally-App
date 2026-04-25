@@ -228,6 +228,21 @@ export async function syncDiscover(config = {}) {
   };
 }
 
+// Force TallyPrime to open a specific company before running any
+// collection queries. Some hosted-Tally setups don't auto-load on
+// SVCURRENTCOMPANY alone — they sit on the Select Company screen and
+// answer every query with placeholder data ("1 root group / 1 default
+// ledger") until a company is genuinely loaded into Tally's memory.
+// Sending the dedicated Load Company action XML solves that case
+// without needing a human to click anything in the Tally GUI.
+export async function loadCompany(company, config = {}) {
+  if (TALLY_BACKEND !== 'supabase') {
+    throw new Error('Load Company requires the Supabase backend.');
+  }
+  if (!company) throw new Error('loadCompany: missing company name.');
+  return supabaseInvoke('load-company', { company, ...config });
+}
+
 // Fetch + persist ONE named collection via the edge function's
 // sync-collection action. Runs in a fresh isolate with its own 150 s
 // wall clock and 150 MB compute budget, which is how heavy Day Book
@@ -454,7 +469,34 @@ export async function syncAllPhases({
     };
   }
 
-  // 2) Build the phase list. Core phases first, then per-year Day Book.
+  // 2) Force-load the resolved company before any collection queries.
+  //    Hosted-Tally tunnels frequently answer collection requests with
+  //    built-in placeholder data ("1 default ledger / 1 root group / 0
+  //    vouchers") when the Select Company screen is up — even with
+  //    SVCURRENTCOMPANY set on every query. The dedicated Load Company
+  //    action XML actually opens the company file in Tally's memory,
+  //    so subsequent phases see real data. Best-effort: a failure
+  //    here is non-fatal, the chain continues; per-phase results will
+  //    surface the underlying error if Tally still won't cooperate.
+  let loadCompanyResult = null;
+  if (activeCompany) {
+    onPhase?.({ type: 'load-company-start', company: activeCompany });
+    try {
+      loadCompanyResult = await loadCompany(activeCompany, config);
+      onPhase?.({ type: 'load-company-done', result: loadCompanyResult });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      loadCompanyResult = { connected: false, error: msg };
+      onPhase?.({ type: 'load-company-done', error: msg });
+    }
+    // Brief settle so Tally finishes opening the company before the
+    // first collection query arrives. Tally's UI thread serialises
+    // load + read; firing the Sundry Debtors collection 200 ms later
+    // sometimes raced the open and got placeholder data.
+    await wait(2000, signal);
+  }
+
+  // 3) Build the phase list. Core phases first, then per-year Day Book.
   const dayBookKeys = dayBookPhaseKeys({ allData, fromDate, toDate });
   const phaseKeys = [...CORE_SYNC_PHASES, ...dayBookKeys];
 
@@ -516,6 +558,7 @@ export async function syncAllPhases({
     discoveryError: discovery.discoveryError,
     discoveryRawSample: discovery.discoveryRawSample,
     usedCachedCompanies: discovery.usedCachedCompanies,
+    loadCompany: loadCompanyResult,
     diagnostics: lastDiagnostics,
     edgeBuildId: discovery.edgeBuildId,
     counts,

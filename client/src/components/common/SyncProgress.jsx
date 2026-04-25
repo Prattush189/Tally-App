@@ -31,6 +31,7 @@ import { CheckCircle2, Loader2, Circle, AlertCircle, Shield } from 'lucide-react
 const STEPS = [
   { key: 'portal', label: 'Portal auto-login', etaMs: 4000, conditional: true },
   { key: 'discover', label: 'Discovering companies', etaMs: 5000 },
+  { key: 'loadCompany', label: 'Opening company in Tally', etaMs: 5000 },
   { key: 'ledgers', label: 'Fetching dealers (Sundry Debtors ledgers)', etaMs: 65000 },
   { key: 'accountingGroups', label: 'Fetching accounting groups', etaMs: 15000 },
   { key: 'stockItems', label: 'Fetching stock items', etaMs: 20000 },
@@ -166,6 +167,11 @@ export default function SyncProgress({ active, result, progressCompany, livePhas
         if (result.discoveredCompanies?.length) return 'done';
         return totalFailure ? 'error' : 'pending';
       }
+      if (step.key === 'loadCompany') {
+        if (result.loadCompany?.error) return 'error';
+        if (result.loadCompany?.connected) return 'done';
+        return totalFailure ? 'error' : 'pending';
+      }
       if (step.key === 'persist') {
         if (result.success) return 'done';
         return totalFailure ? 'error' : 'pending';
@@ -180,6 +186,13 @@ export default function SyncProgress({ active, result, progressCompany, livePhas
     if (hasLiveDriver) {
       if (step.key === 'discover') {
         const s = livePhase.discoveryStatus;
+        if (s === 'done') return 'done';
+        if (s === 'error') return 'error';
+        if (s === 'running') return 'running';
+        return 'pending';
+      }
+      if (step.key === 'loadCompany') {
+        const s = livePhase.loadCompanyStatus;
         if (s === 'done') return 'done';
         if (s === 'error') return 'error';
         if (s === 'running') return 'running';
@@ -234,6 +247,12 @@ export default function SyncProgress({ active, result, progressCompany, livePhas
       if (step.key === 'discover') {
         if (livePhase.discoveryStatus === 'running') return 'probing companies…';
         if (livePhase.discoveryStatus === 'error') return 'failed';
+        return null;
+      }
+      if (step.key === 'loadCompany') {
+        if (livePhase.loadCompanyStatus === 'running') return livePhase.loadCompanyName ? `opening ${livePhase.loadCompanyName}` : 'opening company…';
+        if (livePhase.loadCompanyStatus === 'error') return livePhase.loadCompanyError ? String(livePhase.loadCompanyError).slice(0, 80) : 'failed';
+        if (livePhase.loadCompanyStatus === 'done' && livePhase.loadCompanyName) return livePhase.loadCompanyName;
         return null;
       }
       if (step.key === 'dayBook') {

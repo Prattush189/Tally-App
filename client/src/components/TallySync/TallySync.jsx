@@ -195,6 +195,12 @@ export default function TallySync() {
           next.discoveryStatus = 'running';
         } else if (evt.type === 'discover-done') {
           next.discoveryStatus = evt.error ? 'error' : 'done';
+        } else if (evt.type === 'load-company-start') {
+          next.loadCompanyStatus = 'running';
+          next.loadCompanyName = evt.company || null;
+        } else if (evt.type === 'load-company-done') {
+          next.loadCompanyStatus = evt.error || evt.result?.error ? 'error' : 'done';
+          next.loadCompanyError = evt.error || evt.result?.error || null;
         } else if (evt.type === 'phase-start') {
           next.currentKey = evt.key;
           next.keyStatus[evt.key] = 'running';
@@ -296,6 +302,9 @@ export default function TallySync() {
       cooldownEndsAt: null,
       attempt: null,
       discoveryStatus: 'pending',
+      loadCompanyStatus: 'pending',
+      loadCompanyName: null,
+      loadCompanyError: null,
     });
 
     // 1st pass — no explicit company so syncAllPhases picks up whichever
@@ -329,6 +338,9 @@ export default function TallySync() {
         cooldownEndsAt: null,
         attempt: null,
         discoveryStatus: 'pending',
+        loadCompanyStatus: 'pending',
+        loadCompanyName: null,
+        loadCompanyError: null,
       });
       const r = await syncOneCompany(name);
       results.set(name, r);
