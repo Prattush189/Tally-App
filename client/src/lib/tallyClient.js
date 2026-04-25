@@ -325,6 +325,32 @@ async function runPhaseWithRetry({ key, company, canonicalCompany, fyTag, config
   throw lastErr;
 }
 
+// Slice an FY window (from / to dates as YYYYMMDD) into 4 calendar
+// quarters. Returns [{ from, to, label }] chronologically. Indian FY
+// runs Apr-Mar, so Q1 starts Apr 1 of the FY's start year. Used to
+// fan Sales / Purchase Register into per-quarter sync-collection
+// calls when a full-FY register fetch OOMs the Edge Function isolate
+// (each quarter then runs in its own 150 MB / 150 s compute budget).
+function fyQuarters(fromDate, toDate) {
+  if (!fromDate || !toDate || fromDate.length < 8 || toDate.length < 8) return [];
+  const fy = Number(fromDate.slice(0, 4));
+  if (!Number.isFinite(fy)) return [];
+  const fmt = (y, m, d) => `${y}${String(m).padStart(2, '0')}${String(d).padStart(2, '0')}`;
+  return [
+    { from: fmt(fy, 4, 1),     to: fmt(fy, 6, 30),     label: 'Q1' },
+    { from: fmt(fy, 7, 1),     to: fmt(fy, 9, 30),     label: 'Q2' },
+    { from: fmt(fy, 10, 1),    to: fmt(fy, 12, 31),    label: 'Q3' },
+    { from: fmt(fy + 1, 1, 1), to: fmt(fy + 1, 3, 31), label: 'Q4' },
+  ];
+}
+
+// Voucher classes that get fanned into quarterly chunks when an FY
+// window is set. Sales is by far the biggest (every invoice over the
+// FY); Purchase can be similarly heavy on trading-style distributors.
+// Receipt + Bills Outstanding stay single-shot — receipts have a tiny
+// payload per row and bills outstanding is a point-in-time snapshot.
+const QUARTERLY_CHUNK_PHASES = new Set(['salesRegister', 'purchaseRegister']);
+
 // Orchestrate a full multi-phase sync from the client. Replaces the
 // monolithic sync-full call with a sequence of per-phase sync-collection
 // invocations separated by `cooldownMs` (default 1 s). Each invocation
@@ -463,44 +489,84 @@ export async function syncAllPhases({
   // 3) Walk each phase serially with a cooldown between calls. A failure
   //    on one phase no longer blocks the next — we record the error and
   //    keep going, which is the whole point of moving off sync-full.
+  //    Heavy voucher phases (sales, purchase) fan into quarterly chunks
+  //    when an FY window is set so each quarter runs in its own
+  //    sync-collection isolate; one quarter OOMing doesn't lose the
+  //    entire FY's voucher coverage.
   const phaseResults = {};
   const collectionErrors = {};
   const counts = {};
   let lastDiagnostics = discovery.diagnostics;
   let anyConnected = false;
-  for (let i = 0; i < phaseKeys.length; i++) {
-    if (signal?.aborted) break;
-    const key = phaseKeys[i];
-    onPhase?.({ type: 'phase-start', key, index: i, total: phaseKeys.length });
+  const quarters = (fyTag && fromDate && toDate) ? fyQuarters(fromDate, toDate) : [];
+  const runPhase = async (key, { quarterFrom, quarterTo, quarterLabel } = {}) => {
+    const effectiveFyTag = quarterLabel ? `${fyTag}_${quarterLabel}` : fyTag;
+    const effectiveConfig = quarterFrom && quarterTo
+      ? { ...phaseConfig, fromDate: quarterFrom, toDate: quarterTo }
+      : phaseConfig;
+    const livePhaseKey = quarterLabel ? `${key}_${quarterLabel}` : key;
+    onPhase?.({ type: 'phase-start', key: livePhaseKey });
     try {
       const res = await runPhaseWithRetry({
         key,
         company: activeCompany,
         canonicalCompany,
-        fyTag,
-        config: phaseConfig,
+        fyTag: effectiveFyTag,
+        config: effectiveConfig,
         maxAttempts: maxAttemptsPerPhase,
         retryWaitMs,
-        onAttempt: (evt) => onPhase?.({ type: 'phase-attempt', ...evt }),
+        onAttempt: (evt) => onPhase?.({ type: 'phase-attempt', ...evt, key: livePhaseKey }),
       });
-      phaseResults[key] = res;
+      phaseResults[livePhaseKey] = res;
       if (res?.diagnostics) lastDiagnostics = res.diagnostics;
       if (res?.connected) anyConnected = true;
-      if (res?.error) collectionErrors[key] = res.error;
-      counts[key] = res?.count ?? 0;
-      onPhase?.({ type: 'phase-done', key, index: i, total: phaseKeys.length, count: counts[key], error: res?.error || null });
+      if (res?.error) collectionErrors[livePhaseKey] = res.error;
+      counts[livePhaseKey] = res?.count ?? 0;
+      onPhase?.({ type: 'phase-done', key: livePhaseKey, count: counts[livePhaseKey], error: res?.error || null });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      collectionErrors[key] = msg;
-      counts[key] = 0;
-      phaseResults[key] = { error: msg };
-      onPhase?.({ type: 'phase-done', key, index: i, total: phaseKeys.length, count: 0, error: msg });
+      collectionErrors[livePhaseKey] = msg;
+      counts[livePhaseKey] = 0;
+      phaseResults[livePhaseKey] = { error: msg };
+      onPhase?.({ type: 'phase-done', key: livePhaseKey, count: 0, error: msg });
+    }
+  };
+
+  for (let i = 0; i < phaseKeys.length; i++) {
+    if (signal?.aborted) break;
+    const key = phaseKeys[i];
+    const shouldChunk = QUARTERLY_CHUNK_PHASES.has(key) && quarters.length;
+    if (shouldChunk) {
+      for (let q = 0; q < quarters.length; q++) {
+        if (signal?.aborted) break;
+        const { from, to, label } = quarters[q];
+        await runPhase(key, { quarterFrom: from, quarterTo: to, quarterLabel: label });
+        if (q < quarters.length - 1) {
+          onPhase?.({ type: 'cooldown-start', ms: cooldownMs });
+          try { await wait(cooldownMs, signal); } catch { break; }
+          onPhase?.({ type: 'cooldown-done' });
+        }
+      }
+    } else {
+      await runPhase(key);
     }
     if (i < phaseKeys.length - 1) {
       onPhase?.({ type: 'cooldown-start', ms: cooldownMs });
       try { await wait(cooldownMs, signal); } catch { break; }
       onPhase?.({ type: 'cooldown-done' });
     }
+  }
+
+  // Roll up per-quarter shards (salesRegister_FY26-27_Q1, ...) into a
+  // single salesRegister total so the result panel shows one logical
+  // count per voucher class. The actual data lives under the per-quarter
+  // sub-keys on the snapshot row; the transformer's prefix-match merge
+  // takes care of stitching them on read.
+  for (const baseKey of QUARTERLY_CHUNK_PHASES) {
+    const shardTotal = Object.entries(counts)
+      .filter(([k]) => k === baseKey || k.startsWith(`${baseKey}_`))
+      .reduce((sum, [, v]) => sum + (Number(v) || 0), 0);
+    if (shardTotal > 0) counts[baseKey] = shardTotal;
   }
 
   const success = anyConnected && Object.values(phaseResults).some((r) => r?.connected);

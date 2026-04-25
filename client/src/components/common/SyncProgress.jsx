@@ -161,15 +161,17 @@ export default function SyncProgress({ active, result, progressCompany, livePhas
         if (result.success) return 'done';
         return totalFailure ? 'error' : 'pending';
       }
-      // Sales Register may have been fanned into per-year shards. Treat
-      // it as errored if any shard errored, done if any shard fetched
-      // cleanly without all shards erroring.
-      if (step.key === 'salesRegister') {
-        const salesErrored = [...errKeys].filter((k) => k === 'salesRegister' || k.startsWith('salesRegister_'));
-        const salesFetched = [...fetchedKeys].filter((k) => k === 'salesRegister' || k.startsWith('salesRegister_'));
-        if (salesErrored.length && !salesFetched.length) return 'error';
-        if (salesErrored.length) return 'error';
-        if (salesFetched.length) return 'done';
+      // Sales / Purchase Register may have been fanned into per-quarter
+      // shards (and per-FY suffixes for multi-FY tenants). Treat the
+      // row as errored if any shard errored, done if any shard fetched
+      // cleanly. Same rollup pattern works for any register key whose
+      // shards share the prefix.
+      if (step.key === 'salesRegister' || step.key === 'purchaseRegister') {
+        const errored = [...errKeys].filter((k) => k === step.key || k.startsWith(`${step.key}_`));
+        const fetched = [...fetchedKeys].filter((k) => k === step.key || k.startsWith(`${step.key}_`));
+        if (errored.length && !fetched.length) return 'error';
+        if (errored.length) return 'error';
+        if (fetched.length) return 'done';
         return totalFailure ? 'error' : 'pending';
       }
       if (errKeys.has(step.key)) return 'error';
@@ -212,22 +214,23 @@ export default function SyncProgress({ active, result, progressCompany, livePhas
         if (allDone) return 'done';
         return 'pending';
       }
-      // Sales Register collapses every per-year shard
-      // (salesRegister, salesRegister_2023, ...) into one row. Running
-      // if any shard is running, error if any shard errored, done if
-      // every shard finished cleanly.
-      if (step.key === 'salesRegister') {
-        const salesKeys = Object.keys(livePhase.keyStatus).filter((k) => k === 'salesRegister' || k.startsWith('salesRegister_'));
-        if (!salesKeys.length) {
-          if (livePhase.currentKey && (livePhase.currentKey === 'salesRegister' || livePhase.currentKey.startsWith('salesRegister_'))) return 'running';
+      // Sales / Purchase Register collapse every per-quarter / per-FY
+      // shard (salesRegister, salesRegister_FY26-27_Q1, ...) into one
+      // row. Running if any shard is running, error if any shard
+      // errored, done if every shard finished cleanly.
+      if (step.key === 'salesRegister' || step.key === 'purchaseRegister') {
+        const matches = (k) => k === step.key || k.startsWith(`${step.key}_`);
+        const shardKeys = Object.keys(livePhase.keyStatus).filter(matches);
+        if (!shardKeys.length) {
+          if (livePhase.currentKey && matches(livePhase.currentKey)) return 'running';
           return 'pending';
         }
-        if (salesKeys.some((k) => livePhase.keyStatus[k] === 'running')) return 'running';
-        if (salesKeys.some((k) => livePhase.keyStatus[k] === 'error')) {
-          const allFinished = salesKeys.every((k) => livePhase.keyStatus[k] !== 'running');
+        if (shardKeys.some((k) => livePhase.keyStatus[k] === 'running')) return 'running';
+        if (shardKeys.some((k) => livePhase.keyStatus[k] === 'error')) {
+          const allFinished = shardKeys.every((k) => livePhase.keyStatus[k] !== 'running');
           return allFinished ? 'error' : 'running';
         }
-        if (salesKeys.every((k) => livePhase.keyStatus[k] === 'done')) return 'done';
+        if (shardKeys.every((k) => livePhase.keyStatus[k] === 'done')) return 'done';
         return 'pending';
       }
       const s = livePhase.keyStatus[step.key];
@@ -260,26 +263,27 @@ export default function SyncProgress({ active, result, progressCompany, livePhas
         if (livePhase.loadCompanyStatus === 'done' && livePhase.loadCompanyName) return livePhase.loadCompanyName;
         return null;
       }
-      // Sales Register live detail: aggregate across every per-year
-      // shard so the user sees "year 2023 (running)" or the total
-      // record count once everything's landed.
-      if (step.key === 'salesRegister') {
-        const entries = Object.entries(livePhase.keyStatus).filter(([k]) => k === 'salesRegister' || k.startsWith('salesRegister_'));
+      // Sales / Purchase Register live detail: aggregate across every
+      // per-quarter / per-FY shard so the user sees "Q2 (running)" or
+      // the total record count once everything's landed.
+      if (step.key === 'salesRegister' || step.key === 'purchaseRegister') {
+        const matches = (k) => k === step.key || k.startsWith(`${step.key}_`);
+        const entries = Object.entries(livePhase.keyStatus).filter(([k]) => matches(k));
         const running = entries.find(([, s]) => s === 'running');
         const errored = entries.filter(([, s]) => s === 'error');
         if (running) {
-          const year = running[0].replace(/^salesRegister_?/, '') || 'current window';
+          const tag = running[0].replace(new RegExp(`^${step.key}_?`), '') || 'current window';
           const attempt = livePhase.attempt?.key === running[0]
             ? ` (retry ${livePhase.attempt.n}/${livePhase.attempt.of})` : '';
-          return `year ${year}${attempt}`;
+          return `${tag}${attempt}`;
         }
         if (errored.length) {
           const [k] = errored[0];
           const msg = livePhase.keyErrors[k];
-          return `${errored.length} year${errored.length === 1 ? '' : 's'} failed — ${String(msg || '').slice(0, 50)}`;
+          return `${errored.length} ${errored.length === 1 ? 'shard' : 'shards'} failed — ${String(msg || '').slice(0, 50)}`;
         }
         const total = Object.keys(livePhase.keyCounts)
-          .filter((k) => k === 'salesRegister' || k.startsWith('salesRegister_'))
+          .filter(matches)
           .reduce((s, k) => s + (livePhase.keyCounts[k] || 0), 0);
         if (total > 0) return `${total} records`;
         return null;
@@ -313,17 +317,19 @@ export default function SyncProgress({ active, result, progressCompany, livePhas
       if (result.diagnostics?.portalLoginSkippedReason) return result.diagnostics.portalLoginSkippedReason;
       return null;
     }
-    // Sales Register may have been fanned out into per-year shards
-    // (salesRegister, salesRegister_2023, ...) — sum every shard so the
-    // single Sales Register row shows the combined total.
-    const salesRegisterTotal = Object.entries(result.counts || {})
-      .filter(([k]) => k === 'salesRegister' || k.startsWith('salesRegister_'))
+    // Sales / Purchase Register may have been fanned out into
+    // per-quarter / per-FY shards — sum every shard so the single
+    // register row shows the combined total.
+    const sumShards = (baseKey) => Object.entries(result.counts || {})
+      .filter(([k]) => k === baseKey || k.startsWith(`${baseKey}_`))
       .reduce((s, [, v]) => s + (Number(v) || 0), 0);
+    const salesTotal = sumShards('salesRegister');
+    const purchaseTotal = sumShards('purchaseRegister');
     const countMap = {
       ledgers: result.ledgers,
       accountingGroups: result.counts?.accountingGroups,
-      salesRegister: salesRegisterTotal || result.counts?.salesRegister,
-      purchaseRegister: result.counts?.purchaseRegister,
+      salesRegister: salesTotal || result.counts?.salesRegister,
+      purchaseRegister: purchaseTotal || result.counts?.purchaseRegister,
       receiptRegister: result.counts?.receiptRegister,
       billsOutstanding: result.counts?.billsOutstanding,
       stockItems: result.stockItems,
