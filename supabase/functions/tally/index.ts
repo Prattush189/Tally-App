@@ -122,12 +122,9 @@ function resolveVoucherWindow(cfg: { fromDate: string; toDate: string; allData?:
     return [from, to];
   }
   if (cfg.allData) {
-    // 5 years is the sweet spot: covers practically every B2B business's
-    // historical window worth looking at. Day Book now fetches per-year
-    // chunks (see dayBookYearChunks) so the 5-year total is split across
-    // five small fetches — each one's parse tree + JSON serialization
-    // stays well under Supabase's 150 MB Edge Function compute cap,
-    // whereas parsing all five years in one call blew past it.
+    // 5 years covers practically every B2B distributor's historical window
+    // worth looking at. Voucher feeds bound by reportWithVoucherDates keep
+    // each register's parse tree well under Supabase's 150 MB compute cap.
     const today = new Date();
     const from = fmtTallyDate(new Date(today.getFullYear() - 5, 0, 1));
     const to = fmtTallyDate(new Date(today.getFullYear() + 1, 11, 31));
@@ -138,38 +135,6 @@ function resolveVoucherWindow(cfg: { fromDate: string; toDate: string; allData?:
   d.setDate(d.getDate() - 90);
   const from = fmtTallyDate(d);
   return [from, to];
-}
-
-// Split the configured voucher window into calendar-year chunks. Day Book
-// for heavy B2B tenants spans 5+ years and tens of thousands of vouchers;
-// one monolithic fetch's parse tree + its JSON serialization for the
-// merge RPC roughly doubles peak Deno memory and busts Supabase's 150 MB
-// compute cap. Fetching per-year bounds peak memory to one year's tree
-// (~1/5 the size) which comfortably fits the budget.
-//
-// Returns [{from, to, key}] where `key` is the per-year storage sub-key
-// under tally_snapshots.data (e.g. "dayBook_2023"). When the window is a
-// sub-year (the default 90-day range), we emit a single chunk under the
-// canonical "dayBook" key to stay byte-compatible with the legacy shape.
-function dayBookYearChunks(cfg: { fromDate: string; toDate: string; allData?: boolean }): Array<{ from: string; to: string; key: string }> {
-  const [from, to] = resolveVoucherWindow(cfg);
-  const fromYear = Number(from.slice(0, 4));
-  const toYear = Number(to.slice(0, 4));
-  if (!Number.isFinite(fromYear) || !Number.isFinite(toYear) || toYear < fromYear) {
-    return [{ from, to, key: 'dayBook' }];
-  }
-  if (toYear === fromYear) {
-    // Sub-year windows (90-day default) don't need chunking — one fetch,
-    // legacy key so existing snapshots keep working.
-    return [{ from, to, key: 'dayBook' }];
-  }
-  const chunks: Array<{ from: string; to: string; key: string }> = [];
-  for (let y = fromYear; y <= toYear; y++) {
-    const yFrom = y === fromYear ? from : `${y}0101`;
-    const yTo = y === toYear ? to : `${y}1231`;
-    chunks.push({ from: yFrom, to: yTo, key: `dayBook_${y}` });
-  }
-  return chunks;
 }
 
 // Accept either a bare "host" / "host:port" or a full URL ("https://host:port/path").
@@ -411,73 +376,11 @@ function countNode(tree: unknown, target: string): number {
 // for LEDGER / VOUCHER / STOCKITEM / STOCKGROUP at any depth, so it keeps
 // working across both shapes.
 //
-// Sales / Receipt Register are type-specific Tally reports (shipped with
-// every Prime version since forever). 'Day Book' returned EVERY voucher
-// type in the window (contras, journals, purchases, sales, receipts),
-// which on a 90-day default blew past the shared-host tunnel's payload
-// ceiling → "Connection reset by peer". The type-specific reports are a
-// fraction of the size (only one voucher type each), and — because sales
-// and receipts no longer fire the same query back-to-back — the second
-// call doesn't land while the tunnel is still flushing the first.
-// Voucher fetch is a single Day Book call — see dayBookRequest below. The
-// five type-specific registers (Sales/Receipt/Payment/Journal/Contra) used
-// to run alongside it; they're gone now because they triple-counted the
-// same rows in Deno worker memory and busted the Edge Function's compute
-// budget. The transformer splits Day Book output by VOUCHERTYPENAME, which
-// produces the same per-type arrays the dashboards consume.
-
-// Custom lightweight voucher COLLECTION. The built-in Day Book report
-// returns every voucher with its full line-item tree (ALLINVENTORYENTRIES,
-// ALLLEDGERENTRIES, BILLALLOCATIONS, etc.) — for a 5-year distributor that
-// balloons to 200+ MB of JSON, blowing the Edge Function's 150 MB memory
-// cap even after per-job persist. This collection uses NATIVEMETHOD to
-// return ONLY the fields the transformer actually reads: date, number,
-// type, party, amount. Client splits by VOUCHERTYPENAME as before. Trade-
-// off: no SKU-level line items, so the per-customer purchasedCategories
-// / skuPenetration / catPenetration metrics degrade to zero. Revenue,
-// aging, DSO, churn — everything that matters for the initial launch —
-// still works because those only need the voucher header.
-function dayBookRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
-  return dayBookRequestForWindow(cfg.company, cfg.fromDate || '', cfg.toDate || '', cfg.allData === true);
-}
-
-// Per-year Day Book fetch. Mirrors dayBookRequest but forces an explicit
-// from/to window so the yearly chunking loop can scope each call to one
-// calendar year. The SVCURRENTPERIODFROM/TO pair is set to the same window
-// so Tally doesn't silently snap back to the company's default FY.
-function dayBookRequestForWindow(company: string, from: string, to: string, allData: boolean) {
-  const dateFilter = (from || to)
-    ? [
-        from ? `<SVFROMDATE Type="Date">${from}</SVFROMDATE>` : '',
-        to ? `<SVTODATE Type="Date">${to}</SVTODATE>` : '',
-        from ? `<SVCURRENTPERIODFROM Type="Date">${from}</SVCURRENTPERIODFROM>` : '',
-        to ? `<SVCURRENTPERIODTO Type="Date">${to}</SVCURRENTPERIODTO>` : '',
-      ].join('')
-    : voucherDateFilter({ fromDate: '', toDate: '', allData });
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<ENVELOPE>
-  <HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>B2BIntelVouchers</ID></HEADER>
-  <BODY><DESC>
-    <STATICVARIABLES>
-      <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-      ${companyFilter(company)}
-      ${dateFilter}
-    </STATICVARIABLES>
-    <TDL><TDLMESSAGE>
-      <COLLECTION NAME="B2BIntelVouchers" ISMODIFY="No">
-        <TYPE>Voucher</TYPE>
-        <NATIVEMETHOD>Date</NATIVEMETHOD>
-        <NATIVEMETHOD>VoucherNumber</NATIVEMETHOD>
-        <NATIVEMETHOD>VoucherTypeName</NATIVEMETHOD>
-        <NATIVEMETHOD>PartyLedgerName</NATIVEMETHOD>
-        <NATIVEMETHOD>Amount</NATIVEMETHOD>
-        <NATIVEMETHOD>Reference</NATIVEMETHOD>
-        <NATIVEMETHOD>Narration</NATIVEMETHOD>
-      </COLLECTION>
-    </TDLMESSAGE></TDL>
-  </DESC></BODY>
-</ENVELOPE>`;
-}
+// Voucher feed = Tally's pre-compiled Sales / Purchase / Receipt Register
+// reports. Each is type-specific (single voucher class per call), so the
+// per-call payload is a fraction of what 'Day Book' would return — a 5-year
+// Day Book on a real distributor blew past both the tunnel's payload
+// ceiling and the Edge Function's 150 MB memory cap, so it's gone.
 
 // Management-accounting reports. P&L and Balance Sheet are Tally's built-in
 // financial statements — pre-compiled, no TDL, returns a hierarchical tree
@@ -506,46 +409,14 @@ function trialBalanceRequest(cfg: { company: string; fromDate: string; toDate: s
 function salesRegisterRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
   return reportWithVoucherDates('Sales Register', cfg);
 }
+function purchaseRegisterRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
+  return reportWithVoucherDates('Purchase Register', cfg);
+}
 function receiptRegisterRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
   return reportWithVoucherDates('Receipt Register', cfg);
 }
 function billsOutstandingRequest(cfg: { company: string; fromDate: string; toDate: string }) {
   return reportWithDates('Bills Outstanding', cfg);
-}
-
-// Built-in Day Book *report* — different XML envelope and a different
-// internal iterator from the custom Voucher COLLECTION (which crashes
-// with c0000005 on this dataset). Uses the documented "Export Data"
-// pattern: <TALLYREQUEST>Export Data</TALLYREQUEST> + <EXPORTDATA>
-// <REQUESTDESC><REPORTNAME>Day Book</REPORTNAME>... — same code path
-// the GUI Day Book view uses. The team dropped this earlier for memory
-// reasons (5-year window blew the 150 MB Edge Function cap), but for
-// user-driven tight windows (typically ≤30 days) the response is small
-// enough to land safely. Caller passes fromDate / toDate as YYYYMMDD.
-function dayBookReportRequest(cfg: { company: string; fromDate: string; toDate: string }) {
-  const from = cfg.fromDate || '';
-  const to = cfg.toDate || '';
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<ENVELOPE>
-  <HEADER>
-    <TALLYREQUEST>Export Data</TALLYREQUEST>
-  </HEADER>
-  <BODY>
-    <EXPORTDATA>
-      <REQUESTDESC>
-        <REPORTNAME>Day Book</REPORTNAME>
-        <STATICVARIABLES>
-          <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-          ${companyFilter(cfg.company)}
-          ${from ? `<SVFROMDATE Type="Date">${from}</SVFROMDATE>` : ''}
-          ${to ? `<SVTODATE Type="Date">${to}</SVTODATE>` : ''}
-          ${from ? `<SVCURRENTPERIODFROM Type="Date">${from}</SVCURRENTPERIODFROM>` : ''}
-          ${to ? `<SVCURRENTPERIODTO Type="Date">${to}</SVCURRENTPERIODTO>` : ''}
-        </STATICVARIABLES>
-      </REQUESTDESC>
-    </EXPORTDATA>
-  </BODY>
-</ENVELOPE>`;
 }
 
 // Stock items / groups stay on our custom COLLECTION queries — empirically
@@ -692,7 +563,6 @@ function sundryDebtorsRequest(cfg: { company: string; fromDate: string; toDate: 
 // tunnel from re-pulling MBs of XML that didn't change.
 const COLLECTION_TTL_MS: Record<string, number> = {
   ledgers: 30 * 60_000,
-  dayBook: 10 * 60_000,
   stockItems: 30 * 60_000,
   stockGroups: 30 * 60_000,
   accountingGroups: 30 * 60_000,
@@ -700,17 +570,15 @@ const COLLECTION_TTL_MS: Record<string, number> = {
   balanceSheet: 15 * 60_000,
   trialBalance: 15 * 60_000,
   salesRegister: 10 * 60_000,
+  purchaseRegister: 10 * 60_000,
   receiptRegister: 10 * 60_000,
   billsOutstanding: 15 * 60_000,
-  dayBookReport: 10 * 60_000,
-  manualVouchers: 60 * 60_000,
 };
 
-// Maps a collection key (ledgers, dayBook_2023, ...) to the XML payload,
-// count-node tag, and timeout the sync-collection action should use.
-// Keeps the spec in one place so both sync-full's job list and the
-// per-collection action stay in sync. Returns null for unknown keys so
-// the caller can 400 cleanly.
+// Maps a collection key to the XML payload, count-node tag, and timeout
+// the sync-collection action should use. Keeps the spec in one place so
+// both sync-full's job list and the per-collection action stay in sync.
+// Returns null for unknown keys so the caller can 400 cleanly.
 function buildCollectionJob(
   key: string,
   cfg: Required<TallyConfig>,
@@ -723,37 +591,13 @@ function buildCollectionJob(
   if (key === 'balanceSheet') return { xml: balanceSheetRequest(cfg), node: 'DSPACCNAME', timeoutMs: 30000 };
   if (key === 'trialBalance') return { xml: trialBalanceRequest(cfg), node: 'DSPACCNAME', timeoutMs: 45000 };
   if (key === 'salesRegister') return { xml: salesRegisterRequest(cfg), node: 'VOUCHER', timeoutMs: 90000 };
+  if (key === 'purchaseRegister') return { xml: purchaseRegisterRequest(cfg), node: 'VOUCHER', timeoutMs: 90000 };
   if (key === 'receiptRegister') return { xml: receiptRegisterRequest(cfg), node: 'VOUCHER', timeoutMs: 90000 };
   if (key === 'billsOutstanding') return { xml: billsOutstandingRequest(cfg), node: 'BILLFIXED', timeoutMs: 60000 };
-  if (key === 'dayBookReport') return { xml: dayBookReportRequest(cfg), node: 'VOUCHER', timeoutMs: 120000 };
-  if (key === 'dayBook') {
-    return { xml: dayBookRequest(cfg), node: 'VOUCHER', timeoutMs: 120000 };
-  }
-  const yearMatch = /^dayBook_(\d{4})$/.exec(key);
-  if (yearMatch) {
-    const year = Number(yearMatch[1]);
-    if (year >= 1990 && year <= 2100) {
-      const from = `${year}0101`;
-      const to = `${year}1231`;
-      return {
-        xml: dayBookRequestForWindow(cfg.company, from, to, Boolean(cfg.allData)),
-        node: 'VOUCHER',
-        // Give a full year its own 120 s budget. Each sync-collection
-        // call runs in a fresh Edge Function isolate with its own
-        // 150 s wall clock, so a heavy year can breathe without
-        // starving the rest of the sync.
-        timeoutMs: 120000,
-      };
-    }
-  }
   return null;
 }
 
-// Per-year Day Book sub-keys (dayBook_2020, dayBook_2021, ...) use the
-// same TTL as the canonical dayBook key — the year-level split is a
-// server-side memory optimisation and shouldn't affect refresh cadence.
 function ttlForKey(key: string): number {
-  if (key.startsWith('dayBook_')) return COLLECTION_TTL_MS.dayBook;
   return COLLECTION_TTL_MS[key] ?? 30 * 60_000;
 }
 
@@ -832,75 +676,6 @@ async function persistSnapshotKey(
   }, { onConflict: 'tenant_key,company' });
   if (upErr) return `fallback upsert failed: ${upErr.message}`;
   return null;
-}
-
-function isDayBookSubKey(key: string): boolean {
-  return key === 'dayBook' || key.startsWith('dayBook_');
-}
-
-// Collapse dayBook / dayBook_YYYY keys into a single "dayBook" total so
-// the UI and scheduler see one logical Day Book collection regardless of
-// how many year-chunks the server actually fetched.
-function rollupDayBook(counts: Record<string, number>): Record<string, number> {
-  const out: Record<string, number> = {};
-  let dayBookTotal = 0;
-  let sawDayBook = false;
-  for (const [k, v] of Object.entries(counts)) {
-    if (isDayBookSubKey(k)) {
-      dayBookTotal += Number(v) || 0;
-      sawDayBook = true;
-      continue;
-    }
-    out[k] = v;
-  }
-  if (sawDayBook) out.dayBook = dayBookTotal;
-  return out;
-}
-
-function rollupDayBookErrors(errors: Record<string, string>): Record<string, string> {
-  const out: Record<string, string> = {};
-  const dayBookMsgs: string[] = [];
-  for (const [k, v] of Object.entries(errors)) {
-    if (isDayBookSubKey(k)) {
-      const year = k === 'dayBook' ? null : k.replace('dayBook_', '');
-      dayBookMsgs.push(year ? `${year}: ${v}` : String(v));
-      continue;
-    }
-    out[k] = v;
-  }
-  if (dayBookMsgs.length) out.dayBook = dayBookMsgs.join('; ');
-  return out;
-}
-
-function rollupDayBookSkipped(
-  skipped: Record<string, { reason: string; updatedAt: string }>,
-): Record<string, { reason: string; updatedAt: string }> {
-  const out: Record<string, { reason: string; updatedAt: string }> = {};
-  let latest: { reason: string; updatedAt: string } | null = null;
-  let anyDayBook = false;
-  for (const [k, v] of Object.entries(skipped)) {
-    if (isDayBookSubKey(k)) {
-      anyDayBook = true;
-      if (!latest || new Date(v.updatedAt) > new Date(latest.updatedAt)) latest = v;
-      continue;
-    }
-    out[k] = v;
-  }
-  if (anyDayBook && latest) {
-    out.dayBook = { reason: `fresh (all year chunks) — ${latest.reason}`, updatedAt: latest.updatedAt };
-  }
-  return out;
-}
-
-function rollupDayBookList(keys: string[]): string[] {
-  const out: string[] = [];
-  let sawDayBook = false;
-  for (const k of keys) {
-    if (isDayBookSubKey(k)) { sawDayBook = true; continue; }
-    out.push(k);
-  }
-  if (sawDayBook) out.push('dayBook');
-  return out;
 }
 
 // Stamped into every sync-full / get-snapshot response so the client can
@@ -1062,7 +837,7 @@ Deno.serve(async (req) => {
   // recent persisted snapshot (get-snapshot), and admins saving / triggering
   // syncs from the UI (save-config + trigger-sync + get-status).
   const dbActions = new Set([
-    'get-config', 'save-config', 'ingest', 'ingest-vouchers', 'get-snapshot', 'get-status', 'trigger-sync',
+    'get-config', 'save-config', 'ingest', 'get-snapshot', 'get-status', 'trigger-sync',
     'list-companies', 'get-companies', 'set-active-company', 'delete-snapshot',
   ]);
   if (dbActions.has(action)) {
@@ -1251,60 +1026,6 @@ Deno.serve(async (req) => {
         });
       }
       return new Response(JSON.stringify({ connected: true, action, tenantKey, ...result }), { headers: jsonHeaders });
-    }
-
-    // ingest-vouchers: manual voucher upload escape hatch for tenants whose
-    // Tally crashes on every voucher iterator (Day Book / Sales Register /
-    // custom Voucher COLLECTION all bomb with c0000005). The user exports
-    // Day Book to Excel from inside TallyPrime (Display More → Day Book →
-    // Ctrl+E), the client parses the CSV, and POSTs an array of voucher
-    // header rows here. We persist them under the `manualVouchers` key on
-    // tally_snapshots; the client transformer reads that key alongside the
-    // dayBook_* shards so the same revenue / aging / DSO derivations work
-    // unmodified. Anon-key gated like ingest — same trust model.
-    //
-    // Body: { action: 'ingest-vouchers', vouchers: [{ DATE, VOUCHERNUMBER,
-    //   VOUCHERTYPENAME, PARTYLEDGERNAME, AMOUNT }, ...], tenantKey?, company? }
-    // Returns: { connected, action, count, error }
-    if (action === 'ingest-vouchers') {
-      const vouchers = Array.isArray(body.vouchers) ? body.vouchers : [];
-      if (!vouchers.length) {
-        return new Response(JSON.stringify({
-          connected: false, action,
-          error: 'ingest-vouchers requires a non-empty `vouchers` array in the request body.',
-        }), { status: 400, headers: jsonHeaders });
-      }
-      // Wrap in the same envelope shape the COLLECTION parser produces
-      // (ENVELOPE > BODY > DATA > COLLECTION > VOUCHER[]) so the client
-      // transformer's extractCollection(...,'VOUCHER') walk pulls them
-      // out unchanged.
-      const wrapped = {
-        ENVELOPE: {
-          BODY: { DATA: { COLLECTION: { VOUCHER: vouchers } } },
-        },
-      };
-      // Resolve target company: explicit body > stored cfg > active company.
-      let target = (body.company as string) || cfg.company || company || '';
-      if (!target) {
-        const { data: cos } = await db
-          .from('tally_companies')
-          .select('active_company')
-          .eq('tenant_key', tenantKey)
-          .maybeSingle();
-        target = cos?.active_company || '';
-      }
-      if (!target) {
-        return new Response(JSON.stringify({
-          connected: false, action,
-          error: 'No active company set — open a company in Tally and run a sync first, or pass `company` in the body.',
-        }), { status: 400, headers: jsonHeaders });
-      }
-      const persistErr = await persistSnapshotKey(db, tenantKey, target, 'manualVouchers', wrapped, vouchers.length);
-      return new Response(JSON.stringify({
-        connected: !persistErr, action,
-        company: target, count: vouchers.length,
-        error: persistErr,
-      }), { headers: jsonHeaders });
     }
 
     // list-companies: probe Tally's built-in "List of Companies" report,
@@ -1915,20 +1636,16 @@ Deno.serve(async (req) => {
     // Day Book is split into per-year chunks so each fetch's parse tree
     // stays small enough that `tree + JSON.stringify(tree)` during the
     // merge-RPC send fits under Supabase's 150 MB compute cap. A 5-year
-    // all-history run for a heavy distributor would otherwise parse 50-
-    // 200 MB in one shot, and the *serialization* for the RPC body
-    // doubles that transiently — exactly where earlier revisions still
-    // hit "Function failed due to not having enough compute resources"
-    // even after the server-side merge fix moved the jsonb || jsonb
-    // merge into PostgreSQL. Yearly windows bound peak memory to one
-    // year's tree, which comfortably fits.
-    const dayBookChunks = dayBookYearChunks(queryCfg);
-    const dayBookSubKeys = dayBookChunks.map((c) => c.key);
+    // Voucher feed: Tally's pre-compiled Sales / Purchase / Receipt registers
+    // are the only voucher source — Day Book and the custom Voucher
+    // COLLECTION are gone (both OOM'd this 150 MB Edge Function isolate or
+    // crashed Tally with c0000005 on real distributor datasets). Each
+    // register is bounded by the configured voucher window via reportWith-
+    // VoucherDates, so peak memory stays predictable.
     const allJobs = [
-      // Reliable small collections first, flaky voucher queries last. Voucher
-      // failures on this tunnel historically burned their whole timeout
-      // before erroring, chewing the wall-clock budget and forcing stocks
-      // to abort on retries.
+      // Reliable small collections first. Voucher failures on this tunnel
+      // historically burned their whole timeout before erroring, chewing
+      // the wall-clock budget and forcing stocks to abort on retries.
       { key: 'ledgers' as const, xml: sundryDebtorsRequest(queryCfg), node: 'LEDGER', timeoutMs: 65000 },
       // accountingGroups is small (~500 rows for a typical distributor),
       // cheap to fetch, and required for the transformer's ancestor-chain
@@ -1942,28 +1659,10 @@ Deno.serve(async (req) => {
       { key: 'profitLoss' as const, xml: profitLossRequest(queryCfg), node: 'DSPACCNAME', timeoutMs: 15000 },
       { key: 'balanceSheet' as const, xml: balanceSheetRequest(queryCfg), node: 'DSPACCNAME', timeoutMs: 15000 },
       { key: 'trialBalance' as const, xml: trialBalanceRequest(queryCfg), node: 'DSPACCNAME', timeoutMs: 18000 },
-      // Day Book, fanned out across calendar years. Each chunk persists
-      // to its own sub-key (dayBook_2021, dayBook_2022, ...); the client
-      // transformer concatenates every dayBook* key on read, so the
-      // downstream voucher-dedup / type-split logic keeps working
-      // unchanged. A sub-year window (90-day default) collapses to a
-      // single "dayBook" chunk to stay byte-compatible with legacy
-      // snapshots already in storage.
-      //
-      // Per-chunk timeout was 30s but real tenants with 3k+ ledgers
-      // produce Day Book XML faster than the tunnel can transfer it
-      // — a typical heavy year hit the 30s abort even though the data
-      // was flowing. That aborted chunk tripped the fast-bail and
-      // killed every subsequent year, leaving the cloud with zero
-      // voucher data. 60s gives each year enough room for the actual
-      // transfer; the deadline loop at the top of this for(job) caps
-      // total Day Book time by skipping late chunks when budget < 1s.
-      ...dayBookChunks.map((c) => ({
-        key: c.key,
-        xml: dayBookRequestForWindow(activeCompany, c.from, c.to, Boolean(cfg.allData)),
-        node: 'VOUCHER',
-        timeoutMs: 60000,
-      })),
+      { key: 'salesRegister' as const, xml: salesRegisterRequest(queryCfg), node: 'VOUCHER', timeoutMs: 90000 },
+      { key: 'purchaseRegister' as const, xml: purchaseRegisterRequest(queryCfg), node: 'VOUCHER', timeoutMs: 90000 },
+      { key: 'receiptRegister' as const, xml: receiptRegisterRequest(queryCfg), node: 'VOUCHER', timeoutMs: 90000 },
+      { key: 'billsOutstanding' as const, xml: billsOutstandingRequest(queryCfg), node: 'BILLFIXED', timeoutMs: 60000 },
     ];
 
     const skipped: Record<string, { reason: string; updatedAt: string }> = {};
@@ -1992,30 +1691,16 @@ Deno.serve(async (req) => {
     }
 
     const deadline = Date.now() + 140000;
-    // `data` still gets populated for response-side diagnostics (the client's
-    // transformer runs against ledgers + accountingGroups to compute parent-
-    // group stats) — BUT we deliberately skip the Day Book payload from this
-    // in-memory map. Day Book dwarfs every other response (~50-200 MB parsed
-    // for a 5-year distributor), and keeping it resident along with seven
-    // other parse trees is what blew the Edge Function's compute cap. The
-    // client reads vouchers back via get-snapshot, not the sync-full response.
-    // Every Day Book shard (single-year or per-year) is heavy — the raw
-    // parse tree can still be 10-40 MB per chunk, and keeping more than
-    // one resident alongside the other collection trees would put us
-    // right back over the compute cap.
-    const HEAVY_KEYS = new Set<string>(['dayBook', ...dayBookSubKeys]);
-    const dayBookSubKeySet = new Set<string>(dayBookSubKeys);
+    // Heavy jobs (the voucher registers) are persisted then dropped from
+    // the response payload — keeping every parse tree resident at once
+    // blew the 150 MB Edge Function compute cap on real distributor
+    // datasets. The client reads vouchers back via get-snapshot when a
+    // dashboard mounts.
+    const HEAVY_KEYS = new Set<string>(['salesRegister', 'purchaseRegister', 'receiptRegister']);
     const data: Record<string, unknown> = {};
     const counts: Record<string, number> = {};
     const errors: Record<string, string> = {};
     let anyConnected = false;
-    // Fast-bail guard for the per-year Day Book chunks. If the first chunk
-    // fails with a connection-class error the tunnel is clearly down for
-    // vouchers, and burning the remaining 4-6 chunks each at ~10s a pop
-    // can eat the 150 s Edge Function runtime on top of every other
-    // failed job. Once this flips true we skip the rest of the Day Book
-    // shards with a clear reason instead of silently dropping.
-    let dayBookShortCircuit: string | null = null;
     let first = true;
     for (const job of jobs) {
       // Cooldown between calls. Observed behaviour: after a big response
@@ -2032,27 +1717,12 @@ Deno.serve(async (req) => {
         errors[job.key] = 'Skipped — wall-clock budget exhausted by earlier queries';
         continue;
       }
-      // Day Book shards after the first failed one: skip immediately so
-      // a dead tunnel doesn't chew 60-70 s of wall clock on repeated
-      // doomed fetches.
-      if (dayBookShortCircuit && dayBookSubKeySet.has(job.key)) {
-        counts[job.key] = 0;
-        errors[job.key] = `Skipped — earlier Day Book chunk failed (${dayBookShortCircuit}); tunnel likely down for vouchers`;
-        continue;
-      }
       const timeout = Math.min(job.timeoutMs, budget);
       let result: unknown;
       let lastErr: unknown;
       // One retry on connection-reset-class failures. Doesn't apply to auth
       // errors or 4xx/5xx — only to TCP resets and timed-out reads, which
       // flaky tunnels tend to produce on the 2nd+ connection.
-      //
-      // Reset-class errors ("reset by peer", "ECONNRESET") mean the tunnel
-      // actively dropped the socket — it typically refuses new connections
-      // for several seconds afterwards. 2s wasn't enough; 8s lets the
-      // tunnel fully recover before the retry. Idle/abort errors ("signal
-      // has been aborted", "fetch failed") don't suffer the same refusal
-      // window, so a shorter wait is fine.
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
           result = await tallyRequest(job.xml, cfg, Math.max(5000, Math.floor(timeout / (2 - attempt))));
@@ -2071,48 +1741,15 @@ Deno.serve(async (req) => {
         counts[job.key] = 0;
         const errMsg = lastErr instanceof Error ? lastErr.message : String(lastErr);
         errors[job.key] = errMsg;
-        // Flip the Day Book fast-bail when a shard dies with a real
-        // tunnel-dead error (reset / refused / closed / DNS). An aborted
-        // signal just means the per-chunk timeout hit — the tunnel is
-        // still up, the year just had more voucher volume than the
-        // budget allowed, and the next year may be smaller / succeed.
-        // Previously "signal has been aborted" was on the fast-bail
-        // list, which meant one heavy year killed the other six even
-        // though they might have landed cleanly — the user then saw
-        // zero Day Book data even for years the tunnel could serve.
-        if (
-          !dayBookShortCircuit
-          && dayBookSubKeySet.has(job.key)
-          && /reset by peer|ECONNRESET|network error|fetch failed|connection closed|connection refused/i.test(errMsg)
-        ) {
-          dayBookShortCircuit = errMsg.slice(0, 120);
-        }
       } else {
         counts[job.key] = countNode(result, job.node);
         anyConnected = true;
-        // Persist via a server-side JSONB merge RPC. Previously this called
-        // mergeSnapshotIntoTable(), which does SELECT data + spread-copy +
-        // UPSERT full row — meaning every per-job merge re-downloaded the
-        // entire accumulating snapshot (including the tens-of-MB Day Book
-        // once it had landed) and re-uploaded it. That re-download was the
-        // real cause of the "Function failed due to not having enough
-        // compute resources" error: peak memory ended up being the fresh
-        // parse tree PLUS the full existing snapshot PLUS the spread copy.
-        // merge_tally_snapshot_key pushes the jsonb || jsonb merge into
-        // PostgreSQL so the edge worker only sends the new key's value.
         if (db) {
           const persistErr = await persistSnapshotKey(db, tenantKey, activeCompany, job.key, result, counts[job.key]);
           if (persistErr) {
             errors['__persist__'] = `Failed to persist ${job.key}: ${persistErr}`;
           }
         }
-        // Keep light jobs around for the response's diagnostics block; the
-        // client transformer uses ledgers + accountingGroups to compute
-        // parent-group counts and sample chains in the sync-result panel.
-        // Heavy jobs (Day Book) are NEVER kept in-memory past persistence;
-        // the client reads them back via get-snapshot when a dashboard
-        // mounts. Without this gate, stringify()'ing the response would
-        // itself blow the compute cap.
         if (!HEAVY_KEYS.has(job.key)) {
           data[job.key] = result;
         }
@@ -2185,17 +1822,10 @@ Deno.serve(async (req) => {
       }
     }
 
-    // Collapse per-year dayBook sub-keys (dayBook_2021, ...) into a single
-    // aggregate "dayBook" entry for response-level consumers — the client
-    // progress panel, the sync-result panel headline, and any scheduler /
-    // cron wrapper that counts "did Day Book sync". The per-year keys
-    // themselves are kept in storage (that's where the transformer reads
-    // vouchers from) but never surfaced to the UI, which still thinks in
-    // terms of one logical Day Book collection.
-    const responseCounts = rollupDayBook(mergedResponse?.counts ?? counts);
-    const responseErrors = rollupDayBookErrors(mergedResponse?.errors ?? errors);
-    const responseSkipped = rollupDayBookSkipped(skipped);
-    const responseFetched = rollupDayBookList(jobs.map((j) => j.key));
+    const responseCounts = mergedResponse?.counts ?? counts;
+    const responseErrors = mergedResponse?.errors ?? errors;
+    const responseSkipped = skipped;
+    const responseFetched = jobs.map((j) => j.key);
 
     return new Response(JSON.stringify({
       connected: anyConnected,
@@ -2219,17 +1849,13 @@ Deno.serve(async (req) => {
   }
 
   // sync-collection: fetch + persist ONE named collection in a fresh
-  // Edge Function isolate. Exists so heavy Day Book years can each get
-  // their own 150 s wall clock and 150 MB compute budget instead of
-  // sharing sync-full's single pool. Without this, tenants with 3k+
-  // ledgers and multi-year history always ended up with partial voucher
-  // coverage — the first 1-2 years landed and the rest got skipped
-  // with "budget exhausted". Now the client orchestrates a separate
-  // sync-collection call per year after sync-full's discovery + light
-  // collections finish, so every shard lands under its own isolate's
-  // resource ceiling.
+  // Edge Function isolate so each register / master-data fetch gets its
+  // own 150 s wall clock and 150 MB compute budget instead of sharing
+  // sync-full's single pool. The client orchestrates one sync-collection
+  // call per phase (see CORE_SYNC_PHASES on the client) so a per-phase
+  // failure no longer cascades into "budget exhausted" on the rest.
   //
-  // Body: { action: 'sync-collection', key: 'dayBook_2023' | 'ledgers' | ...,
+  // Body: { action: 'sync-collection', key: 'salesRegister' | 'ledgers' | ...,
   //         company, ...creds, allData?, fromDate?, toDate? }
   // Returns: { connected, action, key, count, error, source, company }
   if (action === 'sync-collection') {
@@ -2246,7 +1872,7 @@ Deno.serve(async (req) => {
     if (!key) {
       return new Response(JSON.stringify({
         connected: false, action,
-        error: 'Missing "key" field for action="sync-collection" (e.g. "ledgers", "dayBook_2023").',
+        error: 'Missing "key" field for action="sync-collection" (e.g. "ledgers", "salesRegister").',
       }), { status: 400, headers: jsonHeaders });
     }
     const target = cfg.company || company || '';
@@ -2261,7 +1887,7 @@ Deno.serve(async (req) => {
     if (!job) {
       return new Response(JSON.stringify({
         connected: false, action, key,
-        error: `Unknown collection key "${key}". Expected one of: ledgers, accountingGroups, stockItems, stockGroups, profitLoss, balanceSheet, trialBalance, salesRegister, receiptRegister, billsOutstanding, dayBookReport, dayBook, dayBook_<YYYY>.`,
+        error: `Unknown collection key "${key}". Expected one of: ledgers, accountingGroups, stockItems, stockGroups, profitLoss, balanceSheet, trialBalance, salesRegister, purchaseRegister, receiptRegister, billsOutstanding.`,
       }), { status: 400, headers: jsonHeaders });
     }
     let result: unknown;

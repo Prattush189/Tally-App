@@ -1,5 +1,5 @@
-import { Package, AlertTriangle, DollarSign, TrendingUp } from 'lucide-react';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, Legend } from 'recharts';
+import { Package, AlertTriangle, DollarSign, ShoppingCart } from 'lucide-react';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 import SectionHeader from '../common/SectionHeader';
 import MetricCard from '../common/MetricCard';
 import DataTable from '../common/DataTable';
@@ -21,7 +21,13 @@ export default function InventoryBudget() {
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <MetricCard icon={DollarSign} label="Total Budget" value={fmt(data.totalBudget)} sub="Monthly allocation" color="indigo" />
-        <MetricCard icon={DollarSign} label="Allocated" value={fmt(data.totalAllocated)} sub={`${Math.round(data.totalAllocated / data.totalBudget * 100)}% utilised`} color="violet" />
+        <MetricCard
+          icon={ShoppingCart}
+          label="Actual Purchases"
+          value={fmt(data.actualSpend || 0)}
+          sub={data.actualSpend ? 'From Tally Purchase Register' : 'Awaiting Purchase Register sync'}
+          color="emerald"
+        />
         <MetricCard icon={AlertTriangle} label="Reorder Alerts" value={data.alerts.length} sub="Categories below reorder point" color="red" />
         <MetricCard icon={Package} label="Critical Stock" value={data.alerts.filter(a => a.urgency === 'Critical').length} sub="Needs immediate reorder" color="red" />
       </div>
@@ -82,6 +88,41 @@ export default function InventoryBudget() {
           </ResponsiveContainer>
         </div>
       </div>
+
+      {(data.topSuppliers?.length > 0 || data.monthlySpend?.length > 0) && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {data.topSuppliers?.length > 0 && (
+            <div className="glass-card p-5">
+              <h3 className="text-sm font-semibold text-gray-300 mb-4">Top Suppliers — Last Synced Window</h3>
+              <ResponsiveContainer width="100%" height={300}>
+                <BarChart data={data.topSuppliers} layout="vertical">
+                  <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                  <XAxis type="number" tick={{ fill: '#9ca3af', fontSize: 11 }} tickFormatter={v => fmt(v)} />
+                  <YAxis dataKey="name" type="category" tick={{ fill: '#9ca3af', fontSize: 10 }} width={140} />
+                  <Tooltip contentStyle={TOOLTIP_STYLE} formatter={v => fmt(v)} />
+                  <Bar dataKey="value" radius={[0, 6, 6, 0]} barSize={16} name="Spend">
+                    {data.topSuppliers.map((s, i) => <Cell key={s.name} fill={CHART_COLORS[i % CHART_COLORS.length]} />)}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+          {data.monthlySpend?.length > 0 && (
+            <div className="glass-card p-5">
+              <h3 className="text-sm font-semibold text-gray-300 mb-4">Monthly Purchase Spend</h3>
+              <ResponsiveContainer width="100%" height={300}>
+                <BarChart data={data.monthlySpend}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                  <XAxis dataKey="month" tick={{ fill: '#9ca3af', fontSize: 11 }} />
+                  <YAxis tick={{ fill: '#9ca3af', fontSize: 11 }} tickFormatter={v => fmt(v)} />
+                  <Tooltip contentStyle={TOOLTIP_STYLE} formatter={v => fmt(v)} />
+                  <Bar dataKey="value" fill="#10b981" radius={[6, 6, 0, 0]} name="Spend" />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </div>
+      )}
 
       <DataTable headers={['Category', 'Avg Price', 'Margin', 'Stock', 'Reorder Pt', 'Optimal', 'Days Left', 'Turnover', 'Budget', 'Status']}>
         {data.allocations.map(a => (

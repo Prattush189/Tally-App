@@ -8,7 +8,7 @@ import { useFilters, applyFilters } from '../context/FiltersContext';
 // Pages receiving `data: null` should render their empty state; App.jsx's
 // top-level gate keeps unsynced users on the Tally page anyway.
 export function useExtended(endpoint) {
-  const { customers, syncedAt } = useTallyData();
+  const { customers, syncedAt, financials } = useTallyData();
   const { year, dealerId } = useFilters();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -22,7 +22,7 @@ export function useExtended(endpoint) {
         setData(res.data);
       } else if (customers.length) {
         const filtered = applyFilters(customers, { year, dealerId });
-        setData(runExtended(endpoint, { customers: filtered }));
+        setData(runExtended(endpoint, { customers: filtered, financials }));
       } else {
         setData(null);
       }

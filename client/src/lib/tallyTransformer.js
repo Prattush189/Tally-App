@@ -552,45 +552,25 @@ export function transformTallyFull(bundle, options = {}) {
   const now = options.now instanceof Date ? options.now : new Date();
   const ledgerTree = bundle?.ledgers ?? null;
   const accountingGroupsTree = bundle?.accountingGroups ?? null;
-  const salesTree = bundle?.salesVouchers ?? null;
-  const receiptsTree = bundle?.receiptVouchers ?? null;
-  const paymentsTree = bundle?.paymentVouchers ?? null;
-  const journalsTree = bundle?.journalVouchers ?? null;
-  const contrasTree = bundle?.contraVouchers ?? null;
-  // Day Book is a safety-net catch-all: if any type-specific register
-  // returned 0 because Tally didn't recognise the voucher-type name,
-  // Day Book still pulls everything and we split by VOUCHERTYPENAME below.
-  //
-  // Starting with edge build 2026-04-24-daybook-yearly-chunks, the server
-  // stores each calendar year under its own sub-key (dayBook_2021,
-  // dayBook_2022, ...) so no single parse tree blows the 150 MB Edge
-  // Function compute cap. Collect every shard — legacy "dayBook" key for
-  // sub-year / pre-chunking snapshots, plus dayBook_YYYY for the new
-  // chunked shape — and flatten into one voucher list. Dedup on
-  // (date|number|type) downstream catches any overlap.
-  const dayBookTrees = [];
-  if (bundle && typeof bundle === 'object') {
-    for (const [k, v] of Object.entries(bundle)) {
-      if (v == null) continue;
-      if (k === 'dayBook' || k.startsWith('dayBook_')) dayBookTrees.push(v);
-    }
-  }
-  // Voucher fallbacks for installs where Day Book triggers c0000005:
-  //   - salesRegister   — Tally's built-in Sales Register report
-  //   - receiptRegister — Tally's built-in Receipt Register report
-  //   - dayBookReport   — Tally's built-in Day Book report, fetched in
-  //                       user-selected windows (escapes the iterator
-  //                       that the custom Voucher COLLECTION crashes on)
-  //   - manualVouchers  — user-uploaded Day Book Excel (CSV)
-  // All four serialise VOUCHER nodes with the same field names Day Book
-  // uses (DATE, VOUCHERNUMBER, VOUCHERTYPENAME, PARTYLEDGERNAME, AMOUNT)
-  // so we can dump them into the same dedup-and-classify pipeline below.
-  const voucherFallbackTrees = [
+  // Voucher feeds — every dashboard reads vouchers from Tally's built-in
+  // pre-compiled reports (Sales / Purchase / Receipt Register). Day Book and
+  // the custom Voucher COLLECTION are deliberately not pulled: both OOM the
+  // Edge Function or crash Tally with c0000005 on real distributor datasets,
+  // and the dashboards only need the voucher headers (date, number, type,
+  // party, amount) the registers already supply.
+  const voucherFeedTrees = [
     bundle?.salesRegister ?? null,
+    bundle?.purchaseRegister ?? null,
     bundle?.receiptRegister ?? null,
-    bundle?.dayBookReport ?? null,
-    bundle?.manualVouchers ?? null,
   ].filter((t) => t != null);
+  // Per-feed extracts kept separate so we can derive purchase analytics
+  // straight off the Purchase Register without classifying by voucher-type
+  // string (some installs name the type "GST Purchase" / "Inter-State
+  // Purchase" / etc., which the loose "includes('purchase')" filter below
+  // would still catch — but starting from the register is more reliable).
+  const salesRegisterVouchers = extractCollection(bundle?.salesRegister ?? null, 'VOUCHER');
+  const purchaseRegisterVouchers = extractCollection(bundle?.purchaseRegister ?? null, 'VOUCHER');
+  const receiptRegisterVouchers = extractCollection(bundle?.receiptRegister ?? null, 'VOUCHER');
   // Bills Outstanding rolls up bills (not vouchers) — different shape; the
   // aging derivation below uses it via parseBillsOutstanding when present.
   const billsOutstandingTree = bundle?.billsOutstanding ?? null;
@@ -614,22 +594,12 @@ export function transformTallyFull(bundle, options = {}) {
   }
 
   const ledgers = extractLedgers(ledgerTree);
-  // The edge function now pulls Day Book for both sales and receipts (built-in
-  // Tally report, much more tunnel-friendly than custom TDL). Day Book
-  // contains every voucher type mixed — sales, receipts, payments, journals,
-  // contra, etc. Split client-side by VoucherTypeName. $$IsSales /
-  // $$IsReceipt classify by class so we match on voucher-type names that
-  // contain "sales" / "receipt" as a loose class hint + fall back to the
-  // common literal types users create in Tally.
-  const allVouchers = [
-    ...extractCollection(salesTree, 'VOUCHER'),
-    ...extractCollection(receiptsTree, 'VOUCHER'),
-    ...extractCollection(paymentsTree, 'VOUCHER'),
-    ...extractCollection(journalsTree, 'VOUCHER'),
-    ...extractCollection(contrasTree, 'VOUCHER'),
-    ...dayBookTrees.flatMap((tree) => extractCollection(tree, 'VOUCHER')),
-    ...voucherFallbackTrees.flatMap((tree) => extractCollection(tree, 'VOUCHER')),
-  ];
+  // Flatten all register feeds into one voucher list, then classify by
+  // VOUCHERTYPENAME below. Each register only contains its own voucher
+  // class, so the classify step is mostly a no-op — but it keeps the
+  // downstream dashboards (which expect arrays per type) working without
+  // changes.
+  const allVouchers = voucherFeedTrees.flatMap((tree) => extractCollection(tree, 'VOUCHER'));
   // Suppress unused-warning while billsOutstanding parsing isn't wired
   // into the aging pipeline yet — the snapshot key still lands and the
   // raw tree is exposed to consumers via diagnostics.
@@ -642,37 +612,23 @@ export function transformTallyFull(bundle, options = {}) {
     seenKeys.add(key);
     dedupedVouchers.push(v);
   }
-  // Classify each voucher by its Tally type so every downstream view
-  // (sales dashboards, payment history, ledger drilldowns, All Entries
-  // table in Advanced Analytics) has a consistent source.
+  // Classify deduped vouchers by VOUCHERTYPENAME. Each register only
+  // contains its own class, but customers occasionally name their voucher
+  // types creatively ("GST Sales", "Tax Invoice", "Inter-State Purchase"),
+  // so we still scan the deduped list with loose substring matches rather
+  // than trusting the source register alone.
   const voucherTypeOf = (v) => readField(v, 'VOUCHERTYPENAME').toLowerCase();
   const salesVouchers = dedupedVouchers.filter((v) => {
     const t = voucherTypeOf(v);
     return t === 'sales' || t.includes('sales') || t.includes('invoice') || t.includes('tax invoice');
   });
+  const purchaseVouchers = dedupedVouchers.filter((v) => {
+    const t = voucherTypeOf(v);
+    return t === 'purchase' || t.includes('purchase');
+  });
   const receiptVouchers = dedupedVouchers.filter((v) => {
     const t = voucherTypeOf(v);
     return t === 'receipt' || t.includes('receipt');
-  });
-  const paymentVouchers = dedupedVouchers.filter((v) => {
-    const t = voucherTypeOf(v);
-    return t === 'payment' || t.includes('payment');
-  });
-  const journalVouchers = dedupedVouchers.filter((v) => {
-    const t = voucherTypeOf(v);
-    return t === 'journal' || t.includes('journal');
-  });
-  const contraVouchers = dedupedVouchers.filter((v) => {
-    const t = voucherTypeOf(v);
-    return t === 'contra' || t.includes('contra');
-  });
-  const debitNoteVouchers = dedupedVouchers.filter((v) => {
-    const t = voucherTypeOf(v);
-    return t.includes('debit note');
-  });
-  const creditNoteVouchers = dedupedVouchers.filter((v) => {
-    const t = voucherTypeOf(v);
-    return t.includes('credit note');
   });
   const stockItems = extractCollection(stockItemsTree, 'STOCKITEM');
   const stockGroups = extractCollection(stockGroupsTree, 'STOCKGROUP');
@@ -749,18 +705,47 @@ export function transformTallyFull(bundle, options = {}) {
     .slice(0, 20)
     .map(([name, n]) => `${name} (${n})`);
 
+  // Aggregate purchase spend so the InventoryBudget / inventory views
+  // can show actuals next to projections without rerunning the
+  // classification on every render. Sums VOUCHER AMOUNT (Tally serialises
+  // the AMOUNT element as a negative number for purchases — `Math.abs` on
+  // each row keeps the totals user-facing).
+  const purchaseTotals = (() => {
+    let total = 0;
+    const byMonth = new Map();
+    const bySupplier = new Map();
+    for (const v of purchaseVouchers) {
+      const amt = Math.abs(parseAmount(readField(v, 'AMOUNT')));
+      if (!Number.isFinite(amt)) continue;
+      total += amt;
+      const monthKey = readField(v, 'DATE').slice(0, 6);
+      if (monthKey) byMonth.set(monthKey, (byMonth.get(monthKey) || 0) + amt);
+      const supplier = readField(v, 'PARTYLEDGERNAME').trim() || '(unspecified)';
+      bySupplier.set(supplier, (bySupplier.get(supplier) || 0) + amt);
+    }
+    const topSuppliers = Array.from(bySupplier.entries())
+      .map(([name, value]) => ({ name, value: Math.round(value) }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 10);
+    const monthlySeries = Array.from(byMonth.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([month, value]) => ({ month, value: Math.round(value) }));
+    return {
+      total: Math.round(total),
+      monthly: monthlySeries,
+      topSuppliers,
+    };
+  })();
+
   const financials = {
     profitLoss: parseFinancialStatement(profitLossTree, 'pl'),
     balanceSheet: parseFinancialStatement(balanceSheetTree, 'bs'),
     trialBalance: parseFinancialStatement(trialBalanceTree, 'tb'),
+    purchases: purchaseTotals,
     vouchers: {
       sales: salesVouchers,
+      purchases: purchaseVouchers,
       receipts: receiptVouchers,
-      payments: paymentVouchers,
-      journals: journalVouchers,
-      contra: contraVouchers,
-      debitNotes: debitNoteVouchers,
-      creditNotes: creditNoteVouchers,
       all: dedupedVouchers,
     },
   };
@@ -771,15 +756,14 @@ export function transformTallyFull(bundle, options = {}) {
       ledgers: ledgers.length,
       sundryDebtors: debtors.length,
       salesVouchers: salesVouchers.length,
+      purchaseVouchers: purchaseVouchers.length,
       receiptVouchers: receiptVouchers.length,
-      paymentVouchers: paymentVouchers.length,
-      journalVouchers: journalVouchers.length,
-      contraVouchers: contraVouchers.length,
       stockItems: stockItems.length,
       stockGroups: stockGroups.length,
       categories: allCategories.size,
       outstanding: customers.reduce((s, c) => s + c.outstandingAmount, 0),
       totalSales: customers.reduce((s, c) => s + c.invoiceHistory.reduce((a, m) => a + m.value, 0), 0),
+      totalPurchases: purchaseTotals.total,
     },
     financials,
     diagnostics: {
@@ -793,12 +777,13 @@ export function transformTallyFull(bundle, options = {}) {
       coverage: {
         ledgers: ledgers.length,
         salesVouchers: salesVouchers.length,
+        purchaseVouchers: purchaseVouchers.length,
         receiptVouchers: receiptVouchers.length,
-        paymentVouchers: paymentVouchers.length,
-        journalVouchers: journalVouchers.length,
-        contraVouchers: contraVouchers.length,
         stockItems: stockItems.length,
         stockGroups: stockGroups.length,
+        salesRegisterFeed: salesRegisterVouchers.length,
+        purchaseRegisterFeed: purchaseRegisterVouchers.length,
+        receiptRegisterFeed: receiptRegisterVouchers.length,
       },
       window: window.map(b => b.month),
     },

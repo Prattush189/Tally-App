@@ -2,8 +2,6 @@ import { useState, useEffect, useRef } from 'react';
 import { RefreshCw, CheckCircle, AlertTriangle, Wifi, WifiOff, Database, Users, Package, Layers, Eye, Cloud } from 'lucide-react';
 import SectionHeader from '../common/SectionHeader';
 import SyncProgress from '../common/SyncProgress';
-import ManualVoucherUpload from './ManualVoucherUpload';
-import DayBookReportFetch from './DayBookReportFetch';
 import { fmt } from '../../utils/format';
 import { useAuth } from '../../context/AuthContext';
 import { useTallyData } from '../../context/TallyDataContext';
@@ -233,12 +231,12 @@ export default function TallySync() {
     r.ledgers = r.counts?.ledgers ?? 0;
     r.stockItems = r.counts?.stockItems ?? 0;
     r.stockGroups = r.counts?.stockGroups ?? 0;
-    r.dayBook = r.counts?.dayBook ?? 0;
     r.profitLoss = r.counts?.profitLoss ?? 0;
     r.balanceSheet = r.counts?.balanceSheet ?? 0;
     r.trialBalance = r.counts?.trialBalance ?? 0;
-    r.salesVouchers = 0;
-    r.receiptVouchers = 0;
+    r.salesVouchers = r.counts?.salesRegister ?? 0;
+    r.purchaseVouchers = r.counts?.purchaseRegister ?? 0;
+    r.receiptVouchers = r.counts?.receiptRegister ?? 0;
     r.dealersStored = r.counts?.ledgers ?? 0;
     return r;
   };
@@ -377,11 +375,6 @@ export default function TallySync() {
     // as ~0-1 even though the phase-level sync reports "connected".
     // We detect that pattern and surface a clear "Tally isn't
     // serving real data" note so this stops looking like our bug.
-    // Day Book counts are intentionally excluded from the check —
-    // we currently skip the Day Book phase entirely while the
-    // voucher-side c0000005 crash is unresolved on the customer
-    // dataset, so 0 dayBook records is expected and not a signal
-    // that a company isn't loaded.
     // Tally-side "no company really loaded" heuristic. When Tally's
     // XML server is up but no company is actually open, every
     // collection still answers — but with synthetic defaults: 1 root
@@ -417,12 +410,6 @@ export default function TallySync() {
     }
 
     setSyncResult(agg);
-
-    // Per-year Day Book completion pass used to live here to re-run years
-    // sync-full's single 150 s budget couldn't land. That's now folded
-    // into syncAllPhases — every dayBook_YYYY phase already runs in its
-    // own Edge Function isolate with its own retry, so no follow-up pass
-    // is needed.
 
     // Fire-and-forget: each dashboard already polls the snapshot
     // on mount, so a stuck refresh here is recoverable. Errors are
@@ -1038,22 +1025,6 @@ export default function TallySync() {
               </div>
             )}
           </div>
-
-          {/* Built-in Day Book *report* fetch — alternate XML code path
-              that often succeeds where the custom Voucher COLLECTION
-              crashes (c0000005). User picks the date range. */}
-          {!isDemo && (
-            <DayBookReportFetch
-              company={activeCompany}
-              host={tallyHost}
-              onFetched={() => refreshTallyData()}
-            />
-          )}
-
-          {/* Manual Day Book CSV upload — escape hatch when every XML
-              path bombs. User exports Day Book to CSV from Tally and
-              uploads it here. */}
-          {!isDemo && <ManualVoucherUpload onUploaded={() => refreshTallyData()} />}
 
           {/* Data Summary */}
           {summary && (

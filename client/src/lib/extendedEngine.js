@@ -441,7 +441,17 @@ export function getCustomerHealth(overrides) {
 // 0 and flag source so the UI can hide those columns.
 export function getInventoryBudget(overrides) {
   const customers = pickCustomers(overrides);
-  if (!customers.length) return { totalBudget: 0, totalAllocated: 0, allocations: [], alerts: [], source: 'empty' };
+  const purchases = overrides?.financials?.purchases || null;
+  const actualSpend = purchases?.total || 0;
+  const topSuppliers = purchases?.topSuppliers || [];
+  const monthlySpend = purchases?.monthly || [];
+  if (!customers.length) {
+    return {
+      totalBudget: 0, totalAllocated: 0, allocations: [], alerts: [],
+      actualSpend, topSuppliers, monthlySpend,
+      source: 'empty',
+    };
+  }
 
   const catRev = new Map();
   for (const c of customers) {
@@ -450,7 +460,13 @@ export function getInventoryBudget(overrides) {
     const perCat = cats.length ? monthly / cats.length : 0;
     for (const cat of cats) catRev.set(cat, (catRev.get(cat) || 0) + perCat);
   }
-  if (!catRev.size) return { totalBudget: 0, totalAllocated: 0, allocations: [], alerts: [], source: 'waiting-for-vouchers' };
+  if (!catRev.size) {
+    return {
+      totalBudget: 0, totalAllocated: 0, allocations: [], alerts: [],
+      actualSpend, topSuppliers, monthlySpend,
+      source: 'waiting-for-vouchers',
+    };
+  }
 
   const totalRev = Array.from(catRev.values()).reduce((s, v) => s + v, 0) || 1;
   const allocations = Array.from(catRev.entries())
@@ -475,7 +491,16 @@ export function getInventoryBudget(overrides) {
     })
     .sort((a, b) => b.demandIndex - a.demandIndex);
   const totalAllocated = allocations.reduce((s, a) => s + a.allocatedBudget, 0);
-  return { totalBudget: totalAllocated, totalAllocated, allocations, alerts: [], source: 'tally' };
+  return {
+    totalBudget: totalAllocated,
+    totalAllocated,
+    allocations,
+    alerts: [],
+    actualSpend,
+    topSuppliers,
+    monthlySpend,
+    source: 'tally',
+  };
 }
 
 // Marketing spend allocation derived from real customers. Ranks top 25 by

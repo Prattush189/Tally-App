@@ -126,11 +126,8 @@ export async function syncFromTally(config = {}) {
         tallyNotRunning: abortedAll,
         ledgers: counts.ledgers || 0,
         salesVouchers: counts.salesVouchers || 0,
+        purchaseVouchers: counts.purchaseVouchers || 0,
         receiptVouchers: counts.receiptVouchers || 0,
-        paymentVouchers: counts.paymentVouchers || 0,
-        journalVouchers: counts.journalVouchers || 0,
-        contraVouchers: counts.contraVouchers || 0,
-        dayBook: counts.dayBook || 0,
         stockItems: counts.stockItems || 0,
         stockGroups: counts.stockGroups || 0,
         profitLoss: counts.profitLoss || 0,
@@ -227,12 +224,11 @@ export async function loadCompany(company, config = {}) {
 
 // Fetch + persist ONE named collection via the edge function's
 // sync-collection action. Runs in a fresh isolate with its own 150 s
-// wall clock and 150 MB compute budget, which is how heavy Day Book
-// years (dayBook_2023, dayBook_2024, ...) each get their own ceiling
-// instead of competing for sync-full's single pool. Returns the raw
-// response object so callers can inspect { count, error, edgeBuildId,
-// diagnostics } per-year and decide whether to keep marching or
-// surface a failure.
+// wall clock and 150 MB compute budget so each register (Sales /
+// Purchase / Receipt / etc.) gets its own ceiling instead of competing
+// for sync-full's single pool. Returns the raw response object so
+// callers can inspect { count, error, edgeBuildId, diagnostics } and
+// decide whether to keep marching or surface a failure.
 export async function syncCollection({ key, company, config = {} }) {
   if (TALLY_BACKEND !== 'supabase') {
     throw new Error('Per-collection sync requires the Supabase backend.');
@@ -249,16 +245,17 @@ export async function syncCollection({ key, company, config = {} }) {
   });
 }
 
-// Ordered list of non-Day-Book phases every sync walks. Kept in one place so
+// Ordered list of phases every sync walks. Kept in one place so
 // SyncProgress, handleSync and any scheduler stay in lockstep.
 //
-// salesRegister / receiptRegister / billsOutstanding are voucher fallbacks
-// that hit Tally's pre-compiled REPORT code path instead of the generic
-// Voucher iterator that crashes with c0000005 on this dataset. Each runs
-// in its own sync-collection isolate so a crash on one doesn't cascade.
-// They land under their own snapshot keys; the transformer merges them
-// with any existing dayBook_* shards into the same allVouchers list, so
-// every downstream dashboard reads them with no further changes.
+// salesRegister / purchaseRegister / receiptRegister / billsOutstanding hit
+// Tally's pre-compiled REPORT code path — the same reports the GUI exposes
+// from Display More Reports → Account Books. They're the only voucher feed
+// we use: Day Book and the custom Voucher COLLECTION are deliberately not
+// in this list because both reproducibly OOM the Edge Function or crash
+// Tally with c0000005 on real distributor datasets, and the dashboards
+// only need sales / purchase / receipt headers anyway. Each phase runs in
+// its own sync-collection isolate so a crash on one doesn't cascade.
 export const CORE_SYNC_PHASES = [
   'ledgers',
   'accountingGroups',
@@ -268,51 +265,10 @@ export const CORE_SYNC_PHASES = [
   'balanceSheet',
   'trialBalance',
   'salesRegister',
+  'purchaseRegister',
   'receiptRegister',
   'billsOutstanding',
 ];
-
-// Day Book voucher queries reproducibly crash TallyPrime with a
-// `c0000005 (Memory Access Violation)` exception on the customer's
-// data files — confirmed against both GIRNAR and UA, so it's not a
-// per-file corruption, it's a Tally-side bug in this build's voucher
-// tree walk. We tried minimising the query (7 NATIVEMETHODS, no
-// inventory entries / bill allocations / batch allocations) and
-// per-year chunking; both still trigger the same crash because the
-// crash happens during Tally's iteration over the underlying voucher
-// store, not during XML serialisation. Until Tally Solutions ships a
-// patched build (or the customer restores from a clean backup)
-// vouchers cannot be fetched. Master-data dashboards still sync
-// fine; voucher-dependent panels (Customer Health revenue, Toy
-// Category Scores, Purchase Forecasting, Avg Price by Region) stay
-// empty because the underlying data physically can't be retrieved.
-export const INCLUDE_DAY_BOOK = false;
-
-// Build the per-year Day Book phase keys for the requested date window.
-// Mirrors dayBookYearChunks() on the edge function. "All data" expands to
-// the 5-year window the edge function uses; a sub-90-day window collapses
-// to the single legacy "dayBook" key so the cached snapshot stays
-// byte-compatible with older runs.
-export function dayBookPhaseKeys({ allData, fromDate, toDate } = {}) {
-  if (!INCLUDE_DAY_BOOK) return [];
-  const today = new Date();
-  if (allData) {
-    const startYear = today.getFullYear() - 4;
-    const endYear = today.getFullYear();
-    const keys = [];
-    for (let y = startYear; y <= endYear; y++) keys.push(`dayBook_${y}`);
-    return keys;
-  }
-  const fY = fromDate && /^\d{4}/.test(fromDate) ? Number(fromDate.slice(0, 4)) : NaN;
-  const tY = toDate && /^\d{4}/.test(toDate) ? Number(toDate.slice(0, 4)) : NaN;
-  if (!Number.isFinite(fY) || !Number.isFinite(tY) || fY === tY) {
-    // Sub-year window → single legacy chunk so cached snapshots stay compatible.
-    return ['dayBook'];
-  }
-  const keys = [];
-  for (let y = fY; y <= tY; y++) keys.push(`dayBook_${y}`);
-  return keys;
-}
 
 // Sleep helper used for the inter-phase cooldown and retry backoff. Wrapped
 // so callers can abort a long wait early if the user clicks "Stop" (not yet
@@ -491,9 +447,11 @@ export async function syncAllPhases({
     await wait(2000, signal);
   }
 
-  // 3) Build the phase list. Core phases first, then per-year Day Book.
-  const dayBookKeys = dayBookPhaseKeys({ allData, fromDate, toDate });
-  const phaseKeys = [...CORE_SYNC_PHASES, ...dayBookKeys];
+  // 3) Build the phase list. allData / fromDate / toDate are forwarded to
+  //    each register fetch via phaseConfig (set above) — they bound the
+  //    register window without spawning extra phase keys.
+  void allData; void fromDate; void toDate;
+  const phaseKeys = [...CORE_SYNC_PHASES];
 
   // 3) Walk each phase serially with a cooldown between calls. A failure
   //    on one phase no longer blocks the next — we record the error and
@@ -535,11 +493,6 @@ export async function syncAllPhases({
       onPhase?.({ type: 'cooldown-done' });
     }
   }
-
-  // Roll up per-year Day Book counts into a single aggregate so the UI's
-  // headline numbers match what sync-full used to surface.
-  const dayBookTotal = dayBookKeys.reduce((sum, k) => sum + (counts[k] || 0), 0);
-  counts.dayBook = (counts.dayBook || 0) + dayBookTotal;
 
   const success = anyConnected && Object.values(phaseResults).some((r) => r?.connected);
   onPhase?.({ type: 'done', success });
@@ -660,77 +613,6 @@ export async function loadFromSnapshot(tenantKey = 'default', company) {
       stockGroups: counts.stockGroups || 0,
       collectionErrors: data?.errors || {},
       raw: data?.data || {},
-    };
-  } catch (err) {
-    return { success: false, error: err instanceof Error ? err.message : String(err) };
-  }
-}
-
-// Manual voucher upload — escape hatch for tenants whose Tally crashes
-// on every voucher iterator (Day Book, Sales Register, custom Voucher
-// COLLECTION all bomb with c0000005). The user exports Day Book to Excel
-// from Tally (Display More → Day Book → Ctrl+E), the UI parses the rows,
-// and posts them here. The edge function persists under the
-// `manualVouchers` snapshot key; the transformer reads it alongside any
-// dayBook_* shards so existing dashboards just work.
-export async function ingestManualVouchers(vouchers, { company, tenantKey = 'default' } = {}) {
-  if (TALLY_BACKEND !== 'supabase') {
-    return { success: false, error: 'Manual voucher upload requires the Supabase backend.' };
-  }
-  if (!Array.isArray(vouchers) || !vouchers.length) {
-    return { success: false, error: 'No vouchers parsed from the uploaded file.' };
-  }
-  try {
-    const r = await supabaseInvoke('ingest-vouchers', {
-      tenantKey,
-      company,
-      vouchers,
-    });
-    return {
-      success: Boolean(r?.connected),
-      count: r?.count ?? 0,
-      company: r?.company,
-      error: r?.error || (r?.connected ? null : 'ingest-vouchers returned no result'),
-    };
-  } catch (err) {
-    return { success: false, error: err instanceof Error ? err.message : String(err) };
-  }
-}
-
-// User-driven Day Book *report* fetch — a third XML path beyond the
-// crashing custom Voucher COLLECTION and the Sales/Receipt Register
-// fallbacks. Hits Tally's pre-compiled Day Book report (the same code
-// path the GUI Day Book view uses), so it often succeeds where the
-// generic voucher iterator crashes. The team dropped this earlier for
-// memory reasons (a 5-year window blew the 150 MB Edge Function cap),
-// so we let the user pick a tight window — typically ≤ 30 days — to
-// keep the response under the cap.
-//
-// from / to are YYYYMMDD (Tally's wire format). The result lands under
-// the `dayBookReport` snapshot key; the transformer reads it alongside
-// the other voucher fallbacks.
-export async function fetchDayBookReport({ from, to, company, config = {} } = {}) {
-  if (TALLY_BACKEND !== 'supabase') {
-    return { success: false, error: 'Day Book report fetch requires the Supabase backend.' };
-  }
-  if (!from || !to) {
-    return { success: false, error: 'fetchDayBookReport requires both from and to dates (YYYYMMDD).' };
-  }
-  if (!company) {
-    return { success: false, error: 'fetchDayBookReport requires a company name (open it in Tally first).' };
-  }
-  try {
-    const r = await syncCollection({
-      key: 'dayBookReport',
-      company,
-      config: { ...config, fromDate: from, toDate: to },
-    });
-    return {
-      success: Boolean(r?.connected),
-      count: r?.count ?? 0,
-      error: r?.error || null,
-      from,
-      to,
     };
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err) };

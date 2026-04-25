@@ -39,12 +39,10 @@ const STEPS = [
   { key: 'profitLoss', label: 'Fetching Profit & Loss', etaMs: 15000 },
   { key: 'balanceSheet', label: 'Fetching Balance Sheet', etaMs: 15000 },
   { key: 'trialBalance', label: 'Fetching Trial Balance', etaMs: 18000 },
-  // Day Book is conditional — disabled by default while the customer's
-  // Tally data files trigger a c0000005 crash on voucher queries. The
-  // row is shown only when livePhase / result diagnostics indicate Day
-  // Book actually ran, so a sync that intentionally skips it doesn't
-  // get a phantom "pending" row that never resolves.
-  { key: 'dayBook', label: 'Fetching Day Book (sales, receipts, payments, journals, contra)', etaMs: 75000, conditional: true },
+  { key: 'salesRegister', label: 'Fetching Sales Register', etaMs: 30000 },
+  { key: 'purchaseRegister', label: 'Fetching Purchase Register', etaMs: 30000 },
+  { key: 'receiptRegister', label: 'Fetching Receipt Register', etaMs: 25000 },
+  { key: 'billsOutstanding', label: 'Fetching Bills Outstanding', etaMs: 20000 },
   { key: 'persist', label: 'Persisting snapshot to cloud', etaMs: 4000 },
 ];
 
@@ -94,7 +92,7 @@ export default function SyncProgress({ active, result, progressCompany, livePhas
 
   // Client-driven per-phase progress wins over the optimistic timer when
   // present. `livePhase` comes from syncAllPhases' onPhase callback so we
-  // can show "ledgers: running · accountingGroups: 142 records · dayBook_2023: connection reset by peer (retry 2/2)"
+  // can show "ledgers: running · accountingGroups: 142 records · salesRegister: connection reset by peer (retry 2/2)"
   // in real time rather than guessing from a stopwatch. Falls back to the
   // old timer-based cursor when livePhase is null (e.g. background sync
   // recovered from a different tab where we don't have live events).
@@ -108,22 +106,9 @@ export default function SyncProgress({ active, result, progressCompany, livePhas
   // integration was silently working when it wasn't.
   const portalFired = result?.diagnostics?.portalLoginAttempted;
   const portalSkipped = Boolean(result?.diagnostics?.portalLoginSkippedReason);
-  // Day Book row visibility: only show it when day-book activity is
-  // actually present — either livePhase recorded a dayBook* phase or
-  // the finished result has dayBook counts/errors. Sync runs that
-  // skip Day Book (current default while the c0000005 voucher crash
-  // is live) drop the row entirely instead of leaving it pending.
-  const dayBookActive = hasLiveDriver
-    && Object.keys(livePhase.keyStatus || {}).some((k) => k.startsWith('dayBook'));
-  const dayBookFinished = !!result && (
-    Object.keys(result.collectionErrors || {}).some((k) => k.startsWith('dayBook'))
-    || Number(result.dayBook) > 0
-    || (result.fetched || []).some((k) => k.startsWith('dayBook'))
-  );
   const showStep = (s) => {
     if (!s.conditional) return true;
     if (s.key === 'portal') return portalFired || portalSkipped;
-    if (s.key === 'dayBook') return dayBookActive || dayBookFinished;
     return false;
   };
   const steps = STEPS.filter(showStep);
@@ -216,23 +201,6 @@ export default function SyncProgress({ active, result, progressCompany, livePhas
         if (allDone) return 'done';
         return 'pending';
       }
-      if (step.key === 'dayBook') {
-        // dayBook rolls up every dayBook_YYYY sub-phase. Running if any
-        // year is currently running, error if any year errored, done if
-        // every year finished cleanly, pending otherwise.
-        const dayBookKeys = Object.keys(livePhase.keyStatus).filter((k) => k.startsWith('dayBook'));
-        if (!dayBookKeys.length) {
-          if (livePhase.currentKey && livePhase.currentKey.startsWith('dayBook')) return 'running';
-          return 'pending';
-        }
-        if (dayBookKeys.some((k) => livePhase.keyStatus[k] === 'running')) return 'running';
-        if (dayBookKeys.some((k) => livePhase.keyStatus[k] === 'error')) {
-          const allFinished = dayBookKeys.every((k) => livePhase.keyStatus[k] !== 'running');
-          return allFinished ? 'error' : 'running';
-        }
-        if (dayBookKeys.every((k) => livePhase.keyStatus[k] === 'done')) return 'done';
-        return 'pending';
-      }
       const s = livePhase.keyStatus[step.key];
       if (s) return s;
       return 'pending';
@@ -263,26 +231,7 @@ export default function SyncProgress({ active, result, progressCompany, livePhas
         if (livePhase.loadCompanyStatus === 'done' && livePhase.loadCompanyName) return livePhase.loadCompanyName;
         return null;
       }
-      if (step.key === 'dayBook') {
-        const entries = Object.entries(livePhase.keyStatus).filter(([k]) => k.startsWith('dayBook'));
-        const running = entries.find(([, s]) => s === 'running');
-        const errored = entries.filter(([, s]) => s === 'error');
-        if (running) {
-          const year = running[0].replace(/^dayBook_?/, '') || 'current window';
-          const attempt = livePhase.attempt?.key === running[0]
-            ? ` (retry ${livePhase.attempt.n}/${livePhase.attempt.of})` : '';
-          return `year ${year}${attempt}`;
-        }
-        if (errored.length) {
-          const [k, ] = errored[0];
-          const msg = livePhase.keyErrors[k];
-          return `${errored.length} year${errored.length === 1 ? '' : 's'} failed — ${String(msg || '').slice(0, 50)}`;
-        }
-        const total = Object.keys(livePhase.keyCounts).filter((k) => k.startsWith('dayBook')).reduce((s, k) => s + (livePhase.keyCounts[k] || 0), 0);
-        if (total > 0) return `${total} vouchers`;
-        return null;
-      }
-      // Non-dayBook live detail: show the per-phase count if it landed,
+      // Per-phase live detail: show the per-phase count if it landed,
       // the per-phase error if it failed, or "attempt N/M" while a retry
       // is mid-flight so the user understands why the step is still
       // spinning after 30+ seconds.
@@ -313,12 +262,10 @@ export default function SyncProgress({ active, result, progressCompany, livePhas
     }
     const countMap = {
       ledgers: result.ledgers,
-      salesVouchers: result.salesVouchers,
-      receiptVouchers: result.receiptVouchers,
-      paymentVouchers: result.paymentVouchers,
-      journalVouchers: result.journalVouchers,
-      contraVouchers: result.contraVouchers,
-      dayBook: result.dayBook,
+      salesRegister: result.counts?.salesRegister,
+      purchaseRegister: result.counts?.purchaseRegister,
+      receiptRegister: result.counts?.receiptRegister,
+      billsOutstanding: result.counts?.billsOutstanding,
       stockItems: result.stockItems,
       stockGroups: result.stockGroups,
       profitLoss: result.profitLoss,
