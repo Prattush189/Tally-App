@@ -22,7 +22,7 @@ export default function PurchaseForecast() {
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <MetricCard icon={DollarSign} label="Total 8-Month Forecast" value={fmt(data.totalForecast)} color="emerald" />
-        <MetricCard icon={TrendingUp} label="Highest Demand" value={sorted[0]?.category} sub={fmt(sorted[0]?.totalForecast)} color="indigo" />
+        <MetricCard icon={TrendingUp} label="Highest Demand" value={sorted[0]?.category || '—'} sub={sorted[0] ? fmt(sorted[0].totalForecast) : 'Awaiting voucher sync'} color="indigo" />
         <MetricCard icon={Package} label="Categories Tracked" value={data.forecasts.length} color="blue" />
         <MetricCard icon={Calendar} label="Forecast Horizon" value={`${data.months} months`} sub="May '26 — Dec '26" color="violet" />
       </div>

@@ -29,8 +29,52 @@ import MarketingBudget from './components/MarketingBudget/MarketingBudget';
 import DealerProfile from './components/DealerProfile/DealerProfile';
 import NoDataNotice from './components/common/NoDataNotice';
 import LoadingSpinner from './components/common/LoadingSpinner';
+import VoucherDataNotice from './components/common/VoucherDataNotice';
 
 const ACTIVE_PAGE_KEY = 'b2b_active_page';
+
+// Pages whose primary metrics come from sales / receipt vouchers. When the
+// snapshot has no voucher data (Day Book disabled), each of these renders
+// the VoucherDataNotice above its body so the user knows why every revenue
+// / DSO / churn / SKU / forecast tile collapses to zero.
+const VOUCHER_PAGES = new Set([
+  'churn', 'payment', 'growth', 'opportunity', 'revenue',
+  'forecast', 'toy-categories', 'area-sku', 'customer-health',
+  'contact-priority', 'dealer-suggestions', 'payment-reminders',
+  'revenue-suggestions', 'proactive', 'action',
+  'inventory', 'marketing-budget',
+]);
+
+const PAGE_LABELS = {
+  churn: 'Churn Detection',
+  payment: 'Payment Health',
+  growth: 'Growth Engine',
+  opportunity: 'Opportunities',
+  revenue: 'Revenue Metrics',
+  forecast: 'Purchase Forecast',
+  'toy-categories': 'Toy Categories',
+  'area-sku': 'Area SKU Analysis',
+  'customer-health': 'Customer Health',
+  'contact-priority': 'Contact Priority',
+  'dealer-suggestions': 'New Dealers',
+  'payment-reminders': 'Payment Reminders',
+  'revenue-suggestions': 'Revenue Ideas',
+  proactive: 'Proactive System',
+  action: 'Action Focus',
+  inventory: 'Inventory Budget',
+  'marketing-budget': 'Marketing Budget',
+};
+
+function hasVoucherData(customers) {
+  for (const c of customers) {
+    if (c.totalOrders > 0) return true;
+    const hist = c.invoiceHistory;
+    if (Array.isArray(hist)) {
+      for (const m of hist) if ((m?.value || 0) > 0 || (m?.invoiceCount || 0) > 0) return true;
+    }
+  }
+  return false;
+}
 
 function DashboardApp() {
   const { user } = useAuth();
@@ -57,6 +101,9 @@ function DashboardApp() {
     setSyncing(true);
     refreshTally().finally(() => setSyncing(false));
   };
+
+  const ledgerOnly = hasLiveData && !hasVoucherData(customers);
+  const showVoucherNotice = ledgerOnly && VOUCHER_PAGES.has(active);
 
   const renderModule = () => {
     // Tally Sync is always accessible — it's how users wire up their data.
@@ -100,6 +147,7 @@ function DashboardApp() {
       <main className="flex-1 flex flex-col min-w-0">
         <Header active={active} searchQuery={searchQuery} onSearchChange={setSearchQuery} onRefresh={handleRefresh} syncing={syncing} />
         <div className="flex-1 overflow-y-auto p-6">
+          {showVoucherNotice && <VoucherDataNotice pageName={PAGE_LABELS[active]} />}
           {renderModule()}
         </div>
       </main>
