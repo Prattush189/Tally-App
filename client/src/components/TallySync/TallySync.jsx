@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { RefreshCw, CheckCircle, AlertTriangle, Wifi, WifiOff, Database, Users, Package, Layers, Eye, Cloud } from 'lucide-react';
 import SectionHeader from '../common/SectionHeader';
 import SyncProgress from '../common/SyncProgress';
+import ManualVoucherUpload from './ManualVoucherUpload';
 import { fmt } from '../../utils/format';
 import { useAuth } from '../../context/AuthContext';
 import { useTallyData } from '../../context/TallyDataContext';
@@ -1036,6 +1037,11 @@ export default function TallySync() {
               </div>
             )}
           </div>
+
+          {/* Manual Day Book CSV upload — escape hatch when Tally crashes
+              the voucher iterator on every XML query (c0000005). Always
+              visible so the user can ingest historical vouchers offline. */}
+          {!isDemo && <ManualVoucherUpload onUploaded={() => refreshTallyData()} />}
 
           {/* Data Summary */}
           {summary && (

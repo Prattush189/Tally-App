@@ -494,6 +494,25 @@ function trialBalanceRequest(cfg: { company: string; fromDate: string; toDate: s
   return reportWithDates('Trial Balance', cfg);
 }
 
+// Voucher fallback reports — use Tally's pre-compiled REPORT code path
+// instead of the generic Voucher iterator that crashes with c0000005 on
+// some installs. Sales / Receipt Register and Bills Outstanding are
+// shipped reports built into every TallyPrime release; their internal
+// iterator differs from the one Day Book and custom Voucher COLLECTIONs
+// trigger, so they often succeed on datasets where Day Book bombs.
+// Each runs in its own sync-collection isolate so the per-key timeout
+// + 150 MB compute budget isolation we already have for Day Book years
+// applies here too.
+function salesRegisterRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
+  return reportWithVoucherDates('Sales Register', cfg);
+}
+function receiptRegisterRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
+  return reportWithVoucherDates('Receipt Register', cfg);
+}
+function billsOutstandingRequest(cfg: { company: string; fromDate: string; toDate: string }) {
+  return reportWithDates('Bills Outstanding', cfg);
+}
+
 // Stock items / groups stay on our custom COLLECTION queries — empirically
 // the built-in 'Stock Summary' report returns a hierarchical summary (one
 // row per group, not per item) and 'List of Stock Groups' came back with a
@@ -645,6 +664,10 @@ const COLLECTION_TTL_MS: Record<string, number> = {
   profitLoss: 15 * 60_000,
   balanceSheet: 15 * 60_000,
   trialBalance: 15 * 60_000,
+  salesRegister: 10 * 60_000,
+  receiptRegister: 10 * 60_000,
+  billsOutstanding: 15 * 60_000,
+  manualVouchers: 60 * 60_000,
 };
 
 // Maps a collection key (ledgers, dayBook_2023, ...) to the XML payload,
@@ -663,6 +686,9 @@ function buildCollectionJob(
   if (key === 'profitLoss') return { xml: profitLossRequest(cfg), node: 'DSPACCNAME', timeoutMs: 30000 };
   if (key === 'balanceSheet') return { xml: balanceSheetRequest(cfg), node: 'DSPACCNAME', timeoutMs: 30000 };
   if (key === 'trialBalance') return { xml: trialBalanceRequest(cfg), node: 'DSPACCNAME', timeoutMs: 45000 };
+  if (key === 'salesRegister') return { xml: salesRegisterRequest(cfg), node: 'VOUCHER', timeoutMs: 90000 };
+  if (key === 'receiptRegister') return { xml: receiptRegisterRequest(cfg), node: 'VOUCHER', timeoutMs: 90000 };
+  if (key === 'billsOutstanding') return { xml: billsOutstandingRequest(cfg), node: 'BILLFIXED', timeoutMs: 60000 };
   if (key === 'dayBook') {
     return { xml: dayBookRequest(cfg), node: 'VOUCHER', timeoutMs: 120000 };
   }
@@ -999,7 +1025,7 @@ Deno.serve(async (req) => {
   // recent persisted snapshot (get-snapshot), and admins saving / triggering
   // syncs from the UI (save-config + trigger-sync + get-status).
   const dbActions = new Set([
-    'get-config', 'save-config', 'ingest', 'get-snapshot', 'get-status', 'trigger-sync',
+    'get-config', 'save-config', 'ingest', 'ingest-vouchers', 'get-snapshot', 'get-status', 'trigger-sync',
     'list-companies', 'get-companies', 'set-active-company', 'delete-snapshot',
   ]);
   if (dbActions.has(action)) {
@@ -1188,6 +1214,60 @@ Deno.serve(async (req) => {
         });
       }
       return new Response(JSON.stringify({ connected: true, action, tenantKey, ...result }), { headers: jsonHeaders });
+    }
+
+    // ingest-vouchers: manual voucher upload escape hatch for tenants whose
+    // Tally crashes on every voucher iterator (Day Book / Sales Register /
+    // custom Voucher COLLECTION all bomb with c0000005). The user exports
+    // Day Book to Excel from inside TallyPrime (Display More → Day Book →
+    // Ctrl+E), the client parses the CSV, and POSTs an array of voucher
+    // header rows here. We persist them under the `manualVouchers` key on
+    // tally_snapshots; the client transformer reads that key alongside the
+    // dayBook_* shards so the same revenue / aging / DSO derivations work
+    // unmodified. Anon-key gated like ingest — same trust model.
+    //
+    // Body: { action: 'ingest-vouchers', vouchers: [{ DATE, VOUCHERNUMBER,
+    //   VOUCHERTYPENAME, PARTYLEDGERNAME, AMOUNT }, ...], tenantKey?, company? }
+    // Returns: { connected, action, count, error }
+    if (action === 'ingest-vouchers') {
+      const vouchers = Array.isArray(body.vouchers) ? body.vouchers : [];
+      if (!vouchers.length) {
+        return new Response(JSON.stringify({
+          connected: false, action,
+          error: 'ingest-vouchers requires a non-empty `vouchers` array in the request body.',
+        }), { status: 400, headers: jsonHeaders });
+      }
+      // Wrap in the same envelope shape the COLLECTION parser produces
+      // (ENVELOPE > BODY > DATA > COLLECTION > VOUCHER[]) so the client
+      // transformer's extractCollection(...,'VOUCHER') walk pulls them
+      // out unchanged.
+      const wrapped = {
+        ENVELOPE: {
+          BODY: { DATA: { COLLECTION: { VOUCHER: vouchers } } },
+        },
+      };
+      // Resolve target company: explicit body > stored cfg > active company.
+      let target = (body.company as string) || cfg.company || company || '';
+      if (!target) {
+        const { data: cos } = await db
+          .from('tally_companies')
+          .select('active_company')
+          .eq('tenant_key', tenantKey)
+          .maybeSingle();
+        target = cos?.active_company || '';
+      }
+      if (!target) {
+        return new Response(JSON.stringify({
+          connected: false, action,
+          error: 'No active company set — open a company in Tally and run a sync first, or pass `company` in the body.',
+        }), { status: 400, headers: jsonHeaders });
+      }
+      const persistErr = await persistSnapshotKey(db, tenantKey, target, 'manualVouchers', wrapped, vouchers.length);
+      return new Response(JSON.stringify({
+        connected: !persistErr, action,
+        company: target, count: vouchers.length,
+        error: persistErr,
+      }), { headers: jsonHeaders });
     }
 
     // list-companies: probe Tally's built-in "List of Companies" report,
@@ -2144,7 +2224,7 @@ Deno.serve(async (req) => {
     if (!job) {
       return new Response(JSON.stringify({
         connected: false, action, key,
-        error: `Unknown collection key "${key}". Expected one of: ledgers, accountingGroups, stockItems, stockGroups, profitLoss, balanceSheet, trialBalance, dayBook, dayBook_<YYYY>.`,
+        error: `Unknown collection key "${key}". Expected one of: ledgers, accountingGroups, stockItems, stockGroups, profitLoss, balanceSheet, trialBalance, salesRegister, receiptRegister, billsOutstanding, dayBook, dayBook_<YYYY>.`,
       }), { status: 400, headers: jsonHeaders });
     }
     let result: unknown;
