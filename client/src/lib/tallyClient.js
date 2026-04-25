@@ -268,12 +268,25 @@ export const CORE_SYNC_PHASES = [
   'trialBalance',
 ];
 
+// Day Book voucher queries currently trigger a TallyPrime
+// `c0000005 (Memory Access Violation)` crash on the customer's data
+// files — the crash dialog blocks the Select Company screen and
+// every subsequent query returns placeholder data, which is the
+// "1 record" pattern the user keeps seeing. Until Tally Solutions
+// patches the underlying bug (or the customer restores from a
+// good backup), we skip the Day Book phase entirely so the master-
+// data phases (ledgers, groups, stock, P&L, BS, TB) still populate.
+// Flip this to true to re-enable; the rest of the per-phase
+// pipeline is unchanged.
+export const INCLUDE_DAY_BOOK = false;
+
 // Build the per-year Day Book phase keys for the requested date window.
 // Mirrors dayBookYearChunks() on the edge function. "All data" expands to
 // the 5-year window the edge function uses; a sub-90-day window collapses
 // to the single legacy "dayBook" key so the cached snapshot stays
 // byte-compatible with older runs.
 export function dayBookPhaseKeys({ allData, fromDate, toDate } = {}) {
+  if (!INCLUDE_DAY_BOOK) return [];
   const today = new Date();
   if (allData) {
     const startYear = today.getFullYear() - 4;

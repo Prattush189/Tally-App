@@ -38,7 +38,12 @@ const STEPS = [
   { key: 'profitLoss', label: 'Fetching Profit & Loss', etaMs: 15000 },
   { key: 'balanceSheet', label: 'Fetching Balance Sheet', etaMs: 15000 },
   { key: 'trialBalance', label: 'Fetching Trial Balance', etaMs: 18000 },
-  { key: 'dayBook', label: 'Fetching Day Book (sales, receipts, payments, journals, contra)', etaMs: 75000 },
+  // Day Book is conditional — disabled by default while the customer's
+  // Tally data files trigger a c0000005 crash on voucher queries. The
+  // row is shown only when livePhase / result diagnostics indicate Day
+  // Book actually ran, so a sync that intentionally skips it doesn't
+  // get a phantom "pending" row that never resolves.
+  { key: 'dayBook', label: 'Fetching Day Book (sales, receipts, payments, journals, contra)', etaMs: 75000, conditional: true },
   { key: 'persist', label: 'Persisting snapshot to cloud', etaMs: 4000 },
 ];
 
@@ -102,7 +107,25 @@ export default function SyncProgress({ active, result, progressCompany, livePhas
   // integration was silently working when it wasn't.
   const portalFired = result?.diagnostics?.portalLoginAttempted;
   const portalSkipped = Boolean(result?.diagnostics?.portalLoginSkippedReason);
-  const steps = STEPS.filter(s => !s.conditional || portalFired || portalSkipped);
+  // Day Book row visibility: only show it when day-book activity is
+  // actually present — either livePhase recorded a dayBook* phase or
+  // the finished result has dayBook counts/errors. Sync runs that
+  // skip Day Book (current default while the c0000005 voucher crash
+  // is live) drop the row entirely instead of leaving it pending.
+  const dayBookActive = hasLiveDriver
+    && Object.keys(livePhase.keyStatus || {}).some((k) => k.startsWith('dayBook'));
+  const dayBookFinished = !!result && (
+    Object.keys(result.collectionErrors || {}).some((k) => k.startsWith('dayBook'))
+    || Number(result.dayBook) > 0
+    || (result.fetched || []).some((k) => k.startsWith('dayBook'))
+  );
+  const showStep = (s) => {
+    if (!s.conditional) return true;
+    if (s.key === 'portal') return portalFired || portalSkipped;
+    if (s.key === 'dayBook') return dayBookActive || dayBookFinished;
+    return false;
+  };
+  const steps = STEPS.filter(showStep);
 
   // Recompute cumulative ETA from the steps we actually show so the
   // optimistic cursor is accurate when the Portal step is included.

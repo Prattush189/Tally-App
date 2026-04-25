@@ -392,11 +392,16 @@ export default function TallySync() {
     // as ~0-1 even though the phase-level sync reports "connected".
     // We detect that pattern and surface a clear "Tally isn't
     // serving real data" note so this stops looking like our bug.
+    // Day Book counts are intentionally excluded from the check —
+    // we currently skip the Day Book phase entirely while the
+    // voucher-side c0000005 crash is unresolved on the customer
+    // dataset, so 0 dayBook records is expected and not a signal
+    // that a company isn't loaded.
     const lookSuspect = agg.ledgers <= 1 && agg.stockItems <= 1 && agg.stockGroups <= 1
       && !Object.keys(agg.collectionErrors).length;
     if (lookSuspect && (agg.success || agg.fetched.length)) {
       agg.tallyNotServingRealData = true;
-      agg.note = 'Tally answered every phase but returned only placeholder counts (1 ledger / 1 group / 0 vouchers). This almost always means no company is actually open in TallyPrime — usually because a "c0000005 Memory Access Violation" dialog is blocking the Select Company screen. On the Tally machine: click OK on the error dialog, open a working company, and sync again. If every company crashes, the Tally data files are likely corrupt — restore from a backup or contact Tally Solutions support.';
+      agg.note = 'Tally answered every phase but returned only placeholder counts (1 ledger / 1 group). This almost always means no company is actually open in TallyPrime — usually because a "c0000005 Memory Access Violation" dialog is blocking the Select Company screen. On the Tally machine: click OK on the error dialog, open a working company, and sync again. If every company crashes, the Tally data files are likely corrupt — restore from a backup or contact Tally Solutions support.';
     }
 
     setSyncResult(agg);
