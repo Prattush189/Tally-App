@@ -335,7 +335,8 @@ export default function TallySync() {
       partial: Array.from(results.values()).some(r => !r?.success),
       mode: primary?.mode || 'full',
       tallyNotRunning: primary?.tallyNotRunning,
-      ledgers: 0, salesVouchers: 0, receiptVouchers: 0, stockItems: 0, stockGroups: 0,
+      ledgers: 0, salesVouchers: 0, purchaseVouchers: 0, receiptVouchers: 0, stockItems: 0, stockGroups: 0,
+      counts: {},
       collectionErrors: {},
       dealersStored: primary?.dealersStored || 0,
       diagnostics: primary?.diagnostics,
@@ -346,6 +347,7 @@ export default function TallySync() {
         success: Boolean(res?.success),
         ledgers: res?.ledgers || 0,
         salesVouchers: res?.salesVouchers || 0,
+        purchaseVouchers: res?.purchaseVouchers || 0,
         receiptVouchers: res?.receiptVouchers || 0,
         stockItems: res?.stockItems || 0,
         stockGroups: res?.stockGroups || 0,
@@ -356,9 +358,19 @@ export default function TallySync() {
     for (const res of results.values()) {
       agg.ledgers += res?.ledgers || 0;
       agg.salesVouchers += res?.salesVouchers || 0;
+      agg.purchaseVouchers += res?.purchaseVouchers || 0;
       agg.receiptVouchers += res?.receiptVouchers || 0;
       agg.stockItems += res?.stockItems || 0;
       agg.stockGroups += res?.stockGroups || 0;
+      // Sum every per-phase count across companies so SyncProgress can
+      // display "salesRegister: 1234 records" etc. on the post-completion
+      // panel. Without this, agg.counts stayed empty and only the legacy
+      // hardcoded fields above ever showed in the summary line.
+      if (res?.counts) {
+        for (const [k, v] of Object.entries(res.counts)) {
+          agg.counts[k] = (agg.counts[k] || 0) + (Number(v) || 0);
+        }
+      }
       if (res?.collectionErrors) {
         for (const [k, v] of Object.entries(res.collectionErrors)) {
           if (v && !agg.collectionErrors[k]) agg.collectionErrors[k] = v;

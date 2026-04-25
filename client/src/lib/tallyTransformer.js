@@ -552,23 +552,27 @@ export function transformTallyFull(bundle, options = {}) {
   const now = options.now instanceof Date ? options.now : new Date();
   const ledgerTree = bundle?.ledgers ?? null;
   const accountingGroupsTree = bundle?.accountingGroups ?? null;
-  // Voucher feeds — every dashboard reads vouchers from Tally's built-in
-  // pre-compiled reports (Sales / Purchase / Receipt Register). Day Book and
-  // the custom Voucher COLLECTION are deliberately not pulled: both OOM the
-  // Edge Function or crash Tally with c0000005 on real distributor datasets,
-  // and the dashboards only need the voucher headers (date, number, type,
-  // party, amount) the registers already supply.
+  // Voucher feeds — every dashboard reads vouchers from typed Voucher
+  // COLLECTION fetches (Sales / Purchase / Receipt Register). Sales is
+  // fanned out into per-year shards (salesRegister, salesRegister_2023,
+  // salesRegister_2024, ...) when the window spans multiple years to
+  // keep each parse tree under the Edge Function's 150 MB compute cap;
+  // we collect every shard whose key starts with 'salesRegister'.
+  const salesShardTrees = [];
+  if (bundle && typeof bundle === 'object') {
+    for (const [k, v] of Object.entries(bundle)) {
+      if (v == null) continue;
+      if (k === 'salesRegister' || k.startsWith('salesRegister_')) salesShardTrees.push(v);
+    }
+  }
   const voucherFeedTrees = [
-    bundle?.salesRegister ?? null,
+    ...salesShardTrees,
     bundle?.purchaseRegister ?? null,
     bundle?.receiptRegister ?? null,
   ].filter((t) => t != null);
-  // Per-feed extracts kept separate so we can derive purchase analytics
-  // straight off the Purchase Register without classifying by voucher-type
-  // string (some installs name the type "GST Purchase" / "Inter-State
-  // Purchase" / etc., which the loose "includes('purchase')" filter below
-  // would still catch — but starting from the register is more reliable).
-  const salesRegisterVouchers = extractCollection(bundle?.salesRegister ?? null, 'VOUCHER');
+  // Per-feed extracts kept separate so coverage diagnostics show which
+  // register actually returned data, even after the dedup pass below.
+  const salesRegisterVouchers = salesShardTrees.flatMap((tree) => extractCollection(tree, 'VOUCHER'));
   const purchaseRegisterVouchers = extractCollection(bundle?.purchaseRegister ?? null, 'VOUCHER');
   const receiptRegisterVouchers = extractCollection(bundle?.receiptRegister ?? null, 'VOUCHER');
   // Bills Outstanding rolls up bills (not vouchers) — different shape; the

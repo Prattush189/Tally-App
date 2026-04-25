@@ -248,14 +248,15 @@ export async function syncCollection({ key, company, config = {} }) {
 // Ordered list of phases every sync walks. Kept in one place so
 // SyncProgress, handleSync and any scheduler stay in lockstep.
 //
-// salesRegister / purchaseRegister / receiptRegister / billsOutstanding hit
-// Tally's pre-compiled REPORT code path — the same reports the GUI exposes
-// from Display More Reports → Account Books. They're the only voucher feed
-// we use: Day Book and the custom Voucher COLLECTION are deliberately not
-// in this list because both reproducibly OOM the Edge Function or crash
-// Tally with c0000005 on real distributor datasets, and the dashboards
-// only need sales / purchase / receipt headers anyway. Each phase runs in
-// its own sync-collection isolate so a crash on one doesn't cascade.
+// Each register is a typed Voucher COLLECTION ($$IsSales / $$IsPurchase /
+// $$IsReceipt) — the only voucher feed we use. Day Book and the custom
+// untyped Voucher COLLECTION are not in this list because both
+// reproducibly OOM the Edge Function or crash Tally with c0000005 on
+// real distributor datasets. Each phase runs in its own sync-collection
+// isolate so a crash on one doesn't cascade.
+//
+// Sales gets fanned out by year separately (see syncAllPhases) because
+// it's typically the heaviest single class.
 export const CORE_SYNC_PHASES = [
   'ledgers',
   'accountingGroups',
@@ -269,6 +270,30 @@ export const CORE_SYNC_PHASES = [
   'receiptRegister',
   'billsOutstanding',
 ];
+
+// Build per-year salesRegister phase keys when the configured window
+// spans multiple calendar years. Mirrors the buildCollectionJob logic on
+// the edge function — each chunk gets its own sync-collection isolate
+// (fresh 150 s wall clock + 150 MB compute budget) so a heavy year can
+// breathe without busting the cap. A single-year window collapses to
+// the bare salesRegister key so the legacy snapshot shape keeps working.
+export function salesRegisterYearKeys({ allData, fromDate, toDate } = {}) {
+  const today = new Date();
+  let fromYear, toYear;
+  if (allData) {
+    fromYear = today.getFullYear() - 4;
+    toYear = today.getFullYear();
+  } else if (fromDate && /^\d{4}/.test(fromDate) && toDate && /^\d{4}/.test(toDate)) {
+    fromYear = Number(fromDate.slice(0, 4));
+    toYear = Number(toDate.slice(0, 4));
+  } else {
+    return [];
+  }
+  if (!Number.isFinite(fromYear) || !Number.isFinite(toYear) || toYear <= fromYear) return [];
+  const keys = [];
+  for (let y = fromYear; y <= toYear; y++) keys.push(`salesRegister_${y}`);
+  return keys;
+}
 
 // Sleep helper used for the inter-phase cooldown and retry backoff. Wrapped
 // so callers can abort a long wait early if the user clicks "Stop" (not yet
@@ -447,11 +472,17 @@ export async function syncAllPhases({
     await wait(2000, signal);
   }
 
-  // 3) Build the phase list. allData / fromDate / toDate are forwarded to
-  //    each register fetch via phaseConfig (set above) — they bound the
-  //    register window without spawning extra phase keys.
-  void allData; void fromDate; void toDate;
-  const phaseKeys = [...CORE_SYNC_PHASES];
+  // 3) Build the phase list. Multi-year windows fan Sales Register out
+  //    into per-year shards so each year's parse tree fits the 150 MB
+  //    Edge Function compute cap (sales is the heaviest voucher class —
+  //    a 5-year all-history sales fetch reproducibly OOMed even with the
+  //    slim NATIVEMETHOD list). Single-year windows keep the bare
+  //    'salesRegister' key. Other registers (purchase, receipt) stay as
+  //    single calls — their volume is a fraction of sales.
+  const salesYearKeys = salesRegisterYearKeys({ allData, fromDate, toDate });
+  const phaseKeys = salesYearKeys.length
+    ? CORE_SYNC_PHASES.flatMap((k) => k === 'salesRegister' ? salesYearKeys : [k])
+    : [...CORE_SYNC_PHASES];
 
   // 3) Walk each phase serially with a cooldown between calls. A failure
   //    on one phase no longer blocks the next — we record the error and
@@ -492,6 +523,14 @@ export async function syncAllPhases({
       try { await wait(cooldownMs, signal); } catch { break; }
       onPhase?.({ type: 'cooldown-done' });
     }
+  }
+
+  // Roll up per-year salesRegister shards into a single salesRegister
+  // total so the result panel and downstream `r.salesVouchers` see one
+  // logical sales count regardless of how many year-chunks fetched.
+  if (salesYearKeys.length) {
+    const salesTotal = salesYearKeys.reduce((sum, k) => sum + (counts[k] || 0), 0);
+    counts.salesRegister = (counts.salesRegister || 0) + salesTotal;
   }
 
   const success = anyConnected && Object.values(phaseResults).some((r) => r?.connected);
