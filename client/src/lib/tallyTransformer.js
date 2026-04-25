@@ -793,12 +793,22 @@ export function transformTallyFull(bundle, options = {}) {
   // projection per supplier rather than allocating a global monthly
   // trend by spend share (which made every supplier's forecast look
   // alike).
+  // Purchase aggregates. Supports both shapes:
+  //   - VOUCHER nodes (when on the typed Voucher COLLECTION path —
+  //     not used today because that crashes Tally, but kept for future
+  //     opt-in or per-customer tenants without the crash)
+  //   - DSPACCNAME monthly summary (when on the built-in report path,
+  //     same as Sales). Per-supplier detail isn't available here —
+  //     Tally's pre-compiled Purchase Register report aggregates by
+  //     month, not by party — so supplierMonthly / topSuppliers stay
+  //     empty when this path is in use.
   const purchaseTotals = (() => {
     let total = 0;
     const byMonth = new Map();
     const bySupplier = new Map();
     const bySupplierMonth = new Map();
     const allMonthsSet = new Set();
+    // Path 1: per-voucher
     for (const v of purchaseVouchers) {
       const amt = Math.abs(parseAmount(readField(v, 'AMOUNT')));
       if (!Number.isFinite(amt)) continue;
@@ -816,15 +826,30 @@ export function transformTallyFull(bundle, options = {}) {
         bySupplierMonth.set(supplier, supMap);
       }
     }
+    // Path 2: DSPACCNAME monthly summary (built-in Purchase Register
+    // report). Only kicks in when path 1 produced nothing — keeps the
+    // per-voucher numbers when both paths happen to be present.
+    if (!allMonthsSet.size) {
+      for (const tree of purchaseShardTrees) {
+        const parsed = parseFinancialStatement(tree, 'purchase');
+        if (!parsed || !Array.isArray(parsed.rows)) continue;
+        for (const row of parsed.rows) {
+          const monthKey = monthLabelToKey(row?.name);
+          if (!monthKey) continue;
+          const net = Math.abs(Number(row?.net ?? row?.debit ?? row?.credit ?? 0));
+          if (!Number.isFinite(net)) continue;
+          total += net;
+          byMonth.set(monthKey, (byMonth.get(monthKey) || 0) + net);
+          allMonthsSet.add(monthKey);
+        }
+      }
+    }
     const allMonths = Array.from(allMonthsSet).sort();
     const topSuppliers = Array.from(bySupplier.entries())
       .map(([name, value]) => ({ name, value: Math.round(value) }))
       .sort((a, b) => b.value - a.value)
       .slice(0, 10);
     const monthlySeries = allMonths.map((month) => ({ month, value: Math.round(byMonth.get(month) || 0) }));
-    // Per-supplier monthly series, padded so every supplier shares the
-    // same month axis. Lets the forecast see real seasonality per
-    // supplier rather than scaling a single global trend.
     const supplierMonthly = topSuppliers.map(({ name }) => ({
       name,
       months: allMonths.map((m) => Math.round((bySupplierMonth.get(name)?.get(m)) || 0)),
@@ -835,6 +860,7 @@ export function transformTallyFull(bundle, options = {}) {
       monthsAxis: allMonths,
       topSuppliers,
       supplierMonthly,
+      perSupplierAvailable: bySupplier.size > 0,
     };
   })();
 

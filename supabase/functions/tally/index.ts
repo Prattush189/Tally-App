@@ -363,8 +363,12 @@ function countNode(tree: unknown, target: string): number {
     for (const key of Object.keys(obj)) {
       const value = obj[key];
       if (key === target) {
+        // Count any occurrence of `target`, including string-valued
+        // ones — DSPACCNAME (Sales Register monthly summary), STATENAME
+        // and other Tally fields are exported as plain strings, and
+        // the previous "object/array only" check zeroed them out.
         if (Array.isArray(value)) total += value.length;
-        else if (value && typeof value === 'object') total += 1;
+        else if (value !== undefined && value !== null) total += 1;
       }
       walk(value);
     }
@@ -464,8 +468,13 @@ function typedVoucherCollection(
 function salesRegisterRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
   return reportWithVoucherDates('Sales Register', cfg);
 }
+// Purchase Register also crashes Tally on real distributor data when
+// pulled via the typed Voucher COLLECTION (FY25-26 month-chunk OOMed
+// + Tally hung). Same safe pivot as Sales: use the built-in pre-
+// compiled report path. We lose per-supplier per-voucher detail; we
+// keep monthly purchase totals.
 function purchaseRegisterRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
-  return typedVoucherCollection(cfg, 'B2BPurchaseVouchers', '$$IsPurchase:$VoucherTypeName');
+  return reportWithVoucherDates('Purchase Register', cfg);
 }
 function receiptRegisterRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
   return typedVoucherCollection(cfg, 'B2BReceiptVouchers', '$$IsReceipt:$VoucherTypeName');
@@ -651,7 +660,7 @@ function buildCollectionJob(
   // by Tally and the response is a few KB regardless of how many
   // vouchers underlie each month.
   if (key === 'salesRegister') return { xml: salesRegisterRequest(cfg), node: 'DSPACCNAME', timeoutMs: 60000 };
-  if (key === 'purchaseRegister') return { xml: purchaseRegisterRequest(cfg), node: 'VOUCHER', timeoutMs: 90000 };
+  if (key === 'purchaseRegister') return { xml: purchaseRegisterRequest(cfg), node: 'DSPACCNAME', timeoutMs: 60000 };
   if (key === 'receiptRegister') return { xml: receiptRegisterRequest(cfg), node: 'VOUCHER', timeoutMs: 90000 };
   if (key === 'billsOutstanding') return { xml: billsOutstandingRequest(cfg), node: 'BILLFIXED', timeoutMs: 60000 };
   return null;

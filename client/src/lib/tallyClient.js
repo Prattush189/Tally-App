@@ -383,23 +383,24 @@ function fyWeeks(fromDate, toDate) {
   return out;
 }
 
-// Per-phase chunking strategy. Sales is NOT chunked — it's served by
-// Tally's built-in "Sales Register" REPORT (monthly DSPACCNAME
-// summary), which goes through a pre-compiled, voucher-iterator-free
-// code path inside Tally. The custom typed Voucher COLLECTION we
-// previously used for sales reproducibly crashed TallyPrime itself
-// (c0000005 in the voucher tree walker) on real distributor data, so
-// no amount of chunking would help — every chunk was crashing Tally.
-// We now accept losing per-voucher sales detail in exchange for Tally
-// staying alive; the report still gives us monthly aggregate totals
-// for revenue trend charts.
+// Per-phase chunking strategy. Both Sales AND Purchase Register now
+// hit Tally's built-in pre-compiled REPORT path which returns a
+// DSPACCNAME monthly summary. Per-voucher iteration via custom
+// COLLECTION reproducibly crashed TallyPrime (c0000005 / "not
+// responding" dialog) on real distributor data — sales OOM came
+// first, then purchase OOMed too once we tried it on a full FY.
+// The report path is server-aggregated by Tally and small enough
+// that no chunking is needed. Trade-off: we lose per-customer /
+// per-supplier voucher detail in exchange for Tally staying alive
+// across the entire sync.
 //
-// Purchase Register stays on the typed Voucher COLLECTION (Tally
-// handles purchase iteration without the crash), monthly chunks so a
-// long FY doesn't OOM the 150 MB Edge Function budget.
-const CHUNK_STRATEGY = {
-  purchaseRegister: 'monthly',
-};
+// Receipt Register still uses the typed Voucher COLLECTION because
+// receipts haven't shown the crash pattern (low-volume on this
+// tenant; ~500 receipts vs thousands of sales/purchases). If a
+// customer reports Tally crashes on receipts too, switch them to
+// the report path here and the transformer will pick up the
+// monthly summary automatically.
+const CHUNK_STRATEGY = {};
 function bucketsFor(key, fromDate, toDate) {
   const strategy = CHUNK_STRATEGY[key];
   if (!strategy) return [];

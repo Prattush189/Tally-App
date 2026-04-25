@@ -763,8 +763,12 @@ export default function TallySync() {
               )}
             </div>
 
+            <div className="text-xs text-amber-200/80 bg-amber-500/5 border border-amber-500/20 rounded-lg p-3 leading-relaxed">
+              <span className="font-semibold text-amber-300">Multi-FY tip:</span> Tally exposes one "company" per financial year (e.g. <code className="text-amber-100/90">- (from 1-Apr-25)</code> and <code className="text-amber-100/90">- (from 1-Apr-26)</code>). To stitch them into one analytics view, <span className="font-semibold">open every FY's company in TallyPrime before clicking Sync</span> — only loaded companies show up in our discovery probe, so any FY you forget to open won't sync. Each loaded FY is then merged under the canonical name automatically.
+            </div>
+
             <button onClick={handleSync} disabled={syncing || isDemo}
-              title={isDemo ? 'Disabled for the demo account' : 'Sync from Tally. Auto-logs into the portal if needed and falls back to the last cloud snapshot on failure.'}
+              title={isDemo ? 'Disabled for the demo account' : 'Sync from Tally. Open every FY company in TallyPrime first; each loaded FY is merged under the canonical company name.'}
               className={`w-full py-3 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 transition-all disabled:opacity-40 disabled:cursor-not-allowed ${syncing ? 'bg-indigo-500/50 cursor-wait' : 'bg-indigo-600 hover:bg-indigo-500'} text-white`}>
               <RefreshCw size={16} className={syncing ? 'animate-spin' : ''} />
               {syncing ? 'Syncing…' : 'Sync'}

@@ -159,14 +159,30 @@ export function getForecast(overrides) {
   const purchases = overrides?.financials?.purchases || null;
   const supplierMonthly = purchases?.supplierMonthly || [];
   const monthsAxis = purchases?.monthsAxis || [];
+  const monthly = purchases?.monthly || [];
 
-  if (!supplierMonthly.length || !monthsAxis.length) {
+  if (!monthsAxis.length) {
     return {
       forecasts: [],
       totalForecast: 0,
       months: 0,
-      source: purchases ? 'waiting-for-suppliers' : 'waiting-for-purchase-register',
+      source: purchases ? 'waiting-for-purchase-data' : 'waiting-for-purchase-register',
     };
+  }
+
+  // Per-supplier projections aren't available when the purchase data
+  // came from Tally's pre-compiled Purchase Register report (it
+  // aggregates by month server-side, not by party). Fall back to a
+  // single "Total Purchases" projection from the global monthly
+  // series so the page still renders a usable chart.
+  if (!supplierMonthly.length) {
+    supplierMonthly.push({
+      name: 'Total Purchases',
+      months: monthsAxis.map((m) => {
+        const row = monthly.find((x) => x.month === m);
+        return row ? Number(row.value) || 0 : 0;
+      }),
+    });
   }
 
   // Project 8 months forward per supplier from each supplier's actual

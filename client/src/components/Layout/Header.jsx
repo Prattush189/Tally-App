@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { Search, RefreshCw, Clock, Calendar, User } from 'lucide-react';
 import { NAV_ITEMS } from './Sidebar';
 import { useAuth } from '../../context/AuthContext';
@@ -37,6 +37,21 @@ export default function Header({ active, searchQuery, onSearchChange, onRefresh,
     () => deriveFilterOptions(customers),
     [syncedAt, customers]
   );
+
+  // Auto-fill the date range to the actual data span the first time a
+  // span becomes available. Without this the pickers showed empty
+  // boxes even though we had a span — which made the "what dates am
+  // I looking at?" question hard to answer at a glance. We only set
+  // when the user hasn't already typed a range; once they pick their
+  // own values we stay out of their way.
+  const lastSeenSpan = useRef(null);
+  useEffect(() => {
+    if (!dataSpan?.from || !dataSpan?.to) return;
+    if (lastSeenSpan.current === `${dataSpan.from}|${dataSpan.to}`) return;
+    lastSeenSpan.current = `${dataSpan.from}|${dataSpan.to}`;
+    if (!dateFrom) setDateFrom(dataSpan.from);
+    if (!dateTo) setDateTo(dataSpan.to);
+  }, [dataSpan?.from, dataSpan?.to]);
 
   return (
     <header className="h-14 flex items-center justify-between px-6 border-b border-gray-800/60 bg-gray-900/40 backdrop-blur flex-shrink-0">
