@@ -59,7 +59,7 @@ function loadTallyConfig() {
 
 export default function TallySync() {
   const { isDemo, user } = useAuth();
-  const { customers: liveCustomers, totals: liveTotals, syncedAt: liveSyncedAt, source: liveSource, refresh: refreshTallyData } = useTallyData();
+  const { customers: liveCustomers, totals: liveTotals, diagnostics: liveDiagnostics, syncedAt: liveSyncedAt, source: liveSource, refresh: refreshTallyData } = useTallyData();
   const [status, setStatus] = useState(null);
   const [summary, setSummary] = useState(null);
   const [syncing, setSyncing] = useState(false);
@@ -1016,45 +1016,44 @@ UNITED AGENCIES DISTRIBUTORS LLP - (from 1-Apr-26)`}
                     {syncResult.transformError && (
                       <div className="text-xs text-red-300/80 pt-1">Transform warning: {syncResult.transformError}</div>
                     )}
-                    {syncResult.diagnostics && syncResult.dealersStored != null && (
-                      <div className="text-xs text-amber-300/80 pt-1 space-y-1">
-                        <div>
-                          {syncResult.diagnostics.filterMatched
-                            ? `Matched ${syncResult.dealersStored} Sundry Debtor ledgers out of ${syncResult.ledgers || '?'} total.`
-                            : syncResult.diagnostics.usedFallback
-                              ? `No "Sundry Debtors" group matched — falling back to ledgers with non-zero balances (${syncResult.dealersStored}).`
-                              : 'No ledgers matched and no balances found — dashboards will stay empty.'}
-                        </div>
-                        {syncResult.diagnostics.parentsSeen?.length > 0 && (
-                          <div className="text-[11px] text-gray-400">
-                            Parent groups in feed: {syncResult.diagnostics.parentsSeen.join(', ') || '(none)'}
+                    {/* Dashboard hydration status — driven by the live
+                        TallyDataContext (which runs the transformer on
+                        the cloud snapshot) rather than transformer
+                        output computed during sync. The post-sync
+                        refreshTallyData() fires-and-forgets, so this
+                        block reflects whatever the dashboards actually
+                        see, even if the transformer is still running
+                        when the sync result panel first renders. */}
+                    {syncResult.success && !syncing && (
+                      <div className="text-xs pt-1 space-y-1">
+                        {liveCustomers.length > 0 ? (
+                          <div className="text-emerald-300/90">
+                            ✓ {liveCustomers.length} dealers loaded into dashboards
+                            {liveDiagnostics?.filterMatched
+                              ? ` — matched as Sundry Debtors (out of ${liveDiagnostics?.coverage?.ledgers || syncResult.ledgers || '?'} total ledgers).`
+                              : liveDiagnostics?.usedFallback
+                                ? ` — fell back to ledgers with non-zero balances (no group named "Sundry Debtors" matched).`
+                                : '.'}
                           </div>
-                        )}
-                        {syncResult.diagnostics.accountingGroupCount != null && (
-                          <div className="text-[11px] text-gray-400">
-                            Accounting groups fetched: <span className={syncResult.diagnostics.accountingGroupCount > 0 ? 'text-emerald-300' : 'text-red-300'}>{syncResult.diagnostics.accountingGroupCount}</span>
-                            {' · '}
-                            parent map entries: <span className={syncResult.diagnostics.groupMapSize > 0 ? 'text-emerald-300' : 'text-red-300'}>{syncResult.diagnostics.groupMapSize}</span>
+                        ) : liveDiagnostics ? (
+                          <div className="text-amber-300/90 space-y-1">
+                            <div>
+                              Dashboards loaded the snapshot but found 0 customers — none of the {liveDiagnostics?.coverage?.ledgers || syncResult.ledgers || '?'} ledgers matched as Sundry Debtors.
+                            </div>
+                            {liveDiagnostics.parentsSeen?.length > 0 && (
+                              <div className="text-[11px] text-gray-400">
+                                Parent groups in feed: {liveDiagnostics.parentsSeen.join(', ') || '(none)'}
+                              </div>
+                            )}
+                            {liveDiagnostics.sampleGroupHops?.length > 0 && (
+                              <div className="text-[11px] text-gray-400">
+                                Sample chains: {liveDiagnostics.sampleGroupHops.map((c, i) => <div key={i} className="font-mono">{c}</div>)}
+                              </div>
+                            )}
                           </div>
-                        )}
-                        {syncResult.diagnostics.sampleGroupHops?.length > 0 && (
-                          <div className="text-[11px] text-gray-400">
-                            Sample chains: {syncResult.diagnostics.sampleGroupHops.map((c, i) => <div key={i} className="font-mono">{c}</div>)}
-                          </div>
-                        )}
-                        {syncResult.diagnostics.sampleKeys?.length > 0 && (
-                          <div className="text-[11px] text-gray-400">
-                            Fields on first ledger: {syncResult.diagnostics.sampleKeys.join(', ')}
-                          </div>
-                        )}
-                        {syncResult.diagnostics.sampleLedger && (
-                          <div className="text-[11px] text-gray-400 font-mono">
-                            Sample (resolved): {JSON.stringify(syncResult.diagnostics.sampleLedger)}
-                          </div>
-                        )}
-                        {syncResult.diagnostics.sampleRaw && Object.keys(syncResult.diagnostics.sampleRaw).length > 0 && (
-                          <div className="text-[11px] text-gray-400 font-mono break-all">
-                            Sample (raw keys): {JSON.stringify(syncResult.diagnostics.sampleRaw).slice(0, 600)}
+                        ) : (
+                          <div className="text-gray-400/80">
+                            Dashboards are loading the fresh snapshot — counts will appear here once the transformer finishes.
                           </div>
                         )}
                       </div>
