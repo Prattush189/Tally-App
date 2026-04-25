@@ -443,6 +443,26 @@ function reportRequest(reportId: string, company: string) {
 // of loading the company first. Sending an explicit Load Company action
 // before the phase chain forces Tally into the company's data context
 // so subsequent queries return real records.
+//
+// We send TWO XML forms back to back because TallyPrime documentation
+// itself shows both shapes and different builds accept different ones:
+// (a) the dedicated TALLYREQUEST=Load Company form (older style, no
+// inner TYPE/ID), and (b) the Execute Action / ID=Load Company form.
+// Tally returns its own success / error envelope either way; the
+// caller surfaces whichever response actually came back.
+function loadCompanyRequestSimple(company: string) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER><VERSION>1</VERSION><TALLYREQUEST>Load Company</TALLYREQUEST></HEADER>
+  <BODY><DESC>
+    <STATICVARIABLES>
+      <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      ${companyFilter(company)}
+    </STATICVARIABLES>
+  </DESC></BODY>
+</ENVELOPE>`;
+}
+
 function loadCompanyRequest(company: string) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <ENVELOPE>
@@ -1530,23 +1550,54 @@ Deno.serve(async (req) => {
         error: 'load-company requires `company` in the request body or stored config.',
       }), { status: 400, headers: jsonHeaders });
     }
-    let parsed: unknown = null;
-    let errMsg: string | null = null;
-    try {
-      parsed = await tallyRequest(loadCompanyRequest(target), cfg, 30000);
-    } catch (err) {
-      errMsg = err instanceof Error ? err.message : String(err);
+    // Tally accepts two different XML shapes for opening a company
+    // depending on build / hosted-Tally configuration. Try the simple
+    // TALLYREQUEST=Load Company form first; if Tally responds with an
+    // explicit error envelope (LINEERROR / DESC>ERR / "no such
+    // company"), fall back to the Execute Action form. Both raw
+    // responses are returned so the caller can see exactly what
+    // Tally said.
+    const attempts: { form: string; ok: boolean; sample: string | null; error: string | null }[] = [];
+    const isErrorResponse = (parsed: unknown): { ok: boolean; reason: string | null } => {
+      if (!parsed || typeof parsed !== 'object') return { ok: true, reason: null };
+      const text = (() => {
+        try { return JSON.stringify(parsed).toLowerCase(); } catch { return ''; }
+      })();
+      // Tally surfaces errors via LINEERROR, EXCEPTIONS, or a
+      // "no company" string somewhere in the envelope. Treat any
+      // of those as a failed load so the next form gets a chance.
+      if (/lineerror|"err"|exception|no.*company|invalid|not found|could not/i.test(text)) {
+        return { ok: false, reason: text.slice(0, 240) };
+      }
+      return { ok: true, reason: null };
+    };
+    const tryForm = async (form: string, xml: string) => {
+      try {
+        const parsed = await tallyRequest(xml, cfg, 30000);
+        let sample: string | null = null;
+        try { sample = JSON.stringify(parsed).slice(0, 1500); } catch { /* ignore */ }
+        const verdict = isErrorResponse(parsed);
+        attempts.push({ form, ok: verdict.ok, sample, error: verdict.reason });
+        return verdict.ok;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        attempts.push({ form, ok: false, sample: null, error: msg });
+        return false;
+      }
+    };
+    let connected = await tryForm('simple', loadCompanyRequestSimple(target));
+    if (!connected) {
+      connected = await tryForm('action', loadCompanyRequest(target));
     }
-    let sample: string | null = null;
-    try {
-      if (parsed) sample = JSON.stringify(parsed).slice(0, 800);
-    } catch { /* ignore */ }
     return new Response(JSON.stringify({
-      connected: !errMsg,
+      connected,
       action,
       company: target,
-      response: sample,
-      error: errMsg,
+      attempts,
+      // Backward-compat: keep `response` + `error` mirrored from the
+      // last attempt so older clients still see the same shape.
+      response: attempts[attempts.length - 1]?.sample || null,
+      error: connected ? null : (attempts[attempts.length - 1]?.error || 'Load Company failed in both XML forms.'),
       edgeBuildId: EDGE_BUILD_ID,
       diagnostics: snapshotDiagnostics(),
     }), { headers: jsonHeaders });

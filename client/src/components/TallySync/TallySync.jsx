@@ -866,6 +866,45 @@ UNITED AGENCIES DISTRIBUTORS LLP - (from 1-Apr-26)`}
               </div>
             )}
 
+            {/* Load Company diagnostics panel. Surfaces the raw Tally
+                response from each Load Company XML form attempt so we
+                can tell whether the action genuinely opened the company
+                or whether Tally just acknowledged the request and kept
+                the Select Company screen up. Visible only after a sync
+                completes (we don't want to render it during the live
+                run — the cooldown banner / per-phase rows already cover
+                in-flight diagnostics). */}
+            {syncResult?.loadCompany && !syncing && (
+              <div className="p-3 rounded-lg border text-xs bg-gray-900/40 border-gray-700/50 text-gray-300 space-y-1">
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-gray-200">Load Company response</span>
+                  <span className={syncResult.loadCompany.connected ? 'text-emerald-400' : 'text-red-400'}>
+                    {syncResult.loadCompany.connected ? 'accepted' : 'rejected'}
+                  </span>
+                </div>
+                {syncResult.loadCompany.company && (
+                  <div className="text-[11px] text-gray-400">
+                    Sent for company: <span className="font-mono text-gray-200">{syncResult.loadCompany.company}</span>
+                  </div>
+                )}
+                {syncResult.loadCompany.error && (
+                  <div className="text-[11px] text-red-300/90">{syncResult.loadCompany.error}</div>
+                )}
+                {Array.isArray(syncResult.loadCompany.attempts) && syncResult.loadCompany.attempts.map((a, i) => (
+                  <details key={i} className="text-[11px] text-gray-400">
+                    <summary className="cursor-pointer">
+                      Form {i + 1} ({a.form}) — {a.ok ? '✓ accepted' : `✗ ${a.error ? a.error.slice(0, 60) : 'rejected'}`}
+                    </summary>
+                    {a.sample && (
+                      <pre className="mt-1 text-[10px] text-gray-400 font-mono break-all whitespace-pre-wrap bg-gray-900/60 rounded p-2 max-h-48 overflow-auto">
+                        {a.sample}
+                      </pre>
+                    )}
+                  </details>
+                ))}
+              </div>
+            )}
+
             {/* Sync Result */}
             {syncResult?.tallyNotRunning && (
               <div className="p-3 rounded-lg border text-sm bg-amber-500/10 border-amber-500/30 text-amber-300 space-y-1">
