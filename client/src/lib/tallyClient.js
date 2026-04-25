@@ -261,17 +261,17 @@ export const CORE_SYNC_PHASES = [
   'trialBalance',
 ];
 
-// Day Book voucher queries currently trigger a TallyPrime
-// `c0000005 (Memory Access Violation)` crash on the customer's data
-// files — the crash dialog blocks the Select Company screen and
-// every subsequent query returns placeholder data, which is the
-// "1 record" pattern the user keeps seeing. Until Tally Solutions
-// patches the underlying bug (or the customer restores from a
-// good backup), we skip the Day Book phase entirely so the master-
-// data phases (ledgers, groups, stock, P&L, BS, TB) still populate.
-// Flip this to true to re-enable; the rest of the per-phase
-// pipeline is unchanged.
-export const INCLUDE_DAY_BOOK = false;
+// Day Book voucher queries on the GIRNAR data files were triggering
+// a TallyPrime `c0000005 (Memory Access Violation)` crash. We
+// disabled this phase to ship master-data sync first. Now that
+// the per-company Load Company step is working and UA loads
+// cleanly, re-enabled by default — the crash was specific to
+// GIRNAR's voucher tree and may not reproduce on other company
+// files. If a future sync trips the crash again on a specific
+// company, the per-company iteration in handleSync makes it
+// possible to drop just that line from the Companies textarea
+// without losing the others.
+export const INCLUDE_DAY_BOOK = true;
 
 // Build the per-year Day Book phase keys for the requested date window.
 // Mirrors dayBookYearChunks() on the edge function. "All data" expands to
