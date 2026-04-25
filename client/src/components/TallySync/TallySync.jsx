@@ -1045,6 +1045,7 @@ export default function TallySync() {
           {!isDemo && (
             <DayBookReportFetch
               company={activeCompany}
+              host={tallyHost}
               onFetched={() => refreshTallyData()}
             />
           )}

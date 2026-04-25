@@ -30,7 +30,7 @@ function defaultFinancialYear(now = new Date()) {
   };
 }
 
-export default function DayBookReportFetch({ company, onFetched }) {
+export default function DayBookReportFetch({ company, host, onFetched }) {
   const fy = defaultFinancialYear();
   const [from, setFrom] = useState(fy.from);
   const [to, setTo] = useState(fy.to);
@@ -56,6 +56,10 @@ export default function DayBookReportFetch({ company, onFetched }) {
       setResult({ success: false, error: 'No company is active — open one in Tally and run a sync first.' });
       return;
     }
+    if (!host) {
+      setResult({ success: false, error: 'Tally host not configured — fill in the IP and port at the top of this page first.' });
+      return;
+    }
     if (!from || !to) {
       setResult({ success: false, error: 'Pick a from and to date.' });
       return;
@@ -70,6 +74,7 @@ export default function DayBookReportFetch({ company, onFetched }) {
       from: toTallyDate(from),
       to: toTallyDate(to),
       company,
+      config: { host },
     });
     setResult(r);
     setBusy(false);
