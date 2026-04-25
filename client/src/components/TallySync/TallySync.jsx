@@ -37,7 +37,7 @@ function composeHost(ip, port) {
 function loadTallyConfig() {
   try {
     const raw = localStorage.getItem(TALLY_CONFIG_KEY);
-    if (!raw) return { ip: '', port: '', username: '', password: '', portalUsername: '', portalPassword: '', manualCompany: '' };
+    if (!raw) return { ip: '', port: '', manualCompany: '' };
     const parsed = JSON.parse(raw);
     const split = (parsed.ip || parsed.port)
       ? { ip: parsed.ip || '', port: parsed.port || '' }
@@ -45,26 +45,15 @@ function loadTallyConfig() {
     return {
       ip: split.ip,
       port: split.port,
-      username: parsed.username || '',
-      password: parsed.password || '',
-      // Portal creds are optional. When blank, the edge function falls back
-      // to username/password for the hb.exe cp auto-login step. Separate
-      // fields are here because the hosted-Tally portal often uses a
-      // different login (e.g. `unitsd5`) than the XML server (e.g.
-      // `UNITED5`) — without the split the auto-login fails silently.
-      portalUsername: parsed.portalUsername || '',
-      portalPassword: parsed.portalPassword || '',
-      // Optional override for the company name. Set this when Tally's
-      // "List of Companies" auto-discover returns nothing — which
-      // happens on hosted setups where the XML server answers pings
-      // but refuses report queries until a company is explicitly
-      // addressed. With a manualCompany set we skip discovery and
-      // pass the name straight to every SVCURRENTCOMPANY filter, so
-      // Tally auto-loads it on the first report call.
+      // Required: company name(s) Tally has loaded in the GUI. We
+      // pass each line straight into SVCURRENTCOMPANY for that
+      // company's phase chain. TallyPrime's XML server only sees
+      // companies the desktop app has actually opened, so this is
+      // user-driven on every deployment.
       manualCompany: parsed.manualCompany || '',
     };
   } catch {
-    return { ip: '', port: '', username: '', password: '', portalUsername: '', portalPassword: '', manualCompany: '' };
+    return { ip: '', port: '', manualCompany: '' };
   }
 }
 
@@ -130,16 +119,12 @@ export default function TallySync() {
   // (one "host" field, same as before) while the UI shows them split.
   const backendCreds = () => ({
     host: tallyHost,
-    username: config.username,
-    password: config.password,
-    // Portal creds flow through as dedicated fields so the edge function can
-    // use them specifically for the hb.exe cp auto-login. If left blank the
-    // edge function falls back to the XML username / password.
-    portalUsername: config.portalUsername,
-    portalPassword: config.portalPassword,
-    // Don't send `company` here — the orchestrator passes it
-    // per-iteration via syncAllPhases({ company }). If we set it
-    // here too, multi-company runs would all use the first entry.
+    // No auth — TallyPrime's XML server on this deployment doesn't
+    // require Basic Auth, and we removed the portal auto-login
+    // scaffolding once it became clear it was a no-op every run.
+    // `company` is passed per-iteration via syncAllPhases({ company });
+    // setting it here would collapse multi-company runs onto the
+    // first entry.
   });
 
   const manualCompany = (config.manualCompany || '').trim();
@@ -286,6 +271,13 @@ export default function TallySync() {
     setSyncStartedAt(Date.now());
     setSyncResult(null);
     setProgressCompany({ name: '', index: 0, total: 1 });
+    // Hard guarantee: no matter what throws inside the body —
+    // ReferenceError from a stale variable name, a transient
+    // network blip, anything — the spinner state always gets
+    // cleared at the end. Last regression here left `syncing=true`
+    // stuck indefinitely because an unrelated ReferenceError
+    // jumped past setSyncing(false), so wrap the whole flow.
+    try {
     setLivePhase({
       currentKey: null,
       keyStatus: {},
@@ -358,7 +350,7 @@ export default function TallySync() {
     // tally_snapshots on the server, so dashboards refresh from there
     // below; no per-browser localStorage write needed.
     const preferred = activeCompany || firstCompany || companiesToSync[0];
-    const primary = results.get(preferred) || first;
+    const primary = results.get(preferred) || results.get(firstCompany) || results.values().next().value;
 
     // Aggregated result used by the sync-result panel + progress reconcile.
     // Counts are summed across all companies; collectionErrors show which
@@ -374,7 +366,7 @@ export default function TallySync() {
       collectionErrors: {},
       dealersStored: primary?.dealersStored || 0,
       diagnostics: primary?.diagnostics,
-      discoveredCompanies: discovered,
+      discoveredCompanies: companiesToSync,
       activeCompany: firstCompany,
       raw: primary?.raw,
       perCompany: Object.fromEntries(Array.from(results.entries()).map(([name, res]) => ([name, {
@@ -457,17 +449,6 @@ export default function TallySync() {
     // own Edge Function isolate with its own retry, so no follow-up pass
     // is needed.
 
-    // Sync UI is done as soon as the phase chain finishes — the
-    // expensive bits below (refreshTallyData re-pulls the full
-    // snapshot tree which is ~10-30 MB for a 3000+ ledger tenant)
-    // run in the background. Awaiting them blocked the spinner for
-    // 30-120 s of "Syncing..." after every phase had already
-    // turned green, which is what made the run look stuck.
-    setProgressCompany({ name: '', index: 0, total: 1 });
-    setLivePhase(null);
-    setSyncing(false);
-    setSyncStartedAt(null);
-
     // Fire-and-forget: each dashboard already polls the snapshot
     // on mount, so a stuck refresh here is recoverable. Errors are
     // swallowed because they don't change anything the user cares
@@ -476,6 +457,25 @@ export default function TallySync() {
     getStatus().then((s) => { if (s) setStatus(s); }).catch(() => {});
     getDataSummary().then((sm) => { if (sm) setSummary(sm); }).catch(() => {});
     refreshCompanies();
+    } catch (err) {
+      // Surface as a sync result so the UI shows the actual error
+      // instead of just leaving a stale spinner. The finally block
+      // clears the syncing state regardless.
+      setSyncResult((prev) => prev || {
+        success: false,
+        error: `Sync orchestration failed: ${err instanceof Error ? err.message : String(err)}`,
+        partial: true,
+        mode: 'client-chained',
+        collectionErrors: { handleSync: err instanceof Error ? err.message : String(err) },
+      });
+    } finally {
+      // Always clear the spinner, no matter how the body exited —
+      // success, partial-success, or thrown ReferenceError.
+      setProgressCompany({ name: '', index: 0, total: 1 });
+      setLivePhase(null);
+      setSyncing(false);
+      setSyncStartedAt(null);
+    }
   };
 
   // Multi-PC + background-tab recovery: if a sync started on this browser,
@@ -738,36 +738,6 @@ export default function TallySync() {
                 IP is what you open to log in ({portalUrl ? (
                   <a href={portalUrl} target="_blank" rel="noreferrer" className="text-indigo-300 hover:underline">{portalUrl}</a>
                 ) : 'http://your-ip/'}). Port is where TallyPrime's XML server listens (usually <code className="text-gray-300">9007</code> for cloud, <code className="text-gray-300">9000</code> for desktop).
-              </p>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">Tally Username</label>
-                <input type="text" value={config.username} disabled={isDemo || syncing} onChange={e => setConfig(c => ({ ...c, username: e.target.value }))}
-                  className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Enter Tally username" />
-              </div>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">Tally Password</label>
-                <input type="password" value={config.password} disabled={isDemo || syncing} onChange={e => setConfig(c => ({ ...c, password: e.target.value }))}
-                  className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Enter Tally password" />
-              </div>
-              {/* Portal login credentials. Optional — leave blank to reuse
-                  the Tally username/password above. Hosted-Tally portals
-                  often use a different login (e.g. "unitsd5") than the XML
-                  server (e.g. "UNITED5"); if yours does, fill both pairs
-                  here or auto-login will fail. */}
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">Portal Username <span className="text-gray-600">(for auto-login)</span></label>
-                  <input type="text" value={config.portalUsername} disabled={isDemo || syncing} onChange={e => setConfig(c => ({ ...c, portalUsername: e.target.value }))}
-                    className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed" placeholder={config.username || 'e.g. unitsd5'} />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">Portal Password</label>
-                  <input type="password" value={config.portalPassword} disabled={isDemo || syncing} onChange={e => setConfig(c => ({ ...c, portalPassword: e.target.value }))}
-                    className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed" placeholder="Optional — portal login password" />
-                </div>
-              </div>
-              <p className="text-[11px] text-gray-500 -mt-2">
-                Optional. The hosted-Tally portal login (<code className="text-gray-300">/cgi-bin/hb.exe</code>) often takes different credentials than the XML server on <code className="text-gray-300">:{config.port || '9007'}</code>. Leave blank to reuse the Tally credentials above.
               </p>
               <div>
                 <label className="block text-xs text-gray-500 mb-1">

@@ -23,15 +23,6 @@ import { createClient } from 'npm:@supabase/supabase-js@2';
 
 type TallyConfig = {
   host?: string;
-  username?: string;          // Tally XML Basic Auth user (may equal portalUsername)
-  password?: string;          // Tally XML Basic Auth password
-  // Portal creds are OPTIONAL and used only for the hb.exe cp auto-login
-  // fallback. They're often different from the XML user — the hosted-Tally
-  // portal login uses a HOB RemoteApp account ("unitsd5") while the XML
-  // server accepts a separate per-company user ("UNITED5"). We accept both
-  // and fall back to the XML pair when the portal pair isn't supplied.
-  portalUsername?: string;
-  portalPassword?: string;
   company?: string;
   fromDate?: string;  // Tally format: YYYYMMDD (e.g. 20250401)
   toDate?: string;
@@ -75,20 +66,11 @@ function nonEmpty(v: unknown): string | undefined {
 
 function resolveConfig(overrides: TallyConfig): Required<TallyConfig> {
   const host = nonEmpty(overrides.host) || Deno.env.get('TALLY_HOST') || '';
-  const username = nonEmpty(overrides.username) || Deno.env.get('TALLY_USERNAME') || '';
-  const password = (typeof overrides.password === 'string' && overrides.password) || Deno.env.get('TALLY_PASSWORD') || '';
-  // Portal creds fall back to the XML creds ONLY when dedicated portal
-  // fields + env overrides are both blank. If a separate portal login is
-  // needed (most hosted-Tally tunnels — portal user != XML user), fill
-  // the Portal Username / Portal Password fields in the TallySync UI.
-  const portalUsername = nonEmpty(overrides.portalUsername) || Deno.env.get('TALLY_PORTAL_USER') || username;
-  const portalPassword = (typeof overrides.portalPassword === 'string' && overrides.portalPassword)
-    || Deno.env.get('TALLY_PORTAL_PASS') || password;
   const company = nonEmpty(overrides.company) || Deno.env.get('TALLY_COMPANY') || '';
   const fromDate = nonEmpty(overrides.fromDate) || '';
   const toDate = nonEmpty(overrides.toDate) || '';
   const allData = overrides.allData === true;
-  return { host, username, password, portalUsername, portalPassword, company, fromDate, toDate, allData };
+  return { host, company, fromDate, toDate, allData };
 }
 
 function dateFilter(cfg: { fromDate: string; toDate: string }) {
@@ -198,191 +180,33 @@ function buildTallyUrl(host: string): string {
   return `http://${trimmed}`;
 }
 
-// Deduce the HOB portal login URL from a Tally host. "103.76.213.243:9007"
-// → "https://103.76.213.243/". The portal serves the login form over HTTPS
-// on port 443 regardless of which port Tally's XML server listens on.
-function portalBaseFromHost(host: string): string | null {
-  if (!host) return null;
-  const trimmed = host.trim();
-  const urlMatch = trimmed.match(/^https?:\/\/([^/:]+)/i);
-  const hostname = urlMatch ? urlMatch[1] : trimmed.split(':')[0];
-  if (!hostname) return null;
-  // IP-address portals we know (like the shared HOB RemoteApp tunnel) serve
-  // the login at https://<host>/. If this doesn't match a user's deployment
-  // they can override via TALLY_PORTAL_URL env / portal_url in config.
-  return `https://${hostname}/`;
-}
-
-// Attempt portal login via POST /cgi-bin/hb.exe with action=cp. HOB
-// RemoteApp's login form accepts URL-encoded form data and returns
-// {"Status":"ok"} on success along with Set-Cookie session headers. We
-// don't need to keep the cookies — the portal starts Tally's XML server
-// on :9007 as a side-effect of a successful login — but on subsequent
-// calls we DO forward the cookies in case a future portal update starts
-// requiring them.
-async function portalLogin(host: string, username: string, password: string, timeoutMs = 15000): Promise<{ ok: boolean; error?: string; cookies?: string[]; status?: number; bodySample?: string }> {
-  const base = portalBaseFromHost(host);
-  if (!base) return { ok: false, error: 'Could not derive portal URL from host.' };
-  if (!username || !password) return { ok: false, error: 'Portal username or password is blank.' };
-
-  const hostname = new URL(base).hostname;
-  const body = new URLSearchParams({
-    action: 'cp',
-    l: username,
-    p: password,
-    d: '',
-    f: '',
-    t: String(Date.now()),
-  }).toString();
-
-  // Try HTTPS first, then HTTP. HOB RemoteApp portals typically listen on
-  // both :443 and :80. We hit HTTPS to mirror what Chrome does, but fall
-  // back to HTTP when Deno's rustls rejects the portal cert — which is
-  // what happens at 103.76.213.243 (cert uses an older format Deno flags
-  // as UnsupportedCertVersion; Chrome accepts it with a warning). Using
-  // HTTP is fine here: we're on Supabase's server-to-server network, not
-  // going through a user's browser, so there's no user-visible mixed
-  // content or MITM exposure that wouldn't already exist with the
-  // rejected cert anyway.
-  const attempts: Array<{ scheme: 'https' | 'http'; url: string }> = [
-    { scheme: 'https', url: `https://${hostname}/cgi-bin/hb.exe` },
-    { scheme: 'http', url: `http://${hostname}/cgi-bin/hb.exe` },
-  ];
-
-  let lastErr = '';
-  for (const attempt of attempts) {
-    const origin = `${attempt.scheme}://${hostname}`;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const res = await fetch(attempt.url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-          'Accept': '*/*',
-          'Accept-Language': 'en-US,en;q=0.9',
-          'Origin': origin,
-          'Referer': `${origin}/`,
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
-          'Sec-Fetch-Dest': 'empty',
-          'Sec-Fetch-Mode': 'cors',
-          'Sec-Fetch-Site': 'same-origin',
-        },
-        body,
-        signal: controller.signal,
-      });
-      const text = await res.text();
-      const bodySample = text.slice(0, 200);
-      if (!res.ok) {
-        lastErr = `${attempt.scheme.toUpperCase()} HTTP ${res.status}: ${bodySample}`;
-        continue;
-      }
-      if (!/"status"\s*:\s*"ok"|^\s*ok\s*$/i.test(text)) {
-        lastErr = `${attempt.scheme.toUpperCase()} portal rejected login — body: ${bodySample}`;
-        continue;
-      }
-      const cookies = res.headers.getSetCookie ? res.headers.getSetCookie() : [];
-      return { ok: true, status: res.status, cookies, bodySample };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      lastErr = `${attempt.scheme.toUpperCase()} ${msg}`;
-      // Cert errors specifically → keep going to the HTTP fallback. Other
-      // errors also fall through so the user sees the most informative
-      // failure at the end.
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-  return { ok: false, error: `Portal login failed over both HTTPS and HTTP. Last error: ${lastErr}` };
-}
-
-// Per-invocation state. Previously `portalLoggedInForHost` lived at module
-// scope and stuck across warm invocations — meaning the second Sync press
-// on a warm instance would skip portal login even though the RemoteApp
-// session had timed out in between. Now it resets at the top of every
-// Deno.serve handler so each Sync starts fresh. Within a single
-// invocation, we still only log in once (even if ensurePortalLogin is
-// called from 6 different collection queries).
-type RequestDiagnostics = {
-  portalLoginAttempted: boolean;
-  portalLoginOk: boolean;
-  portalLoginError: string | null;
-  // Explain why the step didn't fire, so the UI can show it instead of
-  // silently hiding the row. Filled only when attempted is false.
-  portalLoginSkippedReason: string | null;
-};
-let currentDiagnostics: RequestDiagnostics = {
-  portalLoginAttempted: false,
-  portalLoginOk: false,
-  portalLoginError: null,
-  portalLoginSkippedReason: null,
-};
-let portalLoggedInForHost = new Set<string>();
+// Per-request diagnostics. Previously also tracked portal-login state
+// for the HOB RemoteApp auto-login, but that was a no-op every run on
+// the actual customer deployment, so the whole portal subsystem (and
+// its diagnostics fields) is gone. Kept as an empty record so the
+// existing `diagnostics: snapshotDiagnostics()` in every response
+// continues to work without conditional spread.
+type RequestDiagnostics = Record<string, never>;
+let currentDiagnostics: RequestDiagnostics = {};
 
 async function tallyRequest(xml: string, cfg: Required<TallyConfig>, timeoutMs = 120000) {
   if (!cfg.host) throw new Error('Tally host not configured. Provide "host" in the request body or set TALLY_HOST secret.');
 
-  // Reactive-only portal login. We used to call ensurePortalLogin before
-  // every XML request (proactive), but that wasted 10s on every cold
-  // invocation even when :9007 was already reachable. Users who open the
-  // port themselves don't need portal login at all. Now: just try the XML
-  // call directly, and fall back to portal-login-then-retry only if the
-  // call fails with a connection-level error. Saves 10s+ on the happy
-  // path; still recovers when the session has idled out.
+  // Plain XML POST. TallyPrime's XML server on this deployment does not
+  // require Basic Auth, and the previous reactive portal-login retry
+  // (HOB RemoteApp /cgi-bin/hb.exe?action=cp) was a no-op every run —
+  // both removed. If a future deployment fronts Tally with HTTP Basic
+  // Auth or a hosted portal, restore from git.
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const headers: Record<string, string> = { 'Content-Type': 'application/xml' };
-    if (cfg.username && cfg.password) {
-      headers['Authorization'] = 'Basic ' + btoa(`${cfg.username}:${cfg.password}`);
-    }
     const url = buildTallyUrl(cfg.host);
-    const doFetch = () => fetch(url, {
+    const res = await fetch(url, {
       method: 'POST', headers, body: xml, signal: controller.signal,
     });
-    let res: Response;
-    try {
-      res = await doFetch();
-    } catch (err) {
-      // Connection-level failure. If portal creds are configured and we
-      // haven't logged in this invocation, run portal login then retry
-      // the XML call once.
-      const msg = err instanceof Error ? err.message : String(err);
-      const hasPortalCreds = Boolean(cfg.portalUsername && cfg.portalPassword);
-      const shouldAuto = hasPortalCreds && !portalLoggedInForHost.has(cfg.host);
-      if (!shouldAuto) throw err;
-      currentDiagnostics.portalLoginAttempted = true;
-      const login = await portalLogin(cfg.host, cfg.portalUsername, cfg.portalPassword);
-      if (!login.ok) {
-        currentDiagnostics.portalLoginError = login.error || 'unknown';
-        throw new Error(`Tally unreachable and portal auto-login failed: ${login.error}. Original: ${msg}`);
-      }
-      currentDiagnostics.portalLoginOk = true;
-      portalLoggedInForHost.add(cfg.host);
-      // Longer warm-up wait on the retry path — the RemoteApp session
-      // might still be spinning TallyPrime up. 10s has empirically been
-      // enough when the portal session was active.
-      await new Promise((r) => setTimeout(r, 10000));
-      res = await doFetch();
-    }
     if (res.status === 401 || res.status === 403) {
-      const hasPortalCreds = Boolean(cfg.portalUsername && cfg.portalPassword);
-      const shouldAuto = hasPortalCreds && !portalLoggedInForHost.has(cfg.host);
-      if (shouldAuto) {
-        currentDiagnostics.portalLoginAttempted = true;
-        const login = await portalLogin(cfg.host, cfg.portalUsername, cfg.portalPassword);
-        if (login.ok) {
-          currentDiagnostics.portalLoginOk = true;
-          portalLoggedInForHost.add(cfg.host);
-          await new Promise((r) => setTimeout(r, 2000));
-          res = await doFetch();
-        } else {
-          currentDiagnostics.portalLoginError = login.error || 'unknown';
-        }
-      }
-      if (res.status === 401 || res.status === 403) {
-        throw new Error(`Tally authentication failed (${res.status}). Check username/password.`);
-      }
+      throw new Error(`Tally authentication failed (${res.status}). The XML server has Basic Auth enabled — disable it in TallyPrime (F1: Help → Settings → Connectivity → Client/Server) or restore the auth header path from git.`);
     }
     if (!res.ok) throw new Error(`Tally returned HTTP ${res.status}: ${res.statusText}`);
     const text = await res.text();
@@ -406,16 +230,7 @@ async function tallyRequest(xml: string, cfg: Required<TallyConfig>, timeoutMs =
 }
 
 function resetDiagnostics(): void {
-  currentDiagnostics = {
-    portalLoginAttempted: false,
-    portalLoginOk: false,
-    portalLoginError: null,
-    portalLoginSkippedReason: null,
-  };
-  // Clear the per-invocation "already logged in" set too — every fresh
-  // Deno.serve handler should treat the portal session as unknown and
-  // let the next Tally call drive ensurePortalLogin again.
-  portalLoggedInForHost = new Set<string>();
+  currentDiagnostics = {};
 }
 function snapshotDiagnostics(): RequestDiagnostics {
   return { ...currentDiagnostics };
@@ -1905,19 +1720,13 @@ Deno.serve(async (req) => {
         counts[key] = 0;
         errors[key] = 'Skipped — Tally XML endpoint unreachable (discovery probe aborted).';
       }
-      const diagSnapshot = snapshotDiagnostics();
-      const portalClue = diagSnapshot.portalLoginOk
-        ? ' Portal auto-login succeeded, but :9007 is still not responding — TallyPrime is not running inside the RemoteApp session.'
-        : diagSnapshot.portalLoginError
-          ? ` Portal auto-login: ${diagSnapshot.portalLoginError}`
-          : '';
       return new Response(JSON.stringify({
         connected: false,
         action,
         counts,
         data,
         errors,
-        error: `Tally XML endpoint did not respond. Make sure Tally is running and :${cfg.host.split(':')[1] || '9000'} is reachable.${portalClue}`,
+        error: `Tally XML endpoint did not respond. Make sure Tally is running and :${cfg.host.split(':')[1] || '9000'} is reachable.`,
         collectionMeta: {},
         skipped: {},
         fetched: [],
@@ -2342,34 +2151,6 @@ Deno.serve(async (req) => {
       count, error: persistErr, source: 'sync-collection',
       edgeBuildId: EDGE_BUILD_ID,
       diagnostics: snapshotDiagnostics(),
-    }), { headers: jsonHeaders });
-  }
-
-  // Dedicated portal-login test. Does NOT hit the XML endpoint — just
-  // POSTs to hb.exe cp so the user can isolate whether the portal
-  // credentials themselves are accepted. Returns status + body sample
-  // so the UI can render a "here's what the server actually said".
-  if (action === 'portal-login') {
-    if (!cfg.host) {
-      return new Response(JSON.stringify({ connected: false, error: 'Tally host not configured.' }), { headers: jsonHeaders });
-    }
-    const user = cfg.portalUsername;
-    const pass = cfg.portalPassword;
-    if (!user || !pass) {
-      return new Response(JSON.stringify({
-        connected: false,
-        error: 'Portal username or password is blank. Fill the dedicated Portal fields on the TallySync page (or the Tally fields if they match).',
-      }), { headers: jsonHeaders });
-    }
-    const result = await portalLogin(cfg.host, user, pass);
-    return new Response(JSON.stringify({
-      connected: result.ok,
-      action,
-      status: result.status,
-      error: result.ok ? null : result.error,
-      bodySample: result.bodySample,
-      portalBase: portalBaseFromHost(cfg.host),
-      diagnostics: { portalLoginAttempted: true, portalLoginOk: result.ok, portalLoginError: result.ok ? null : (result.error || null) },
     }), { headers: jsonHeaders });
   }
 
