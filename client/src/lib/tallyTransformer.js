@@ -553,11 +553,10 @@ export function transformTallyFull(bundle, options = {}) {
   const ledgerTree = bundle?.ledgers ?? null;
   const accountingGroupsTree = bundle?.accountingGroups ?? null;
   // Voucher feeds — every dashboard reads vouchers from typed Voucher
-  // COLLECTION fetches (Sales / Purchase / Receipt Register). Sales is
-  // fanned out into per-year shards (salesRegister, salesRegister_2023,
-  // salesRegister_2024, ...) when the window spans multiple years to
-  // keep each parse tree under the Edge Function's 150 MB compute cap;
-  // we collect every shard whose key starts with 'salesRegister'.
+  // COLLECTION fetches (Sales / Purchase / Receipt Register). Tolerate
+  // any salesRegister_YYYY key that an older snapshot may still have
+  // (we no longer write them) so previously-synced tenants don't lose
+  // sales history when reading their existing snapshot.
   const salesShardTrees = [];
   if (bundle && typeof bundle === 'object') {
     for (const [k, v] of Object.entries(bundle)) {
@@ -570,8 +569,6 @@ export function transformTallyFull(bundle, options = {}) {
     bundle?.purchaseRegister ?? null,
     bundle?.receiptRegister ?? null,
   ].filter((t) => t != null);
-  // Per-feed extracts kept separate so coverage diagnostics show which
-  // register actually returned data, even after the dedup pass below.
   const salesRegisterVouchers = salesShardTrees.flatMap((tree) => extractCollection(tree, 'VOUCHER'));
   const purchaseRegisterVouchers = extractCollection(bundle?.purchaseRegister ?? null, 'VOUCHER');
   const receiptRegisterVouchers = extractCollection(bundle?.receiptRegister ?? null, 'VOUCHER');
@@ -598,42 +595,36 @@ export function transformTallyFull(bundle, options = {}) {
   }
 
   const ledgers = extractLedgers(ledgerTree);
-  // Flatten all register feeds into one voucher list, then classify by
-  // VOUCHERTYPENAME below. Each register only contains its own voucher
-  // class, so the classify step is mostly a no-op — but it keeps the
-  // downstream dashboards (which expect arrays per type) working without
-  // changes.
-  const allVouchers = voucherFeedTrees.flatMap((tree) => extractCollection(tree, 'VOUCHER'));
   // Suppress unused-warning while billsOutstanding parsing isn't wired
   // into the aging pipeline yet — the snapshot key still lands and the
   // raw tree is exposed to consumers via diagnostics.
   void billsOutstandingTree;
-  const seenKeys = new Set();
-  const dedupedVouchers = [];
-  for (const v of allVouchers) {
-    const key = `${readField(v, 'DATE')}|${readField(v, 'VOUCHERNUMBER')}|${readField(v, 'VOUCHERTYPENAME')}`;
-    if (seenKeys.has(key)) continue;
-    seenKeys.add(key);
-    dedupedVouchers.push(v);
-  }
-  // Classify deduped vouchers by VOUCHERTYPENAME. Each register only
-  // contains its own class, but customers occasionally name their voucher
-  // types creatively ("GST Sales", "Tax Invoice", "Inter-State Purchase"),
-  // so we still scan the deduped list with loose substring matches rather
-  // than trusting the source register alone.
-  const voucherTypeOf = (v) => readField(v, 'VOUCHERTYPENAME').toLowerCase();
-  const salesVouchers = dedupedVouchers.filter((v) => {
-    const t = voucherTypeOf(v);
-    return t === 'sales' || t.includes('sales') || t.includes('invoice') || t.includes('tax invoice');
-  });
-  const purchaseVouchers = dedupedVouchers.filter((v) => {
-    const t = voucherTypeOf(v);
-    return t === 'purchase' || t.includes('purchase');
-  });
-  const receiptVouchers = dedupedVouchers.filter((v) => {
-    const t = voucherTypeOf(v);
-    return t === 'receipt' || t.includes('receipt');
-  });
+  void voucherFeedTrees;
+  // Trust the source. Each register was fetched with a typed Tally
+  // filter ($$IsSales / $$IsPurchase / $$IsReceipt), so every VOUCHER
+  // node Tally returned is already classified. Re-classifying by a
+  // VOUCHERTYPENAME substring match (the previous behaviour) silently
+  // dropped vouchers whose type was named something like "GST" or
+  // "Tax Invoice (Export)" that didn't include the literal "sales" /
+  // "purchase" / "receipt" — that's why the analytics stayed at zero
+  // even after the registers fetched cleanly. Dedup still runs against
+  // the union (in case a voucher somehow appears in two registers) but
+  // each per-class array comes straight from its own feed.
+  const dedupKey = (v) => `${readField(v, 'DATE')}|${readField(v, 'VOUCHERNUMBER')}|${readField(v, 'VOUCHERTYPENAME')}`;
+  const dedupArray = (rows) => {
+    const seen = new Set();
+    const out = [];
+    for (const v of rows) {
+      const k = dedupKey(v);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(v);
+    }
+    return out;
+  };
+  const salesVouchers = dedupArray(salesRegisterVouchers);
+  const purchaseVouchers = dedupArray(purchaseRegisterVouchers);
+  const receiptVouchers = dedupArray(receiptRegisterVouchers);
   const stockItems = extractCollection(stockItemsTree, 'STOCKITEM');
   const stockGroups = extractCollection(stockGroupsTree, 'STOCKGROUP');
 
@@ -750,7 +741,7 @@ export function transformTallyFull(bundle, options = {}) {
       sales: salesVouchers,
       purchases: purchaseVouchers,
       receipts: receiptVouchers,
-      all: dedupedVouchers,
+      all: [...salesVouchers, ...purchaseVouchers, ...receiptVouchers],
     },
   };
 

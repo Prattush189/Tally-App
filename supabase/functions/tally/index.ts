@@ -106,6 +106,12 @@ function fmtTallyDate(d: Date): string {
 }
 
 function voucherDateFilter(cfg: { fromDate: string; toDate: string; allData?: boolean }) {
+  // No date hints from caller AND no allData=true → emit no
+  // SVFROMDATE/SVTODATE so Tally serves rows from whatever period the
+  // company already has loaded. Specifying our own dates was forcing a
+  // 5-year window that OOMed Sales Register's parse tree on real
+  // distributor data.
+  if (!cfg.fromDate && !cfg.toDate && !cfg.allData) return '';
   const [from, to] = resolveVoucherWindow(cfg);
   return [
     `<SVFROMDATE Type="Date">${from}</SVFROMDATE>`,
@@ -445,54 +451,8 @@ function typedVoucherCollection(
 </ENVELOPE>`;
 }
 
-// Sales is the heaviest voucher class for a B2B distributor (every
-// invoice over the configured window). When the slim NATIVEMETHOD list
-// above isn't enough — typically 5+ year windows on tenants with 1k+
-// invoices/year — the caller falls back to per-year chunks via
-// salesRegister_YYYY keys (see buildCollectionJob). For typical
-// 1-3 year windows the bare salesRegister key works fine.
-function typedVoucherCollectionForWindow(
-  cfg: { company: string; fromDate: string; toDate: string },
-  collectionName: string,
-  classFormula: string,
-) {
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<ENVELOPE>
-  <HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>${collectionName}</ID></HEADER>
-  <BODY><DESC>
-    <STATICVARIABLES>
-      <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-      ${companyFilter(cfg.company)}
-      <SVFROMDATE Type="Date">${cfg.fromDate}</SVFROMDATE>
-      <SVTODATE Type="Date">${cfg.toDate}</SVTODATE>
-      <SVCURRENTPERIODFROM Type="Date">${cfg.fromDate}</SVCURRENTPERIODFROM>
-      <SVCURRENTPERIODTO Type="Date">${cfg.toDate}</SVCURRENTPERIODTO>
-    </STATICVARIABLES>
-    <TDL><TDLMESSAGE>
-      <COLLECTION NAME="${collectionName}" ISMODIFY="No">
-        <TYPE>Voucher</TYPE>
-        <FILTERS>${collectionName}Filter</FILTERS>
-        <NATIVEMETHOD>Date</NATIVEMETHOD>
-        <NATIVEMETHOD>VoucherNumber</NATIVEMETHOD>
-        <NATIVEMETHOD>VoucherTypeName</NATIVEMETHOD>
-        <NATIVEMETHOD>PartyLedgerName</NATIVEMETHOD>
-        <NATIVEMETHOD>Amount</NATIVEMETHOD>
-      </COLLECTION>
-      <SYSTEM TYPE="Formulae" NAME="${collectionName}Filter">${classFormula}</SYSTEM>
-    </TDLMESSAGE></TDL>
-  </DESC></BODY>
-</ENVELOPE>`;
-}
-
 function salesRegisterRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
   return typedVoucherCollection(cfg, 'B2BSalesVouchers', '$$IsSales:$VoucherTypeName');
-}
-function salesRegisterRequestForYear(cfg: { company: string }, year: number) {
-  return typedVoucherCollectionForWindow(
-    { company: cfg.company, fromDate: `${year}0101`, toDate: `${year}1231` },
-    'B2BSalesVouchers',
-    '$$IsSales:$VoucherTypeName',
-  );
 }
 function purchaseRegisterRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
   return typedVoucherCollection(cfg, 'B2BPurchaseVouchers', '$$IsPurchase:$VoucherTypeName');
@@ -679,24 +639,10 @@ function buildCollectionJob(
   if (key === 'purchaseRegister') return { xml: purchaseRegisterRequest(cfg), node: 'VOUCHER', timeoutMs: 90000 };
   if (key === 'receiptRegister') return { xml: receiptRegisterRequest(cfg), node: 'VOUCHER', timeoutMs: 90000 };
   if (key === 'billsOutstanding') return { xml: billsOutstandingRequest(cfg), node: 'BILLFIXED', timeoutMs: 60000 };
-  // Per-year sales chunks (salesRegister_2023, ...). Sales is the heaviest
-  // voucher class — a 5-year window on a real distributor often busts the
-  // 150 MB cap even after the slim NATIVEMETHOD list. Per-year chunks keep
-  // each parse tree to one year's invoices, ~1/N the size, and persist
-  // under their own snapshot sub-keys; the transformer reads any key
-  // starting with 'salesRegister' so downstream dashboards don't change.
-  const salesYearMatch = /^salesRegister_(\d{4})$/.exec(key);
-  if (salesYearMatch) {
-    const year = Number(salesYearMatch[1]);
-    if (year >= 1990 && year <= 2100) {
-      return { xml: salesRegisterRequestForYear(cfg, year), node: 'VOUCHER', timeoutMs: 90000 };
-    }
-  }
   return null;
 }
 
 function ttlForKey(key: string): number {
-  if (key.startsWith('salesRegister_')) return COLLECTION_TTL_MS.salesRegister;
   return COLLECTION_TTL_MS[key] ?? 30 * 60_000;
 }
 

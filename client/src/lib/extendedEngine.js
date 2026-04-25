@@ -156,30 +156,35 @@ export function getToyCategories(overrides) {
 // history is absent we return an empty forecast so the UI can render a
 // "waiting for voucher sync" state instead of fabricated predictions.
 export function getForecast(overrides) {
-  const customers = pickCustomers(overrides);
-  if (!customers.length) return { forecasts: [], totalForecast: 0, months: 0, source: 'empty' };
+  const purchases = overrides?.financials?.purchases || null;
+  const monthlySpend = purchases?.monthly || [];
+  const topSuppliers = purchases?.topSuppliers || [];
 
-  const catHistory = new Map();
-  for (const c of customers) {
-    const cats = c.purchasedCategories || [];
-    const hist = c.invoiceHistory || [];
-    if (!cats.length || !hist.length) continue;
-    for (const cat of cats) {
-      const arr = catHistory.get(cat) || Array(12).fill(0);
-      hist.slice(-12).forEach((row, i) => { arr[i] += (row.value || 0) / cats.length; });
-      catHistory.set(cat, arr);
-    }
+  // Project the next 8 months from each top supplier's actual purchase
+  // history. Per-supplier monthly buckets aren't in financials.purchases
+  // (we only kept the supplier total to avoid bloating the snapshot), so
+  // we approximate each supplier's monthly trend by allocating the
+  // overall monthly purchase total proportionally to the supplier's
+  // share of total spend. That gives us a per-line trend that reflects
+  // both real seasonality (driven by monthly totals) and supplier
+  // concentration (driven by the spend share). Better than the previous
+  // "wait for sales-derived purchasedCategories" path which never fired
+  // because purchasedCategories needs sales vouchers.
+  const totalSpend = topSuppliers.reduce((s, x) => s + (x.value || 0), 0);
+  if (!monthlySpend.length || !topSuppliers.length || totalSpend <= 0) {
+    return { forecasts: [], totalForecast: 0, months: 0, source: monthlySpend.length ? 'waiting-for-suppliers' : 'waiting-for-purchase-register' };
   }
-  if (!catHistory.size) return { forecasts: [], totalForecast: 0, months: 0, source: 'waiting-for-vouchers' };
 
-  // Forward-project the next 8 months by taking the 3-month trailing average
-  // and applying a naive linear trend from the last 6 vs the first 6 months.
   const projMonths = 8;
-  const forecasts = Array.from(catHistory.entries()).map(([cat, arr]) => {
-    const first6 = arr.slice(0, 6).reduce((s, v) => s + v, 0) / 6;
-    const last6 = arr.slice(-6).reduce((s, v) => s + v, 0) / 6;
-    const growthPerMonth = (last6 - first6) / 6;
-    const baseline = arr.slice(-3).reduce((s, v) => s + v, 0) / 3;
+  const recentMonths = monthlySpend.slice(-12);
+  const forecasts = topSuppliers.slice(0, 8).map((s) => {
+    const share = s.value / totalSpend;
+    const series = recentMonths.map((m) => Math.round((m.value || 0) * share));
+    const half = Math.max(1, Math.floor(series.length / 2));
+    const first = series.slice(0, half).reduce((a, v) => a + v, 0) / half;
+    const last = series.slice(-half).reduce((a, v) => a + v, 0) / half;
+    const growthPerMonth = (last - first) / Math.max(1, half);
+    const baseline = series.slice(-Math.min(3, series.length)).reduce((a, v) => a + v, 0) / Math.min(3, series.length || 1);
     const nextMonths = Array.from({ length: projMonths }, (_, i) => {
       const predicted = Math.max(0, Math.round(baseline + growthPerMonth * (i + 1)));
       return {
@@ -191,10 +196,10 @@ export function getForecast(overrides) {
         upper: Math.round(predicted * 1.2),
       };
     });
-    return { category: cat, avgPrice: 0, forecasts: nextMonths, totalForecast: nextMonths.reduce((s, f) => s + f.predicted, 0) };
+    return { category: s.name, avgPrice: 0, forecasts: nextMonths, totalForecast: nextMonths.reduce((a, f) => a + f.predicted, 0) };
   });
   const totalForecast = forecasts.reduce((s, f) => s + f.totalForecast, 0);
-  return { forecasts, totalForecast, months: projMonths, source: 'tally' };
+  return { forecasts, totalForecast, months: projMonths, source: 'purchase-register' };
 }
 
 // Derive region-level SKU / price mix from live customer purchase data.

@@ -18,13 +18,13 @@ export default function PurchaseForecast() {
 
   return (
     <div className="space-y-6">
-      <SectionHeader icon={Calendar} title="Purchase Forecasting" subtitle="What to buy, when — 8-month demand forecast by category" />
+      <SectionHeader icon={Calendar} title="Purchase Forecasting" subtitle="What to buy, when — 8-month forecast by supplier (from Purchase Register)" />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <MetricCard icon={DollarSign} label="Total 8-Month Forecast" value={fmt(data.totalForecast)} color="emerald" />
-        <MetricCard icon={TrendingUp} label="Highest Demand" value={sorted[0]?.category || '—'} sub={sorted[0] ? fmt(sorted[0].totalForecast) : 'Awaiting voucher sync'} color="indigo" />
-        <MetricCard icon={Package} label="Categories Tracked" value={data.forecasts.length} color="blue" />
-        <MetricCard icon={Calendar} label="Forecast Horizon" value={`${data.months} months`} sub="May '26 — Dec '26" color="violet" />
+        <MetricCard icon={TrendingUp} label="Highest Spend" value={sorted[0]?.category || '—'} sub={sorted[0] ? fmt(sorted[0].totalForecast) : 'Awaiting Purchase Register'} color="indigo" />
+        <MetricCard icon={Package} label="Suppliers Tracked" value={data.forecasts.length} color="blue" />
+        <MetricCard icon={Calendar} label="Forecast Horizon" value={`${data.months} months`} sub={data.months ? 'forward projection' : ''} color="violet" />
       </div>
 
       {/* Category selector */}

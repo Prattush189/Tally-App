@@ -203,14 +203,10 @@ export default function TallySync() {
         // empty, syncAllPhases falls back to whichever company Tally
         // has open (no SVCURRENTCOMPANY filter on the queries).
         company: companyName || undefined,
-        // Always pull the full available history. Master-data phases
-        // ignore the date filter (Tally's Ledger collection returns
-        // every ledger regardless), Day Book chunks by year as
-        // before. Removing the user-facing Date Range picker means
-        // we don't try to scope to a fresh FY that only has 25 days
-        // of data — that was the source of the recent 1-record
-        // result on FY 26-27.
-        allData: true,
+        // No date override. Tally already has the company's books-from
+        // / current-period set; we accept whatever rows Tally serves
+        // for that period rather than slicing by year (which was
+        // OOMing the Sales register isolate on a 5-year window).
         onPhase: phaseEvents,
       });
     } catch (err) {
