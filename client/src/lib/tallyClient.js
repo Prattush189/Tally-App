@@ -697,6 +697,46 @@ export async function ingestManualVouchers(vouchers, { company, tenantKey = 'def
   }
 }
 
+// User-driven Day Book *report* fetch — a third XML path beyond the
+// crashing custom Voucher COLLECTION and the Sales/Receipt Register
+// fallbacks. Hits Tally's pre-compiled Day Book report (the same code
+// path the GUI Day Book view uses), so it often succeeds where the
+// generic voucher iterator crashes. The team dropped this earlier for
+// memory reasons (a 5-year window blew the 150 MB Edge Function cap),
+// so we let the user pick a tight window — typically ≤ 30 days — to
+// keep the response under the cap.
+//
+// from / to are YYYYMMDD (Tally's wire format). The result lands under
+// the `dayBookReport` snapshot key; the transformer reads it alongside
+// the other voucher fallbacks.
+export async function fetchDayBookReport({ from, to, company, config = {} } = {}) {
+  if (TALLY_BACKEND !== 'supabase') {
+    return { success: false, error: 'Day Book report fetch requires the Supabase backend.' };
+  }
+  if (!from || !to) {
+    return { success: false, error: 'fetchDayBookReport requires both from and to dates (YYYYMMDD).' };
+  }
+  if (!company) {
+    return { success: false, error: 'fetchDayBookReport requires a company name (open it in Tally first).' };
+  }
+  try {
+    const r = await syncCollection({
+      key: 'dayBookReport',
+      company,
+      config: { ...config, fromDate: from, toDate: to },
+    });
+    return {
+      success: Boolean(r?.connected),
+      count: r?.count ?? 0,
+      error: r?.error || null,
+      from,
+      to,
+    };
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 // Nuke the current cloud snapshot for this tenant (+ active company).
 // The dashboards' next refresh will pull an empty row → hasLiveData flips
 // false → NoDataNotice. Meant for the "Clear" button on the TallySync

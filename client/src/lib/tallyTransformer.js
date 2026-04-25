@@ -578,13 +578,17 @@ export function transformTallyFull(bundle, options = {}) {
   // Voucher fallbacks for installs where Day Book triggers c0000005:
   //   - salesRegister   — Tally's built-in Sales Register report
   //   - receiptRegister — Tally's built-in Receipt Register report
+  //   - dayBookReport   — Tally's built-in Day Book report, fetched in
+  //                       user-selected windows (escapes the iterator
+  //                       that the custom Voucher COLLECTION crashes on)
   //   - manualVouchers  — user-uploaded Day Book Excel (CSV)
-  // All three serialise VOUCHER nodes with the same field names Day Book
+  // All four serialise VOUCHER nodes with the same field names Day Book
   // uses (DATE, VOUCHERNUMBER, VOUCHERTYPENAME, PARTYLEDGERNAME, AMOUNT)
   // so we can dump them into the same dedup-and-classify pipeline below.
   const voucherFallbackTrees = [
     bundle?.salesRegister ?? null,
     bundle?.receiptRegister ?? null,
+    bundle?.dayBookReport ?? null,
     bundle?.manualVouchers ?? null,
   ].filter((t) => t != null);
   // Bills Outstanding rolls up bills (not vouchers) — different shape; the

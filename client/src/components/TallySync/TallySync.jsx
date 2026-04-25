@@ -3,6 +3,7 @@ import { RefreshCw, CheckCircle, AlertTriangle, Wifi, WifiOff, Database, Users, 
 import SectionHeader from '../common/SectionHeader';
 import SyncProgress from '../common/SyncProgress';
 import ManualVoucherUpload from './ManualVoucherUpload';
+import DayBookReportFetch from './DayBookReportFetch';
 import { fmt } from '../../utils/format';
 import { useAuth } from '../../context/AuthContext';
 import { useTallyData } from '../../context/TallyDataContext';
@@ -1038,9 +1039,19 @@ export default function TallySync() {
             )}
           </div>
 
-          {/* Manual Day Book CSV upload — escape hatch when Tally crashes
-              the voucher iterator on every XML query (c0000005). Always
-              visible so the user can ingest historical vouchers offline. */}
+          {/* Built-in Day Book *report* fetch — alternate XML code path
+              that often succeeds where the custom Voucher COLLECTION
+              crashes (c0000005). User picks the date range. */}
+          {!isDemo && (
+            <DayBookReportFetch
+              company={activeCompany}
+              onFetched={() => refreshTallyData()}
+            />
+          )}
+
+          {/* Manual Day Book CSV upload — escape hatch when every XML
+              path bombs. User exports Day Book to CSV from Tally and
+              uploads it here. */}
           {!isDemo && <ManualVoucherUpload onUploaded={() => refreshTallyData()} />}
 
           {/* Data Summary */}

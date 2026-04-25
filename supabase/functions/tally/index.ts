@@ -513,6 +513,41 @@ function billsOutstandingRequest(cfg: { company: string; fromDate: string; toDat
   return reportWithDates('Bills Outstanding', cfg);
 }
 
+// Built-in Day Book *report* — different XML envelope and a different
+// internal iterator from the custom Voucher COLLECTION (which crashes
+// with c0000005 on this dataset). Uses the documented "Export Data"
+// pattern: <TALLYREQUEST>Export Data</TALLYREQUEST> + <EXPORTDATA>
+// <REQUESTDESC><REPORTNAME>Day Book</REPORTNAME>... — same code path
+// the GUI Day Book view uses. The team dropped this earlier for memory
+// reasons (5-year window blew the 150 MB Edge Function cap), but for
+// user-driven tight windows (typically ≤30 days) the response is small
+// enough to land safely. Caller passes fromDate / toDate as YYYYMMDD.
+function dayBookReportRequest(cfg: { company: string; fromDate: string; toDate: string }) {
+  const from = cfg.fromDate || '';
+  const to = cfg.toDate || '';
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER>
+    <TALLYREQUEST>Export Data</TALLYREQUEST>
+  </HEADER>
+  <BODY>
+    <EXPORTDATA>
+      <REQUESTDESC>
+        <REPORTNAME>Day Book</REPORTNAME>
+        <STATICVARIABLES>
+          <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+          ${companyFilter(cfg.company)}
+          ${from ? `<SVFROMDATE Type="Date">${from}</SVFROMDATE>` : ''}
+          ${to ? `<SVTODATE Type="Date">${to}</SVTODATE>` : ''}
+          ${from ? `<SVCURRENTPERIODFROM Type="Date">${from}</SVCURRENTPERIODFROM>` : ''}
+          ${to ? `<SVCURRENTPERIODTO Type="Date">${to}</SVCURRENTPERIODTO>` : ''}
+        </STATICVARIABLES>
+      </REQUESTDESC>
+    </EXPORTDATA>
+  </BODY>
+</ENVELOPE>`;
+}
+
 // Stock items / groups stay on our custom COLLECTION queries — empirically
 // the built-in 'Stock Summary' report returns a hierarchical summary (one
 // row per group, not per item) and 'List of Stock Groups' came back with a
@@ -667,6 +702,7 @@ const COLLECTION_TTL_MS: Record<string, number> = {
   salesRegister: 10 * 60_000,
   receiptRegister: 10 * 60_000,
   billsOutstanding: 15 * 60_000,
+  dayBookReport: 10 * 60_000,
   manualVouchers: 60 * 60_000,
 };
 
@@ -689,6 +725,7 @@ function buildCollectionJob(
   if (key === 'salesRegister') return { xml: salesRegisterRequest(cfg), node: 'VOUCHER', timeoutMs: 90000 };
   if (key === 'receiptRegister') return { xml: receiptRegisterRequest(cfg), node: 'VOUCHER', timeoutMs: 90000 };
   if (key === 'billsOutstanding') return { xml: billsOutstandingRequest(cfg), node: 'BILLFIXED', timeoutMs: 60000 };
+  if (key === 'dayBookReport') return { xml: dayBookReportRequest(cfg), node: 'VOUCHER', timeoutMs: 120000 };
   if (key === 'dayBook') {
     return { xml: dayBookRequest(cfg), node: 'VOUCHER', timeoutMs: 120000 };
   }
@@ -2224,7 +2261,7 @@ Deno.serve(async (req) => {
     if (!job) {
       return new Response(JSON.stringify({
         connected: false, action, key,
-        error: `Unknown collection key "${key}". Expected one of: ledgers, accountingGroups, stockItems, stockGroups, profitLoss, balanceSheet, trialBalance, salesRegister, receiptRegister, billsOutstanding, dayBook, dayBook_<YYYY>.`,
+        error: `Unknown collection key "${key}". Expected one of: ledgers, accountingGroups, stockItems, stockGroups, profitLoss, balanceSheet, trialBalance, salesRegister, receiptRegister, billsOutstanding, dayBookReport, dayBook, dayBook_<YYYY>.`,
       }), { status: 400, headers: jsonHeaders });
     }
     let result: unknown;
