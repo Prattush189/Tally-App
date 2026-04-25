@@ -397,23 +397,62 @@ function trialBalanceRequest(cfg: { company: string; fromDate: string; toDate: s
   return reportWithDates('Trial Balance', cfg);
 }
 
-// Voucher fallback reports — use Tally's pre-compiled REPORT code path
-// instead of the generic Voucher iterator that crashes with c0000005 on
-// some installs. Sales / Receipt Register and Bills Outstanding are
-// shipped reports built into every TallyPrime release; their internal
-// iterator differs from the one Day Book and custom Voucher COLLECTIONs
-// trigger, so they often succeed on datasets where Day Book bombs.
-// Each runs in its own sync-collection isolate so the per-key timeout
-// + 150 MB compute budget isolation we already have for Day Book years
-// applies here too.
+// Voucher feeds. Earlier revisions called Tally's pre-compiled
+// "Sales Register" / "Purchase Register" / "Receipt Register" report IDs
+// directly — but those export as a *monthly summary tree* (DSPACCNAME
+// nodes per month + totals), not individual VOUCHER nodes, so countNode
+// always saw 0 vouchers and the snapshots ended up empty even when the
+// reports succeeded. The fix is a typed TDL Voucher COLLECTION with a
+// $$IsSales / $$IsPurchase / $$IsReceipt class filter — same iterator
+// the (deleted) Day Book query used, but scoped to one voucher class
+// per call so the dataset stays a fraction of Day Book's volume and
+// avoids the c0000005 crash that took every-voucher iteration down on
+// real distributor data files.
+//
+// NATIVEMETHOD list mirrors the old dayBookRequest: only the fields the
+// transformer actually reads (date, number, type, party, amount,
+// reference, narration). No inventory / ledger / bill allocations
+// — those balloon the parse tree past the 150 MB Edge Function cap.
+function typedVoucherCollection(
+  cfg: { company: string; fromDate: string; toDate: string; allData?: boolean },
+  collectionName: string,
+  classFormula: string,
+) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>${collectionName}</ID></HEADER>
+  <BODY><DESC>
+    <STATICVARIABLES>
+      <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      ${companyFilter(cfg.company)}
+      ${voucherDateFilter(cfg)}
+    </STATICVARIABLES>
+    <TDL><TDLMESSAGE>
+      <COLLECTION NAME="${collectionName}" ISMODIFY="No">
+        <TYPE>Voucher</TYPE>
+        <FILTERS>${collectionName}Filter</FILTERS>
+        <NATIVEMETHOD>Date</NATIVEMETHOD>
+        <NATIVEMETHOD>VoucherNumber</NATIVEMETHOD>
+        <NATIVEMETHOD>VoucherTypeName</NATIVEMETHOD>
+        <NATIVEMETHOD>PartyLedgerName</NATIVEMETHOD>
+        <NATIVEMETHOD>Amount</NATIVEMETHOD>
+        <NATIVEMETHOD>Reference</NATIVEMETHOD>
+        <NATIVEMETHOD>Narration</NATIVEMETHOD>
+      </COLLECTION>
+      <SYSTEM TYPE="Formulae" NAME="${collectionName}Filter">${classFormula}</SYSTEM>
+    </TDLMESSAGE></TDL>
+  </DESC></BODY>
+</ENVELOPE>`;
+}
+
 function salesRegisterRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
-  return reportWithVoucherDates('Sales Register', cfg);
+  return typedVoucherCollection(cfg, 'B2BSalesVouchers', '$$IsSales:$VoucherTypeName');
 }
 function purchaseRegisterRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
-  return reportWithVoucherDates('Purchase Register', cfg);
+  return typedVoucherCollection(cfg, 'B2BPurchaseVouchers', '$$IsPurchase:$VoucherTypeName');
 }
 function receiptRegisterRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
-  return reportWithVoucherDates('Receipt Register', cfg);
+  return typedVoucherCollection(cfg, 'B2BReceiptVouchers', '$$IsReceipt:$VoucherTypeName');
 }
 function billsOutstandingRequest(cfg: { company: string; fromDate: string; toDate: string }) {
   return reportWithDates('Bills Outstanding', cfg);

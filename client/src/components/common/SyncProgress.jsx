@@ -262,6 +262,7 @@ export default function SyncProgress({ active, result, progressCompany, livePhas
     }
     const countMap = {
       ledgers: result.ledgers,
+      accountingGroups: result.counts?.accountingGroups,
       salesRegister: result.counts?.salesRegister,
       purchaseRegister: result.counts?.purchaseRegister,
       receiptRegister: result.counts?.receiptRegister,
