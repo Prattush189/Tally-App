@@ -1480,36 +1480,67 @@ Deno.serve(async (req) => {
       return Array.from(seen).sort();
     };
 
-    // Probe 1: built-in "List of Companies" report. Works when a
-    // company is already open in TallyPrime.
+    // Probe 1: "List of Selected Companies" report. This returns
+    // ONLY the companies currently loaded in TallyPrime's GUI — i.e.
+    // the ones the XML server can actually serve real data for.
+    // That's the answer we want as the active company on every sync.
+    // Previously we used "List of Companies" which returns every
+    // company on disk regardless of load state, then fell back to
+    // a cached active_company; the result was that even when the
+    // user had UA open in Tally right now, the sync would still
+    // drive against GIRNAR because GIRNAR was the cached active
+    // from an earlier run.
+    let loadedCompanies: string[] = [];
     try {
-      const probeXml = reportRequest('List of Companies', '');
+      const probeXml = reportRequest('List of Selected Companies', '');
       const parsed = await tallyRequest(probeXml, cfg, 15000);
       try {
-        discoveryRawSample = JSON.stringify(parsed).slice(0, 1500);
+        discoveryRawSample = `Probe 1 (List of Selected Companies):\n${JSON.stringify(parsed).slice(0, 1200)}`;
       } catch { /* ignore */ }
-      discoveredCompanies = walkForCompanies(parsed);
+      loadedCompanies = walkForCompanies(parsed);
     } catch (err) {
       discoveryError = err instanceof Error ? err.message : String(err);
     }
 
-    // Probe 2: custom TDL COLLECTION of Company objects. Enumerates
-    // Tally's internal company registry directly and often answers
-    // even when the built-in report returns an empty tree (which is
-    // what hosted-Tally does when the Select Company screen is up).
-    if (!discoveredCompanies.length) {
+    // Probe 2: built-in "List of Companies" report — every company
+    // on disk, loaded or not. Used as a directory listing only;
+    // never as the active company since loaded state is what
+    // matters for SVCURRENTCOMPANY routing.
+    let onDiskCompanies: string[] = [];
+    if (!loadedCompanies.length) {
+      try {
+        const probeXml = reportRequest('List of Companies', '');
+        const parsed = await tallyRequest(probeXml, cfg, 15000);
+        try {
+          const sample = JSON.stringify(parsed).slice(0, 1200);
+          discoveryRawSample = discoveryRawSample
+            ? `${discoveryRawSample}\n---\nProbe 2 (List of Companies):\n${sample}`
+            : `Probe 2 (List of Companies):\n${sample}`;
+        } catch { /* ignore */ }
+        onDiskCompanies = walkForCompanies(parsed);
+      } catch (err) {
+        if (!discoveryError) discoveryError = err instanceof Error ? err.message : String(err);
+      }
+    }
+
+    // Probe 3: custom TDL COLLECTION of Company objects. Enumerates
+    // Tally's internal company registry directly. Used as a final
+    // fallback when both report-style probes return empty (some
+    // hosted-Tally tunnels block report queries until a company is
+    // open but still answer collection queries).
+    if (!loadedCompanies.length && !onDiskCompanies.length) {
       try {
         const probeXml = companiesRequest({ company: '' });
         const parsed = await tallyRequest(probeXml, cfg, 15000);
         try {
-          const sample = JSON.stringify(parsed).slice(0, 1500);
+          const sample = JSON.stringify(parsed).slice(0, 1200);
           discoveryRawSample = discoveryRawSample
-            ? `${discoveryRawSample}\n---\nProbe 2 (TDL Company collection):\n${sample}`
-            : sample;
+            ? `${discoveryRawSample}\n---\nProbe 3 (TDL Company collection):\n${sample}`
+            : `Probe 3 (TDL Company collection):\n${sample}`;
         } catch { /* ignore */ }
         const found = walkForCompanies(parsed);
         if (found.length) {
-          discoveredCompanies = found;
+          onDiskCompanies = found;
           discoveryError = null;
         }
       } catch (err) {
@@ -1517,30 +1548,53 @@ Deno.serve(async (req) => {
       }
     }
 
-    if (discoveredCompanies.length && db) {
+    // Resolve activeCompany strictly off what's CURRENTLY loaded.
+    // Cached active_company is only consulted when no loaded
+    // company can be detected (Tally still answering pings but
+    // with nothing open) and only as a hint, not as an authority.
+    if (loadedCompanies.length) {
+      discoveredCompanies = loadedCompanies;
+      // Always pick the first loaded company as active. If the
+      // user has multiple companies loaded, the iteration in
+      // handleSync will sync each of them in turn.
+      activeCompany = activeCompany && loadedCompanies.includes(activeCompany)
+        ? activeCompany
+        : loadedCompanies[0];
+    } else {
+      discoveredCompanies = onDiskCompanies;
+      // No loaded company — try cached active as last resort. If
+      // even that's missing or stale, the empty-no-data path
+      // below kicks in with a clear error.
+      if (db && discoveredCompanies.length) {
+        try {
+          const { data: prior } = await db
+            .from('tally_companies')
+            .select('active_company')
+            .eq('tenant_key', tenantKey)
+            .maybeSingle();
+          if (prior?.active_company && discoveredCompanies.includes(prior.active_company)) {
+            activeCompany = activeCompany || prior.active_company;
+          } else {
+            activeCompany = activeCompany || discoveredCompanies[0];
+          }
+        } catch { /* non-fatal */ }
+      } else if (discoveredCompanies.length) {
+        activeCompany = activeCompany || discoveredCompanies[0];
+      }
+    }
+
+    // Persist the freshly-resolved view (loaded list + active) so
+    // a subsequent get-companies call sees the truth, not stale
+    // state from the previous sync.
+    if (db && discoveredCompanies.length) {
       try {
-        const { data: prior } = await db
-          .from('tally_companies')
-          .select('active_company')
-          .eq('tenant_key', tenantKey)
-          .maybeSingle();
-        const nextActive = prior?.active_company
-          && discoveredCompanies.includes(prior.active_company)
-            ? prior.active_company
-            : discoveredCompanies[0];
         await db.from('tally_companies').upsert({
           tenant_key: tenantKey,
           companies: discoveredCompanies,
-          active_company: nextActive,
+          active_company: activeCompany || discoveredCompanies[0],
           updated_at: new Date().toISOString(),
         }, { onConflict: 'tenant_key' });
-        if (!activeCompany) activeCompany = nextActive;
-      } catch (dbErr) {
-        discoveryError = dbErr instanceof Error ? dbErr.message : String(dbErr);
-        if (!activeCompany) activeCompany = discoveredCompanies[0];
-      }
-    } else if (discoveredCompanies.length && !activeCompany) {
-      activeCompany = discoveredCompanies[0];
+      } catch { /* non-fatal */ }
     }
     // Fallback: "List of Companies" only returns companies that are
     // CURRENTLY LOADED in TallyPrime. If the user is sitting on the
