@@ -444,12 +444,16 @@ function reportRequest(reportId: string, company: string) {
 // before the phase chain forces Tally into the company's data context
 // so subsequent queries return real records.
 //
-// We send TWO XML forms back to back because TallyPrime documentation
-// itself shows both shapes and different builds accept different ones:
-// (a) the dedicated TALLYREQUEST=Load Company form (older style, no
-// inner TYPE/ID), and (b) the Execute Action / ID=Load Company form.
-// Tally returns its own success / error envelope either way; the
-// caller surfaces whichever response actually came back.
+// We send THREE different XML forms because TallyPrime's documentation
+// itself shows different shapes across versions and different builds
+// accept different ones:
+//   (a) bare TALLYREQUEST=Load Company       (older legacy form)
+//   (b) Execute / TYPE=Action / ID=Load Company   (mid-vintage docs)
+//   (c) Execute / TYPE=TDLAction / ID=Load Company (current TallyPrime
+//       Developer Reference — TYPE for action execution is documented
+//       as "TDLAction", not the bare "Action" we'd been using).
+// The caller surfaces whichever response actually came back so we can
+// see exactly what Tally said.
 function loadCompanyRequestSimple(company: string) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <ENVELOPE>
@@ -467,6 +471,19 @@ function loadCompanyRequest(company: string) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <ENVELOPE>
   <HEADER><VERSION>1</VERSION><TALLYREQUEST>Execute</TALLYREQUEST><TYPE>Action</TYPE><ID>Load Company</ID></HEADER>
+  <BODY><DESC>
+    <STATICVARIABLES>
+      <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      ${companyFilter(company)}
+    </STATICVARIABLES>
+  </DESC></BODY>
+</ENVELOPE>`;
+}
+
+function loadCompanyRequestTDLAction(company: string) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ENVELOPE>
+  <HEADER><VERSION>1</VERSION><TALLYREQUEST>Execute</TALLYREQUEST><TYPE>TDLAction</TYPE><ID>Load Company</ID></HEADER>
   <BODY><DESC>
     <STATICVARIABLES>
       <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
@@ -1585,9 +1602,12 @@ Deno.serve(async (req) => {
         return false;
       }
     };
-    let connected = await tryForm('simple', loadCompanyRequestSimple(target));
+    let connected = await tryForm('tdlaction', loadCompanyRequestTDLAction(target));
     if (!connected) {
       connected = await tryForm('action', loadCompanyRequest(target));
+    }
+    if (!connected) {
+      connected = await tryForm('simple', loadCompanyRequestSimple(target));
     }
     return new Response(JSON.stringify({
       connected,

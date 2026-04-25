@@ -376,14 +376,16 @@ async function runPhaseWithRetry({ key, company, config, maxAttempts, retryWaitM
 
 // Orchestrate a full multi-phase sync from the client. Replaces the
 // monolithic sync-full call with a sequence of per-phase sync-collection
-// invocations separated by `cooldownMs` (default 12 s). Each invocation
+// invocations separated by `cooldownMs` (default 1 s). Each invocation
 // gets its OWN Edge Function isolate with a fresh 150 s / 150 MB budget,
 // so a phase that fails (e.g. a Tally memory-access-violation crash that
 // resets the TCP connection for Day Book 2021) no longer cascades into
 // skipping every remaining phase — each subsequent phase is tried
-// independently with its own retry. The cooldown between calls also
-// gives the Tally RemoteApp tunnel time to recover between hits, which is
-// the root cause the user identified.
+// independently with its own retry. The cooldown was originally 12 s so
+// the Tally RemoteApp tunnel could recover between hits, but that made
+// every full sync feel painfully slow; the per-phase isolation already
+// gives Tally a fresh TCP connection each time, so a 1 s breather is
+// plenty. Bumped back up automatically on connection-reset retries.
 //
 // `onPhase(evt)` is fired for lifecycle transitions so the UI can drive a
 // real per-phase progress indicator instead of guessing with a timer.
@@ -395,7 +397,7 @@ export async function syncAllPhases({
   allData,
   fromDate,
   toDate,
-  cooldownMs = 12000,
+  cooldownMs = 1000,
   maxAttemptsPerPhase = 2,
   retryWaitMs = 15000,
   signal,

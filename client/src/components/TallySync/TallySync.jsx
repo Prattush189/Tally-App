@@ -768,7 +768,13 @@ export default function TallySync() {
 UNITED AGENCIES DISTRIBUTORS LLP - (from 1-Apr-26)`}
                 />
                 <p className="text-[11px] text-gray-500 mt-1">
-                  Paste the exact company name(s) Tally shows on the Select Company screen, one per line. Each company is opened in Tally via a Load Company action and synced separately. Required — TallyPrime&apos;s &quot;List of Companies&quot; auto-detect is unreliable on hosted setups (it only returns companies that are already loaded), so we always drive the sync from this list.
+                  Paste the exact company name(s) Tally shows on the Select Company screen, one per line. Each company is synced separately. Required — TallyPrime&apos;s &quot;List of Companies&quot; auto-detect only returns companies that are already loaded.
+                </p>
+              </div>
+              <div className="p-3 rounded-lg border text-[11px] bg-amber-500/10 border-amber-500/30 text-amber-200 space-y-1">
+                <div className="font-semibold text-amber-300">⚠ Open a company in Tally before syncing</div>
+                <p>
+                  Per <a className="underline text-amber-200" href="https://help.tallysolutions.com/pre-requisites-for-integrations/" target="_blank" rel="noopener noreferrer">TallyPrime&apos;s integration prerequisites</a>: <i>&quot;at least one company must be loaded in Tally for third-party applications to work with it.&quot;</i> Our sync will try a programmatic Load Company XML on every run (we send three different action shapes — <code>TYPE=TDLAction</code>, <code>TYPE=Action</code>, and bare <code>TALLYREQUEST=Load Company</code>), but no Tally version exposes a fully reliable XML way to open a company file from outside the GUI. If &quot;1 record&quot; counts persist, double-click the company in Tally&apos;s Select Company list (so it shows in the title bar) and re-run.
                 </p>
               </div>
               <div>
