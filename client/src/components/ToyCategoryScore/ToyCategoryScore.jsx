@@ -12,8 +12,11 @@ export default function ToyCategoryScore() {
   if (loading || !data) return <LoadingSpinner />;
 
   const sorted = [...data.categories].sort((a, b) => b.healthScore - a.healthScore);
+  const byMargin = [...data.categories].sort((a, b) => b.margin - a.margin);
   const isSample = data.source === 'tally-empty';
   const recColors = { Expand: '#22c55e', Maintain: '#f59e0b', Review: '#ef4444' };
+  const top = sorted[0];
+  const topMargin = byMargin[0];
 
   return (
     <div className="space-y-6">
@@ -30,8 +33,8 @@ export default function ToyCategoryScore() {
       )}
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <MetricCard icon={Star} label="Top Category" value={sorted[0]?.name} sub={`Score: ${sorted[0]?.healthScore}`} color="emerald" />
-        <MetricCard icon={TrendingUp} label="Highest Margin" value={sorted.sort((a,b) => b.margin - a.margin)[0]?.name} sub={`${sorted[0]?.margin}% margin`} color="violet" />
+        <MetricCard icon={Star} label="Top Category" value={top?.name || '—'} sub={top ? `Score: ${top.healthScore}` : 'Awaiting voucher sync'} color="emerald" />
+        <MetricCard icon={TrendingUp} label="Highest Margin" value={topMargin?.name || '—'} sub={topMargin ? `${topMargin.margin}% margin` : 'Awaiting voucher sync'} color="violet" />
         <MetricCard icon={Package} label="Categories" value={data.categories.length} color="indigo" />
         <MetricCard icon={AlertTriangle} label="Needs Review" value={data.categories.filter(c => c.recommendation === 'Review').length} color="red" />
       </div>

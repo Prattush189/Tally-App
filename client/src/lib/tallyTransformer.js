@@ -212,6 +212,7 @@ function buildCustomer(ledger, index) {
     name,
     segment: 'Mid-Market',
     region,
+    state,
     city,
     gstin,
     monthlyAvg: 0,
@@ -399,10 +400,18 @@ function buildFullCustomer({
   const purchasedCategoriesArr = Array.from(purchasedCategories);
   const missedCategories = Array.from(allCategories).filter(c => !purchasedCategories.has(c));
   // Expansion score: room to grow = unpurchased catalog surface. Keep within
-  // the mock's 20-100 range so downstream visualisations line up.
-  const expansionScore = Math.round(Math.max(20, Math.min(100,
-    (100 - catPenetration) * 0.5 + (100 - skuPenetration) * 0.3 + 20
-  )));
+  // the mock's 20-100 range so downstream visualisations line up. When we
+  // have no voucher history at all (skuCount === 0 && catCount === 0) the
+  // raw formula collapses to 100 — every dealer would look like a max-
+  // expansion target — so fall back to 0 ("unknown") in that case so the
+  // Growth Engine / Opportunities pages don't pretend they've classified
+  // every customer at the ceiling.
+  const hasPurchaseHistory = skuCount > 0 || catCount > 0;
+  const expansionScore = hasPurchaseHistory
+    ? Math.round(Math.max(20, Math.min(100,
+        (100 - catPenetration) * 0.5 + (100 - skuPenetration) * 0.3 + 20
+      )))
+    : 0;
 
   // ── Payment history + DSO ──────────────────────────────────────────────
   const paymentHistory = window.map(b => ({ month: b.month, onTime: 0, late: 0, dso: 0 }));
