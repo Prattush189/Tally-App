@@ -10,7 +10,6 @@ import {
   getStatus, getDataSummary, getCompanies, deleteSnapshot, loadFromSnapshot,
   syncAllPhases,
 } from '../../lib/tallyClient';
-import { transformTallyLedgers, transformTallyFull } from '../../lib/tallyTransformer';
 import { availableRanges, rangeByKey } from '../../utils/dateRange';
 
 const TALLY_CONFIG_KEY = 'b2b_tally_config';
@@ -245,39 +244,27 @@ export default function TallySync() {
       return { success: false, error: err instanceof Error ? err.message : String(err), mode: 'client-chained' };
     }
 
-    // Hydrate with the persisted snapshot so the transformer has the raw
-    // data tree (phases only return counts + errors). Skip when the run
-    // couldn't even establish discovery — nothing would be there.
-    try {
-      const snap = await loadFromSnapshot(undefined, r.activeCompany || companyName || undefined);
-      if (snap?.success && snap.raw) {
-        r.raw = snap.raw;
-        r.ledgers = snap.ledgers ?? r.counts?.ledgers ?? 0;
-        r.salesVouchers = snap.salesVouchers ?? 0;
-        r.receiptVouchers = snap.receiptVouchers ?? 0;
-        r.stockItems = snap.stockItems ?? r.counts?.stockItems ?? 0;
-        r.stockGroups = snap.stockGroups ?? r.counts?.stockGroups ?? 0;
-        r.dayBook = r.counts?.dayBook ?? 0;
-        r.profitLoss = r.counts?.profitLoss ?? 0;
-        r.balanceSheet = r.counts?.balanceSheet ?? 0;
-        r.trialBalance = r.counts?.trialBalance ?? 0;
-        // Merge server-persisted error map so partial failures landed on
-        // prior phases still appear in the UI.
-        r.collectionErrors = { ...(snap.collectionErrors || {}), ...(r.collectionErrors || {}) };
-        try {
-          const useFull = r.raw && typeof r.raw === 'object' && 'ledgers' in r.raw;
-          const { customers, totals, diagnostics } = useFull
-            ? transformTallyFull(r.raw)
-            : transformTallyLedgers(r.raw);
-          r.dealersStored = customers.length;
-          r.diagnostics = { ...(r.diagnostics || {}), ...diagnostics };
-          r._customers = customers;
-          r._totals = totals;
-        } catch (transformErr) {
-          r.transformError = transformErr.message;
-        }
-      }
-    } catch { /* non-fatal — phase counts alone are enough for the headline */ }
+    // Trust per-phase persistence. Each sync-collection invocation
+    // already wrote its data to tally_snapshots via the
+    // merge_tally_snapshot_key RPC, so the cloud row is correct the
+    // moment the phase chain finishes. We deliberately DO NOT
+    // re-download the full data tree here — for a tenant with 3000+
+    // ledgers + 800+ stock items the tree is 10-30 MB of JSONB and
+    // pulling it again just to compute dealersStored locally was
+    // adding 30-120 s of "Syncing..." spinner with the rest of the
+    // UI already settled. Counts come straight from the phase
+    // results; the customer/totals transform now happens lazily
+    // on the dashboards via TallyDataContext when they mount.
+    r.ledgers = r.counts?.ledgers ?? 0;
+    r.stockItems = r.counts?.stockItems ?? 0;
+    r.stockGroups = r.counts?.stockGroups ?? 0;
+    r.dayBook = r.counts?.dayBook ?? 0;
+    r.profitLoss = r.counts?.profitLoss ?? 0;
+    r.balanceSheet = r.counts?.balanceSheet ?? 0;
+    r.trialBalance = r.counts?.trialBalance ?? 0;
+    r.salesVouchers = 0;
+    r.receiptVouchers = 0;
+    r.dealersStored = r.counts?.ledgers ?? 0;
     return r;
   };
 
@@ -470,24 +457,25 @@ export default function TallySync() {
     // own Edge Function isolate with its own retry, so no follow-up pass
     // is needed.
 
-    // Pull the fresh snapshot from Supabase into the context — every dashboard
-    // reads from there, so a single refresh here propagates the new data to
-    // the whole app. If the live sync itself returned nothing, the cloud row
-    // is still the canonical source (it may have been populated by another
-    // PC or the cron job), so this also covers the fallback case.
-    try { await refreshTallyData(); } catch { /* non-fatal — dashboards will retry */ }
-    try {
-      const s = await getStatus();
-      if (s) setStatus(s);
-      const sm = await getDataSummary();
-      if (sm) setSummary(sm);
-      refreshCompanies();
-    } catch { /* non-fatal */ }
-
+    // Sync UI is done as soon as the phase chain finishes — the
+    // expensive bits below (refreshTallyData re-pulls the full
+    // snapshot tree which is ~10-30 MB for a 3000+ ledger tenant)
+    // run in the background. Awaiting them blocked the spinner for
+    // 30-120 s of "Syncing..." after every phase had already
+    // turned green, which is what made the run look stuck.
     setProgressCompany({ name: '', index: 0, total: 1 });
     setLivePhase(null);
     setSyncing(false);
     setSyncStartedAt(null);
+
+    // Fire-and-forget: each dashboard already polls the snapshot
+    // on mount, so a stuck refresh here is recoverable. Errors are
+    // swallowed because they don't change anything the user cares
+    // about — the cloud row is the canonical source either way.
+    refreshTallyData().catch(() => {});
+    getStatus().then((s) => { if (s) setStatus(s); }).catch(() => {});
+    getDataSummary().then((sm) => { if (sm) setSummary(sm); }).catch(() => {});
+    refreshCompanies();
   };
 
   // Multi-PC + background-tab recovery: if a sync started on this browser,

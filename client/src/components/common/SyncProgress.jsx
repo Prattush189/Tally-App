@@ -200,11 +200,19 @@ export default function SyncProgress({ active, result, progressCompany, livePhas
       }
       if (step.key === 'persist') {
         // Persist is implicit per-phase (each sync-collection writes its
-        // own row server-side), so mirror the last phase's state.
-        const allDone = STEPS.every((s) =>
-          s.conditional || s.key === 'persist' || s.key === 'portal'
-            || livePhase.keyStatus[s.key] === 'done'
-            || livePhase.keyStatus[s.key] === 'error');
+        // own row server-side via merge_tally_snapshot_key), so this
+        // row mirrors completion of the data-fetch phases. discover
+        // and loadCompany have their own status fields and are
+        // explicitly skipped — the check used to walk every
+        // non-conditional STEP and look it up in keyStatus, which
+        // meant `keyStatus['discover']` (always undefined, since
+        // discover is tracked in discoveryStatus) blocked persist
+        // from ever flipping to done.
+        const dataFetchKeys = STEPS
+          .filter((s) => !s.conditional && s.key !== 'persist' && s.key !== 'discover' && s.key !== 'loadCompany')
+          .map((s) => s.key);
+        const allDone = dataFetchKeys.every((k) =>
+          livePhase.keyStatus[k] === 'done' || livePhase.keyStatus[k] === 'error');
         if (allDone) return 'done';
         return 'pending';
       }
