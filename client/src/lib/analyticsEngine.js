@@ -39,6 +39,100 @@ function ctx(overrides = {}) {
   };
 }
 
+// Voucher-driven metrics collapse to zero when Day Book is disabled (Tally
+// c0000005 crash on this dataset). Detect that state from the customer
+// objects so dashboards can swap to the ledger-only "receivables
+// intelligence" layout instead of rendering a sea of ₹0 tiles.
+function hasVoucherData(customers) {
+  for (const c of customers) {
+    if (c.totalOrders > 0) return true;
+    const hist = c.invoiceHistory;
+    if (Array.isArray(hist)) {
+      for (const m of hist) if ((m?.value || 0) > 0 || (m?.invoiceCount || 0) > 0) return true;
+    }
+  }
+  return false;
+}
+
+// Derive the master-data / ledger-only metric bundle that Overview falls back
+// to when no vouchers landed in the snapshot. Every field here is computed
+// from CLOSINGBALANCE / CREDITLIMIT / region / GSTIN — fields the ledger
+// master collection always carries.
+function getLedgerMetrics(customers) {
+  const totalDealers = customers.length;
+  const withOutstanding = customers.filter(c => (c.outstandingAmount || 0) > 0);
+  const totalReceivables = withOutstanding.reduce((s, c) => s + c.outstandingAmount, 0);
+  const avgReceivable = withOutstanding.length ? Math.round(totalReceivables / withOutstanding.length) : 0;
+  const overLimit = customers.filter(c => c.creditLimit > 0 && c.outstandingAmount > c.creditLimit).length;
+  const withGstin = customers.filter(c => c.gstin && String(c.gstin).trim()).length;
+  const withCreditTerms = customers.filter(c => c.creditLimit > 0).length;
+  const settled = customers.filter(c => (c.outstandingAmount || 0) <= 0).length;
+
+  const REGIONS = ['North', 'South', 'East', 'West'];
+  const receivablesByRegion = REGIONS.map(r => {
+    const inRegion = customers.filter(c => c.region === r);
+    return {
+      region: r,
+      dealers: inRegion.length,
+      receivables: inRegion.reduce((s, c) => s + Math.max(0, c.outstandingAmount || 0), 0),
+    };
+  });
+
+  const topByOutstanding = [...withOutstanding]
+    .sort((a, b) => b.outstandingAmount - a.outstandingAmount)
+    .slice(0, 10)
+    .map(c => ({
+      id: c.id,
+      name: c.name,
+      region: c.region,
+      outstanding: c.outstandingAmount,
+      creditLimit: c.creditLimit,
+      utilization: c.creditLimit > 0 ? Math.round((c.outstandingAmount / c.creditLimit) * 100) : null,
+    }));
+
+  // Pareto: cumulative % of total receivables vs % of dealers (ranked).
+  const sortedDealers = [...withOutstanding].sort((a, b) => b.outstandingAmount - a.outstandingAmount);
+  let cumSum = 0;
+  const pareto = sortedDealers.map((c, i) => {
+    cumSum += c.outstandingAmount;
+    return {
+      rank: i + 1,
+      dealerPct: Math.round(((i + 1) / sortedDealers.length) * 100),
+      cumulativePct: totalReceivables > 0 ? Math.round((cumSum / totalReceivables) * 100) : 0,
+    };
+  });
+  // Headline number: what % of receivables is concentrated in the top 20%
+  // of dealers? Standard Pareto cut.
+  const top20Index = Math.max(0, Math.floor(sortedDealers.length * 0.2) - 1);
+  const top20Concentration = pareto[top20Index]?.cumulativePct || 0;
+
+  const outstandingBuckets = [
+    { name: 'Settled', count: settled },
+    { name: '<₹10k', count: customers.filter(c => c.outstandingAmount > 0 && c.outstandingAmount < 10000).length },
+    { name: '₹10k-1L', count: customers.filter(c => c.outstandingAmount >= 10000 && c.outstandingAmount < 100000).length },
+    { name: '₹1L-10L', count: customers.filter(c => c.outstandingAmount >= 100000 && c.outstandingAmount < 1000000).length },
+    { name: '>₹10L', count: customers.filter(c => c.outstandingAmount >= 1000000).length },
+  ];
+
+  return {
+    totalDealers,
+    totalReceivables,
+    avgReceivable,
+    overLimit,
+    overLimitPct: totalDealers ? Math.round((overLimit / totalDealers) * 100) : 0,
+    withGstin,
+    gstinPct: totalDealers ? Math.round((withGstin / totalDealers) * 100) : 0,
+    withCreditTerms,
+    creditTermsPct: totalDealers ? Math.round((withCreditTerms / totalDealers) * 100) : 0,
+    settled,
+    settledPct: totalDealers ? Math.round((settled / totalDealers) * 100) : 0,
+    top20Concentration,
+    receivablesByRegion,
+    topByOutstanding,
+    outstandingBuckets,
+  };
+}
+
 function computeAdvancedAnalytics(customers) {
   // Minimal advanced-analytics bundle derived from real customers. Mirrors
   // the shape the old mockData.computeAdvancedAnalytics returned so the
@@ -58,6 +152,8 @@ function computeAdvancedAnalytics(customers) {
 
 export function getOverview(overrides) {
   const { customers, revenueTrends } = ctx(overrides);
+  const ledgerOnly = !hasVoucherData(customers);
+  const ledgerMetrics = getLedgerMetrics(customers);
   const totalAccounts = customers.length;
   const totalRevenue = customers.reduce((s, c) => s + c.monthlyAvg, 0);
   const avgDSO = Math.round(customers.reduce((s, c) => s + c.dso, 0) / customers.length);
@@ -93,6 +189,8 @@ export function getOverview(overrides) {
     highChurn, highPayment, expandable, avgLTV,
     segmentBreakdown, churnDistribution, paymentDistribution, regionBreakdown,
     revenueTrends,
+    ledgerOnly,
+    ledger: ledgerMetrics,
   };
 }
 

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { BarChart3, Users, DollarSign, AlertTriangle, ShieldAlert, Package, TrendingUp, Target } from 'lucide-react';
+import { BarChart3, Users, DollarSign, AlertTriangle, ShieldAlert, Package, TrendingUp, Target, Wallet, Receipt, FileWarning, Info } from 'lucide-react';
 import { AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import MetricCard from '../common/MetricCard';
 import SectionHeader from '../common/SectionHeader';
@@ -8,10 +8,116 @@ import TimeGranularityToggle, { aggregateSeries } from '../common/TimeGranularit
 import { useAnalytics } from '../../hooks/useAnalytics';
 import { fmt, RISK_COLORS, TOOLTIP_STYLE } from '../../utils/format';
 
+const BUCKET_COLORS = ['#10b981', '#6366f1', '#8b5cf6', '#f59e0b', '#ef4444'];
+
+function LedgerOnlyOverview({ data }) {
+  const ledger = data.ledger;
+  return (
+    <div className="space-y-6">
+      <SectionHeader icon={BarChart3} title="Receivables Overview" subtitle="Ledger-driven intelligence — voucher data is paused" />
+
+      <div className="glass-card p-4 border-l-4 border-amber-500/70">
+        <div className="flex items-start gap-3">
+          <Info size={18} className="text-amber-300 flex-shrink-0 mt-0.5" />
+          <div className="space-y-1">
+            <p className="text-sm font-semibold text-white">Voucher data unavailable — Day Book is disabled on this dataset.</p>
+            <p className="text-xs text-gray-400 leading-relaxed">
+              Sales / receipt vouchers can&apos;t be fetched from this Tally install (c0000005 crash on the voucher tree). The tiles below are computed entirely from the ledger master — outstanding balances, credit limits, region, and GSTIN. Revenue, DSO, churn, SKU penetration, and aging trends will fill in automatically once vouchers can be synced.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <MetricCard icon={Users} label="Total Dealers" value={ledger.totalDealers} sub="Sundry Debtors loaded" color="indigo" />
+        <MetricCard icon={Wallet} label="Total Receivables" value={fmt(ledger.totalReceivables)} sub="Sum of closing balances" color="emerald" />
+        <MetricCard icon={Receipt} label="Avg Receivable / Dealer" value={fmt(ledger.avgReceivable)} sub="Across dealers with balance" color="violet" />
+        <MetricCard icon={FileWarning} label="Over Credit Limit" value={ledger.overLimit} sub={`${ledger.overLimitPct}% of dealers`} color="red" />
+      </div>
+
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <MetricCard icon={ShieldAlert} label="GSTIN Coverage" value={`${ledger.gstinPct}%`} sub={`${ledger.withGstin} dealers registered`} color="cyan" />
+        <MetricCard icon={Target} label="Credit Terms Set" value={`${ledger.creditTermsPct}%`} sub={`${ledger.withCreditTerms} dealers with limit`} color="blue" />
+        <MetricCard icon={TrendingUp} label="Top 20% Concentration" value={`${ledger.top20Concentration}%`} sub="Receivables held by top 20% of dealers" color="amber" />
+        <MetricCard icon={Package} label="Settled Dealers" value={ledger.settled} sub={`${ledger.settledPct}% have zero balance`} color="emerald" />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="glass-card p-5">
+          <h3 className="text-sm font-semibold text-gray-300 mb-4">Receivables by Region</h3>
+          <ResponsiveContainer width="100%" height={280}>
+            <BarChart data={ledger.receivablesByRegion}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+              <XAxis dataKey="region" tick={{ fill: '#9ca3af', fontSize: 12 }} />
+              <YAxis tick={{ fill: '#9ca3af', fontSize: 11 }} tickFormatter={v => fmt(v)} />
+              <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(v, n) => n === 'receivables' ? fmt(v) : v} />
+              <Legend wrapperStyle={{ color: '#9ca3af' }} />
+              <Bar dataKey="receivables" fill="#6366f1" radius={[8, 8, 0, 0]} name="Receivables" />
+              <Bar dataKey="dealers" fill="#8b5cf6" radius={[8, 8, 0, 0]} name="Dealers" />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+
+        <div className="glass-card p-5">
+          <h3 className="text-sm font-semibold text-gray-300 mb-4">Outstanding Balance Distribution</h3>
+          <ResponsiveContainer width="100%" height={280}>
+            <BarChart data={ledger.outstandingBuckets}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+              <XAxis dataKey="name" tick={{ fill: '#9ca3af', fontSize: 11 }} />
+              <YAxis tick={{ fill: '#9ca3af', fontSize: 11 }} />
+              <Tooltip contentStyle={TOOLTIP_STYLE} />
+              <Bar dataKey="count" radius={[8, 8, 0, 0]}>
+                {ledger.outstandingBuckets.map((_, i) => <Cell key={i} fill={BUCKET_COLORS[i % BUCKET_COLORS.length]} />)}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      <div className="glass-card p-5">
+        <h3 className="text-sm font-semibold text-gray-300 mb-4">Top 10 Dealers by Outstanding</h3>
+        <div className="overflow-x-auto rounded-xl border border-gray-700/50">
+          <table className="w-full text-sm">
+            <thead className="bg-gray-900/60">
+              <tr className="text-left text-xs text-gray-400 uppercase tracking-wider">
+                <th className="px-4 py-2">#</th>
+                <th className="px-4 py-2">Dealer</th>
+                <th className="px-4 py-2">Region</th>
+                <th className="px-4 py-2 text-right">Outstanding</th>
+                <th className="px-4 py-2 text-right">Credit Limit</th>
+                <th className="px-4 py-2 text-right">Utilization</th>
+              </tr>
+            </thead>
+            <tbody>
+              {ledger.topByOutstanding.map((d, i) => (
+                <tr key={d.id} className="border-t border-gray-800/60 hover:bg-gray-800/40">
+                  <td className="px-4 py-2 text-gray-500 font-mono text-xs">{i + 1}</td>
+                  <td className="px-4 py-2 text-gray-200">{d.name}</td>
+                  <td className="px-4 py-2 text-gray-400 text-xs">{d.region || '—'}</td>
+                  <td className="px-4 py-2 text-right text-gray-200 font-mono text-xs">{fmt(d.outstanding)}</td>
+                  <td className="px-4 py-2 text-right text-gray-400 font-mono text-xs">{d.creditLimit ? fmt(d.creditLimit) : '—'}</td>
+                  <td className={`px-4 py-2 text-right font-mono text-xs ${d.utilization == null ? 'text-gray-500' : d.utilization > 100 ? 'text-red-400' : d.utilization > 70 ? 'text-amber-300' : 'text-emerald-300'}`}>
+                    {d.utilization == null ? '—' : `${d.utilization}%`}
+                  </td>
+                </tr>
+              ))}
+              {!ledger.topByOutstanding.length && (
+                <tr><td colSpan={6} className="px-4 py-6 text-center text-xs text-gray-500">No outstanding balances on file.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function Overview() {
   const { data, loading } = useAnalytics('overview');
   const [granularity, setGranularity] = useState('month');
   if (loading || !data) return <LoadingSpinner />;
+  if (data.ledgerOnly) return <LedgerOnlyOverview data={data} />;
+
   const trendSeries = aggregateSeries(data.revenueTrends, granularity);
   const trendLabel = granularity === 'month' ? '12 Months' : granularity === 'quarter' ? 'Quarterly' : 'Yearly';
 
