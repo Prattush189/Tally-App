@@ -10,7 +10,6 @@ import {
   getStatus, getDataSummary, getCompanies, deleteSnapshot, loadFromSnapshot,
   syncAllPhases,
 } from '../../lib/tallyClient';
-import { availableRanges, rangeByKey } from '../../utils/dateRange';
 
 const TALLY_CONFIG_KEY = 'b2b_tally_config';
 
@@ -37,23 +36,14 @@ function composeHost(ip, port) {
 function loadTallyConfig() {
   try {
     const raw = localStorage.getItem(TALLY_CONFIG_KEY);
-    if (!raw) return { ip: '', port: '', manualCompany: '' };
+    if (!raw) return { ip: '', port: '' };
     const parsed = JSON.parse(raw);
     const split = (parsed.ip || parsed.port)
       ? { ip: parsed.ip || '', port: parsed.port || '' }
       : parseHost(parsed.host);
-    return {
-      ip: split.ip,
-      port: split.port,
-      // Required: company name(s) Tally has loaded in the GUI. We
-      // pass each line straight into SVCURRENTCOMPANY for that
-      // company's phase chain. TallyPrime's XML server only sees
-      // companies the desktop app has actually opened, so this is
-      // user-driven on every deployment.
-      manualCompany: parsed.manualCompany || '',
-    };
+    return { ip: split.ip, port: split.port };
   } catch {
-    return { ip: '', port: '', manualCompany: '' };
+    return { ip: '', port: '' };
   }
 }
 
@@ -72,17 +62,13 @@ export default function TallySync() {
   const [syncStartedAt, setSyncStartedAt] = useState(null);
   const [syncResult, setSyncResult] = useState(null);
   const [config, setConfig] = useState(loadTallyConfig);
-  const [rangeKey, setRangeKey] = useState('all');
   // `snapshotInfo` reflects the latest cloud snapshot's metadata; sourced
   // straight from the shared Tally data context so the TallySync card
   // agrees with every other dashboard about what's currently loaded.
   const snapshotInfo = liveSyncedAt ? { updatedAt: liveSyncedAt, source: liveSource } : null;
   const [activeCompany, setActiveCompany] = useState('');
-  const [knownCompanies, setKnownCompanies] = useState([]);
 
   const available = tallyAvailable();
-  const ranges = availableRanges();
-  const activeRange = rangeByKey(rangeKey);
 
   // Persist both the new split fields AND a composed `host` string, so any
   // legacy code path that still reads config.host keeps working until it's
@@ -109,7 +95,6 @@ export default function TallySync() {
   async function refreshCompanies() {
     try {
       const r = await getCompanies();
-      setKnownCompanies(r?.companies || []);
       setActiveCompany(r?.activeCompany || '');
     } catch { /* non-fatal */ }
   }
@@ -126,8 +111,6 @@ export default function TallySync() {
     // setting it here would collapse multi-company runs onto the
     // first entry.
   });
-
-  const manualCompany = (config.manualCompany || '').trim();
 
   // Multi-company sync progress. Each Sync press iterates through every
   // company Tally detected on the first round-trip — each company gets
@@ -216,13 +199,18 @@ export default function TallySync() {
     try {
       r = await syncAllPhases({
         config: backendCreds(),
-        // Always explicit. The handleSync caller filtered the
-        // user-supplied company list before iterating, so every
-        // entry here is a non-empty name we expect Tally to know.
+        // companyName is set when iterating discovered companies; if
+        // empty, syncAllPhases falls back to whichever company Tally
+        // has open (no SVCURRENTCOMPANY filter on the queries).
         company: companyName || undefined,
-        allData: Boolean(activeRange.allData),
-        fromDate: activeRange.fromDate,
-        toDate: activeRange.toDate,
+        // Always pull the full available history. Master-data phases
+        // ignore the date filter (Tally's Ledger collection returns
+        // every ledger regardless), Day Book chunks by year as
+        // before. Removing the user-facing Date Range picker means
+        // we don't try to scope to a fresh FY that only has 25 days
+        // of data — that was the source of the recent 1-record
+        // result on FY 26-27.
+        allData: true,
         onPhase: phaseEvents,
       });
     } catch (err) {
@@ -291,42 +279,27 @@ export default function TallySync() {
       loadCompanyError: null,
     });
 
-    // Drive the sync off the user-supplied company list. TallyPrime's
-    // built-in "List of Companies" auto-detect is unreliable on hosted
-    // setups — it only returns companies currently LOADED in Tally,
-    // so a fresh tunnel sitting on the Select Company screen answers
-    // empty and the sync silently runs against placeholder data ("1
-    // record" everywhere). Asking the user to paste the exact names
-    // once removes that whole class of failure: every company we sync
-    // is one we know Tally can find.
-    const manualList = manualCompany
-      .split('\n')
-      .map((s) => s.trim())
-      .filter(Boolean);
-    if (!manualList.length) {
-      setSyncResult({
-        success: false,
-        error: 'Add at least one company name to the Companies field above. Use the exact name TallyPrime shows on the Select Company screen, one per line.',
-        partial: true,
-        mode: 'client-chained',
-        collectionErrors: { config: 'No company name configured.' },
-      });
-      setProgressCompany({ name: '', index: 0, total: 1 });
-      setLivePhase(null);
-      setSyncing(false);
-      setSyncStartedAt(null);
-      return;
-    }
-
-    const companiesToSync = manualList;
-    const firstCompany = companiesToSync[0];
+    // First pass: no explicit company. syncAllPhases runs the
+    // List-of-Companies probe + the TDL Company collection probe
+    // and resolves whichever company Tally has loaded in the GUI.
+    // The company name discovered by that first pass drives any
+    // subsequent passes — TallyPrime supports multiple companies
+    // loaded at once, so we sync each detected company separately.
+    setProgressCompany({ name: '', index: 1, total: 1 });
+    const first = await syncOneCompany('');
+    const discoveredCompanies = first?.discoveredCompanies || [];
+    const firstCompany = first?.activeCompany || discoveredCompanies[0] || '';
+    const companiesToSync = discoveredCompanies.length
+      ? discoveredCompanies
+      : (firstCompany ? [firstCompany] : ['']);
 
     const results = new Map();
-    // Each company gets its own load + phase chain. Per-company errors
-    // don't block the next company — every entry runs to completion
-    // (or its own per-phase failures) before we move on.
+    results.set(firstCompany || '(default)', first);
+
+    // Subsequent passes: every other company Tally has loaded.
     for (let i = 0; i < companiesToSync.length; i++) {
       const name = companiesToSync[i];
+      if (!name || name === firstCompany) continue;
       setProgressCompany({ name, index: results.size + 1, total: companiesToSync.length });
       setLivePhase({
         currentKey: null,
@@ -739,59 +712,22 @@ export default function TallySync() {
                   <a href={portalUrl} target="_blank" rel="noreferrer" className="text-indigo-300 hover:underline">{portalUrl}</a>
                 ) : 'http://your-ip/'}). Port is where TallyPrime's XML server listens (usually <code className="text-gray-300">9007</code> for cloud, <code className="text-gray-300">9000</code> for desktop).
               </p>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">
-                  Companies to sync <span className="text-gray-600">(one per line — required)</span>
-                </label>
-                <textarea
-                  value={config.manualCompany}
-                  disabled={isDemo || syncing}
-                  onChange={e => setConfig(c => ({ ...c, manualCompany: e.target.value }))}
-                  rows={4}
-                  className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm font-mono focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
-                  placeholder={`GIRNAR KIDS PLAY LLP - (from 1-Apr-26)
-UNITED AGENCIES DISTRIBUTORS LLP - (from 1-Apr-26)`}
-                />
-                <p className="text-[11px] text-gray-500 mt-1">
-                  Paste the exact company name(s) Tally shows on the Select Company screen, one per line. Each company is synced separately. Required — TallyPrime&apos;s &quot;List of Companies&quot; auto-detect only returns companies that are already loaded.
-                </p>
-              </div>
               <div className="p-3 rounded-lg border text-[11px] bg-amber-500/10 border-amber-500/30 text-amber-200 space-y-1">
                 <div className="font-semibold text-amber-300">⚠ Open a company in Tally before syncing</div>
                 <p>
-                  Per <a className="underline text-amber-200" href="https://help.tallysolutions.com/pre-requisites-for-integrations/" target="_blank" rel="noopener noreferrer">TallyPrime&apos;s integration prerequisites</a>: <i>&quot;at least one company must be loaded in Tally for third-party applications to work with it.&quot;</i> Our sync will try a programmatic Load Company XML on every run (we send three different action shapes — <code>TYPE=TDLAction</code>, <code>TYPE=Action</code>, and bare <code>TALLYREQUEST=Load Company</code>), but no Tally version exposes a fully reliable XML way to open a company file from outside the GUI. If &quot;1 record&quot; counts persist, double-click the company in Tally&apos;s Select Company list (so it shows in the title bar) and re-run.
-                </p>
-              </div>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">Date range</label>
-                <select
-                  value={rangeKey}
-                  disabled={isDemo || syncing}
-                  onChange={e => setRangeKey(e.target.value)}
-                  className="w-full bg-gray-900/60 border border-gray-600/50 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {ranges.map(r => (
-                    <option key={r.key || r.label} value={r.key || r.label}>{r.label}</option>
-                  ))}
-                </select>
-                <p className="text-[11px] text-gray-500 mt-1">
-                  Picks which financial year's balances Tally returns (ClosingBalance is as-of the end date). Re-sync any time to pull a different range.
+                  Per <a className="underline text-amber-200" href="https://help.tallysolutions.com/pre-requisites-for-integrations/" target="_blank" rel="noopener noreferrer">TallyPrime&apos;s integration prerequisites</a>: <i>&quot;at least one company must be loaded in Tally for third-party applications to work with it.&quot;</i> Whichever company you have open in Tally is the one we&apos;ll sync — its name, current period, and data are auto-detected on every run.
                 </p>
               </div>
               <div className="bg-gray-900/50 rounded-lg p-3">
-                <p className="text-xs text-gray-500 mb-1">Companies</p>
+                <p className="text-xs text-gray-500 mb-1">Companies & range</p>
                 <p className="text-sm text-white">
-                  {knownCompanies.length > 0
-                    ? `All ${knownCompanies.length} detected compan${knownCompanies.length === 1 ? 'y' : 'ies'} will be synced on every click.`
-                    : 'Companies will be auto-detected on the first Sync and then synced together.'}
+                  Auto-detected from whichever company is open in Tally.
                 </p>
                 <p className="text-xs text-gray-500 mt-0.5">
-                  {activeRange.fromDate
-                    ? `${activeRange.label}: ${activeRange.fromDate} → ${activeRange.toDate}`
-                    : 'All available data (Tally default range)'}
+                  Master data uses Tally&apos;s current period; Day Book pulls every available year.
                 </p>
                 <p className="text-[11px] text-indigo-300/80 mt-1">
-                  Use the top-bar company picker to choose which one's data the dashboards show.
+                  Use the top-bar company picker to choose which one&apos;s data the dashboards show.
                 </p>
               </div>
               {status?.cacheAge != null && (
