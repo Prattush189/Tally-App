@@ -752,7 +752,22 @@ async function persistSnapshotKey(
 // tell which edge-function revision it's talking to. Bump manually when
 // deploys need verification; the value is purely informational. Useful
 // when diagnosing "is my fix live yet?" without digging into Actions logs.
-const EDGE_BUILD_ID = '2026-04-24-sync-discover-client-chained';
+const EDGE_BUILD_ID = '2026-04-26-canonical-snapshot-key';
+
+// Canonical company name helper. TallyPrime exposes one "company" per
+// financial year for the same business (e.g. "ACME LLP - (from 1-Apr-25)"
+// + "ACME LLP - (from 1-Apr-26)"); from the dashboard's point of view
+// they're one entity, so we strip the " - (from D-Mon-YY)" suffix and
+// store every per-FY sync's voucher data under the canonical name.
+// All snapshot reads + active_company writes go through this helper
+// so a literal name from discovery, an explicit override on a request,
+// or an old literal-keyed row pre-canonicalisation all resolve to the
+// same canonical row on tally_snapshots.
+const COMPANY_FY_SUFFIX_RE = /\s*[-–—]\s*\(from\s+\d{1,2}-[A-Za-z]{3,9}-\d{2,4}\)\s*$/i;
+function canonicaliseCompany(name: string): string {
+  if (!name) return '';
+  return String(name).replace(COMPANY_FY_SUFFIX_RE, '').trim();
+}
 
 // Merge a new sync result into the existing tally_snapshots row. Idempotent
 // — collections not included in `incoming.data` retain their prior values
@@ -1056,7 +1071,7 @@ Deno.serve(async (req) => {
         .select('active_company')
         .eq('tenant_key', tenantKey)
         .maybeSingle();
-      const activeCompany = company || cos?.active_company || '';
+      const activeCompany = canonicaliseCompany(company || cos?.active_company || '');
       const { data: snap } = await db
         .from('tally_snapshots')
         .select('counts, errors, source, updated_at, company')
@@ -1188,7 +1203,10 @@ Deno.serve(async (req) => {
     // Dashboards call get-snapshot without an explicit company → it
     // resolves to active_company here.
     if (action === 'set-active-company') {
-      const next = (body.company as string) || '';
+      // Canonicalise on write so a literal FY-suffixed name from an old
+      // client (or a CompanySwitcher that hasn't been refreshed yet)
+      // still ends up pointing at the canonical snapshot row.
+      const next = canonicaliseCompany((body.company as string) || '');
       const { error } = await db.from('tally_companies').upsert({
         tenant_key: tenantKey,
         active_company: next,
@@ -1209,18 +1227,18 @@ Deno.serve(async (req) => {
     // the dbActions set, so delete-snapshot was falling through to it and
     // never running the actual DELETE.
     if (action === 'delete-snapshot') {
+      const target = canonicaliseCompany(company);
       const q = db.from('tally_snapshots').delete().eq('tenant_key', tenantKey);
-      const { error: delErr } = company ? await q.eq('company', company) : await q;
+      const { error: delErr } = target ? await q.eq('company', target) : await q;
       if (delErr) {
         return new Response(JSON.stringify({ connected: false, error: `Failed to delete snapshot: ${delErr.message}` }), { status: 500, headers: jsonHeaders });
       }
-      return new Response(JSON.stringify({ connected: true, action, deleted: true, company: company || '(all)' }), { headers: jsonHeaders });
+      return new Response(JSON.stringify({ connected: true, action, deleted: true, company: target || '(all)' }), { headers: jsonHeaders });
     }
 
     // get-snapshot — default tail of the dbActions block. Must run LAST.
     // Resolve which company to read: explicit body.company > active_company
-    // saved in tally_companies > empty string (back-compat with the single-
-    // company row that existed before the compound-PK migration).
+    // saved in tally_companies > empty string (back-compat).
     let snapshotCompany = company;
     if (!snapshotCompany) {
       const { data: cos } = await db
@@ -1230,12 +1248,32 @@ Deno.serve(async (req) => {
         .maybeSingle();
       snapshotCompany = cos?.active_company || '';
     }
-    const { data: row, error } = await db
+    // Always read the canonical row. New syncs write under canonical;
+    // an explicit literal name from a stale client / old caller is
+    // canonicalised here so it still hits the right row.
+    const canonicalSnapshotCompany = canonicaliseCompany(snapshotCompany);
+    let { data: row, error } = await db
       .from('tally_snapshots')
       .select('data, counts, errors, source, updated_at, collection_meta, company')
       .eq('tenant_key', tenantKey)
-      .eq('company', snapshotCompany)
+      .eq('company', canonicalSnapshotCompany)
       .maybeSingle();
+    // Legacy fallback: pre-canonicalisation snapshots were keyed by the
+    // literal name. If the canonical lookup found nothing but the
+    // literal name itself differs, retry with the literal so existing
+    // tenants can still read their old snapshot until the next sync
+    // overwrites under canonical.
+    if (!error && !row && snapshotCompany && snapshotCompany !== canonicalSnapshotCompany) {
+      const fallback = await db
+        .from('tally_snapshots')
+        .select('data, counts, errors, source, updated_at, collection_meta, company')
+        .eq('tenant_key', tenantKey)
+        .eq('company', snapshotCompany)
+        .maybeSingle();
+      if (!fallback.error) {
+        row = fallback.data;
+      }
+    }
     if (error) {
       return new Response(JSON.stringify({
         connected: false,
@@ -1499,7 +1537,12 @@ Deno.serve(async (req) => {
         await db.from('tally_companies').upsert({
           tenant_key: tenantKey,
           companies: discoveredCompanies,
-          active_company: activeCompany || discoveredCompanies[0],
+          // Store the canonical name as active_company so dashboard
+          // reads (get-snapshot) line up with the canonical-keyed
+          // snapshot rows that sync-collection writes. The literal
+          // FY-suffixed names stay in the `companies` array for the
+          // CompanySwitcher's per-FY breakdown tooltip.
+          active_company: canonicaliseCompany(activeCompany || discoveredCompanies[0]),
           updated_at: new Date().toISOString(),
         }, { onConflict: 'tenant_key' });
       } catch { /* non-fatal */ }
@@ -1960,8 +2003,14 @@ Deno.serve(async (req) => {
     // the FY tag (e.g. "FY26-27") becomes a sub-key suffix on voucher
     // collection keys so different FYs of sales / purchase / receipts
     // coexist instead of overwriting each other.
-    const canonicalCompany = (typeof body.canonicalCompany === 'string' && body.canonicalCompany.trim())
-      || target;
+    // Always canonicalise — even if the client sent a canonical name,
+    // it's a no-op; if it sent a literal one (legacy client), strip
+    // the FY suffix here so the snapshot row lines up with what
+    // get-snapshot reads.
+    const canonicalCompany = canonicaliseCompany(
+      (typeof body.canonicalCompany === 'string' && body.canonicalCompany.trim())
+        || target,
+    );
     const fyTag = (typeof body.fyTag === 'string' && body.fyTag.trim()) || '';
     // Vouchers get the FY suffix; master data (ledgers, stock items,
     // P&L, BS, TB) stays on the bare key — those are either identical
