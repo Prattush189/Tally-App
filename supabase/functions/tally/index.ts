@@ -105,14 +105,24 @@ function fmtTallyDate(d: Date): string {
   return `${y}${m}${day}`;
 }
 
-function voucherDateFilter(cfg: { fromDate: string; toDate: string; allData?: boolean }) {
+function voucherDateFilter(cfg: { fromDate: string; toDate: string; allData?: boolean }, opts: { forcePeriod?: boolean } = {}) {
   // No date hints from caller AND no allData=true → emit no
   // SVFROMDATE/SVTODATE so Tally serves rows from whatever period the
   // company already has loaded. Specifying our own dates was forcing a
   // 5-year window that OOMed Sales Register's parse tree on real
   // distributor data.
-  if (!cfg.fromDate && !cfg.toDate && !cfg.allData) return '';
-  const [from, to] = resolveVoucherWindow(cfg);
+  //
+  // Exception (opts.forcePeriod=true): Tally's built-in pre-compiled
+  // reports (Sales Register, Purchase Register, Bills Outstanding)
+  // honour the company's "current period" and return 0 rows when that
+  // period is a freshly-opened FY with no entries yet. For those
+  // callers we always emit an explicit window — they're aggregated
+  // server-side so the parse tree stays small even on a 5-year span.
+  if (!cfg.fromDate && !cfg.toDate && !cfg.allData && !opts.forcePeriod) return '';
+  const windowCfg = opts.forcePeriod && !cfg.fromDate && !cfg.toDate
+    ? { ...cfg, allData: true }
+    : cfg;
+  const [from, to] = resolveVoucherWindow(windowCfg);
   return [
     `<SVFROMDATE Type="Date">${from}</SVFROMDATE>`,
     `<SVTODATE Type="Date">${to}</SVTODATE>`,
@@ -295,14 +305,18 @@ function reportWithDates(reportId: string, cfg: { company: string; fromDate: str
 </ENVELOPE>`;
 }
 
-function reportWithVoucherDates(reportId: string, cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
+function reportWithVoucherDates(
+  reportId: string,
+  cfg: { company: string; fromDate: string; toDate: string; allData?: boolean },
+  opts: { forcePeriod?: boolean } = {},
+) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <ENVELOPE>
   <HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Data</TYPE><ID>${reportId}</ID></HEADER>
   <BODY><DESC><STATICVARIABLES>
     <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
     ${companyFilter(cfg.company)}
-    ${voucherDateFilter(cfg)}
+    ${voucherDateFilter(cfg, opts)}
   </STATICVARIABLES></DESC></BODY>
 </ENVELOPE>`;
 }
@@ -465,8 +479,13 @@ function typedVoucherCollection(
 // per month with totals) rather than a per-voucher list, which means
 // we lose per-voucher / per-customer sales detail but Tally stays
 // alive and we still get monthly revenue trends.
+// forcePeriod=true so the no-date case still emits an explicit
+// SVCURRENTPERIODFROM/TO override. Without it, Tally's built-in
+// Sales Register honours the company's "current period" — and on
+// freshly-opened FYs (e.g. day 26 of FY 26-27) the report returns 0
+// rows even though prior-FY sales exist in the same data file.
 function salesRegisterRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
-  return reportWithVoucherDates('Sales Register', cfg);
+  return reportWithVoucherDates('Sales Register', cfg, { forcePeriod: true });
 }
 // Purchase Register also crashes Tally on real distributor data when
 // pulled via the typed Voucher COLLECTION (FY25-26 month-chunk OOMed
@@ -474,13 +493,17 @@ function salesRegisterRequest(cfg: { company: string; fromDate: string; toDate: 
 // compiled report path. We lose per-supplier per-voucher detail; we
 // keep monthly purchase totals.
 function purchaseRegisterRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
-  return reportWithVoucherDates('Purchase Register', cfg);
+  return reportWithVoucherDates('Purchase Register', cfg, { forcePeriod: true });
 }
 function receiptRegisterRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
   return typedVoucherCollection(cfg, 'B2BReceiptVouchers', '$$IsReceipt:$VoucherTypeName');
 }
-function billsOutstandingRequest(cfg: { company: string; fromDate: string; toDate: string }) {
-  return reportWithDates('Bills Outstanding', cfg);
+// Bills Outstanding is also a built-in REPORT scoped to current
+// period — same forcePeriod fix as Sales/Purchase. Switched off
+// reportWithDates so the SVCURRENTPERIODFROM/TO override actually
+// gets emitted (reportWithDates only emits SVFROMDATE/SVTODATE).
+function billsOutstandingRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
+  return reportWithVoucherDates('Bills Outstanding', cfg, { forcePeriod: true });
 }
 
 // Stock items / groups stay on our custom COLLECTION queries — empirically
