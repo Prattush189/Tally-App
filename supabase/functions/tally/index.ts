@@ -469,31 +469,53 @@ function typedVoucherCollection(
 </ENVELOPE>`;
 }
 
-// Sales Register uses Tally's built-in REPORT path, NOT the typed
-// Voucher COLLECTION other registers use. The collection iterator
-// reproducibly hangs / crashes TallyPrime itself (Windows "Application
-// is not responding" dialog, c0000005 in the voucher tree walker) on
-// real distributor data — so no amount of date / row chunking helps,
-// every chunk crashes Tally. The built-in report path is pre-compiled
-// and aggregates server-side: it returns a DSPACCNAME tree (one row
-// per month with totals) rather than a per-voucher list, which means
-// we lose per-voucher / per-customer sales detail but Tally stays
-// alive and we still get monthly revenue trends.
-// forcePeriod=true so the no-date case still emits an explicit
-// SVCURRENTPERIODFROM/TO override. Without it, Tally's built-in
-// Sales Register honours the company's "current period" — and on
-// freshly-opened FYs (e.g. day 26 of FY 26-27) the report returns 0
-// rows even though prior-FY sales exist in the same data file.
+// Sales / Purchase Register have TWO fetch shapes, picked per-call by the
+// width of the requested date window (see isNarrowVoucherWindow + buildCollectionJob):
+//
+//   1. Wide window (a full FY, or no window at all) → built-in REPORT path.
+//      The typed Voucher COLLECTION iterator reproducibly hangs / crashes
+//      TallyPrime itself (Windows "Application is not responding" dialog,
+//      c0000005 in the voucher tree walker) on real distributor data when
+//      asked for a whole year at once. The pre-compiled report path is
+//      server-aggregated: it returns a DSPACCNAME tree (one row per month
+//      with totals), so we lose per-voucher detail but Tally stays alive.
+//      Used by the legacy sync-full path and any unscoped caller.
+//
+//   2. Single-day window → typed Voucher COLLECTION (per-voucher detail).
+//      One day's vouchers is a small, bounded parse tree that Tally walks
+//      without crashing, so the client can fan a full year into per-day
+//      sync-collection calls (CHUNK_STRATEGY: 'daily') and stitch the
+//      per-voucher shards back together on read. This is what restores
+//      per-customer revenue / per-supplier purchase detail.
+//
+// forcePeriod=true on the report path so the no-date case still emits an
+// explicit SVCURRENTPERIODFROM/TO override. Without it, Tally's built-in
+// Sales Register honours the company's "current period" — and on freshly-
+// opened FYs (e.g. day 26 of FY 26-27) the report returns 0 rows even
+// though prior-FY sales exist in the same data file.
 function salesRegisterRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
   return reportWithVoucherDates('Sales Register', cfg, { forcePeriod: true });
 }
-// Purchase Register also crashes Tally on real distributor data when
-// pulled via the typed Voucher COLLECTION (FY25-26 month-chunk OOMed
-// + Tally hung). Same safe pivot as Sales: use the built-in pre-
-// compiled report path. We lose per-supplier per-voucher detail; we
-// keep monthly purchase totals.
 function purchaseRegisterRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
   return reportWithVoucherDates('Purchase Register', cfg, { forcePeriod: true });
+}
+// Per-voucher variants. Safe to use ONLY when the window is narrow
+// (a single day) — the day filter flows through voucherDateFilter() so
+// Tally only iterates that day's vouchers. The FETCH list keeps each
+// voucher to five header fields so even a heavy sales day stays small.
+function salesVoucherCollection(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
+  return typedVoucherCollection(cfg, 'B2BSalesVouchers', '$$IsSales:$VoucherTypeName');
+}
+function purchaseVoucherCollection(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
+  return typedVoucherCollection(cfg, 'B2BPurchaseVouchers', '$$IsPurchase:$VoucherTypeName');
+}
+// A window is "narrow" — safe for the per-voucher collection — when it
+// covers a single day (fromDate === toDate). Daily chunking on the client
+// always sets fromDate === toDate, which is how it opts into per-voucher
+// detail; every wider caller (full-FY window or no window) keeps the
+// crash-safe report path.
+function isNarrowVoucherWindow(cfg: { fromDate?: string; toDate?: string }): boolean {
+  return Boolean(cfg.fromDate && cfg.toDate && cfg.fromDate === cfg.toDate);
 }
 function receiptRegisterRequest(cfg: { company: string; fromDate: string; toDate: string; allData?: boolean }) {
   return typedVoucherCollection(cfg, 'B2BReceiptVouchers', '$$IsReceipt:$VoucherTypeName');
@@ -677,13 +699,22 @@ function buildCollectionJob(
   if (key === 'profitLoss') return { xml: profitLossRequest(cfg), node: 'DSPACCNAME', timeoutMs: 30000 };
   if (key === 'balanceSheet') return { xml: balanceSheetRequest(cfg), node: 'DSPACCNAME', timeoutMs: 30000 };
   if (key === 'trialBalance') return { xml: trialBalanceRequest(cfg), node: 'DSPACCNAME', timeoutMs: 45000 };
-  // Sales returns a DSPACCNAME monthly summary tree (built-in report,
-  // doesn't crash Tally), so we count DSPACCNAME nodes instead of
-  // VOUCHER. 60s is plenty — the report is pre-aggregated server-side
-  // by Tally and the response is a few KB regardless of how many
-  // vouchers underlie each month.
-  if (key === 'salesRegister') return { xml: salesRegisterRequest(cfg), node: 'DSPACCNAME', timeoutMs: 60000 };
-  if (key === 'purchaseRegister') return { xml: purchaseRegisterRequest(cfg), node: 'DSPACCNAME', timeoutMs: 60000 };
+  // Sales / Purchase: a single-day window (daily chunk) pulls per-voucher
+  // detail via the typed Voucher COLLECTION and we count VOUCHER nodes;
+  // any wider window falls back to the built-in report path which returns
+  // a DSPACCNAME monthly summary (pre-aggregated server-side, a few KB,
+  // and crash-safe even across a whole FY). 60s covers either shape — a
+  // single day's vouchers is tiny and the monthly report is pre-computed.
+  if (key === 'salesRegister') {
+    return isNarrowVoucherWindow(cfg)
+      ? { xml: salesVoucherCollection(cfg), node: 'VOUCHER', timeoutMs: 60000 }
+      : { xml: salesRegisterRequest(cfg), node: 'DSPACCNAME', timeoutMs: 60000 };
+  }
+  if (key === 'purchaseRegister') {
+    return isNarrowVoucherWindow(cfg)
+      ? { xml: purchaseVoucherCollection(cfg), node: 'VOUCHER', timeoutMs: 60000 }
+      : { xml: purchaseRegisterRequest(cfg), node: 'DSPACCNAME', timeoutMs: 60000 };
+  }
   if (key === 'receiptRegister') return { xml: receiptRegisterRequest(cfg), node: 'VOUCHER', timeoutMs: 90000 };
   if (key === 'billsOutstanding') return { xml: billsOutstandingRequest(cfg), node: 'BILLFIXED', timeoutMs: 60000 };
   return null;

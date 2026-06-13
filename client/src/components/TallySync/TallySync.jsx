@@ -732,13 +732,13 @@ export default function TallySync() {
                   Per <a className="underline text-amber-200" href="https://help.tallysolutions.com/pre-requisites-for-integrations/" target="_blank" rel="noopener noreferrer">TallyPrime&apos;s integration prerequisites</a>: <i>&quot;at least one company must be loaded in Tally for third-party applications to work with it.&quot;</i> Whichever company you have open in Tally is the one we&apos;ll sync — its name, current period, and data are auto-detected on every run.
                 </p>
               </div>
-              <div className="p-3 rounded-lg border text-[11px] bg-red-500/10 border-red-500/30 text-red-200 space-y-1">
-                <div className="font-semibold text-red-300">⚠ Day Book (vouchers) disabled — Tally crashes on this dataset</div>
+              <div className="p-3 rounded-lg border text-[11px] bg-amber-500/10 border-amber-500/30 text-amber-200 space-y-1">
+                <div className="font-semibold text-amber-300">⏳ Vouchers are fetched one day at a time — this sync runs long</div>
                 <p>
-                  TallyPrime throws a <code className="text-red-200">c0000005 (Memory Access Violation)</code> exception every time we walk the voucher tree on this installation, on every company we&apos;ve tried. It&apos;s a Tally-side bug — confirmed against the slimmest possible XML shape and per-year chunked windows. Voucher fetch is disabled until Tally Solutions ships a patched build or the data files are restored from a clean backup.
+                  TallyPrime throws a <code className="text-amber-100">c0000005 (Memory Access Violation)</code> when we pull a whole year of per-voucher Sales / Purchase data in one shot, so we fetch <b>a single day at a time and loop across the entire year</b> (~365 calls per register). That sidesteps the crash and restores per-dealer / per-supplier detail — but a full sync now takes several minutes. Keep this tab open; the progress panel shows the live day-by-day count.
                 </p>
                 <p>
-                  Until then these dashboards <b>will stay empty</b>: Customer Health revenue (per-dealer ₹/month), Purchase Forecasting (historical demand), Toy Category Scores (margin / dealer adoption), Avg Price by Region. Master-data dashboards (Customers, Stock, P&amp;L, Balance Sheet, Trial Balance) sync normally.
+                  These dashboards now populate from the daily feed: Customer Health revenue (per-dealer ₹/month), Purchase Forecasting (historical demand), Toy Category Scores, Avg Price by Region. Days with no vouchers are skipped silently.
                 </p>
               </div>
               <div className="bg-gray-900/50 rounded-lg p-3">
@@ -747,7 +747,7 @@ export default function TallySync() {
                   Auto-detected from whichever company is open in Tally.
                 </p>
                 <p className="text-xs text-gray-500 mt-0.5">
-                  Master data uses Tally&apos;s current period; Day Book pulls every available year.
+                  Master data uses Tally&apos;s current period; vouchers are pulled one day at a time across the company&apos;s financial year.
                 </p>
                 <p className="text-[11px] text-indigo-300/80 mt-1">
                   Use the top-bar company picker to choose which one&apos;s data the dashboards show.

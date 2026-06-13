@@ -353,6 +353,65 @@ function fyMonths(fromDate, toDate) {
   return out;
 }
 
+// Parse a Tally YYYYMMDD stamp into a local Date (or null if malformed).
+function parseStamp(stamp) {
+  if (!stamp || String(stamp).length < 8) return null;
+  const s = String(stamp);
+  const y = Number(s.slice(0, 4));
+  const m = Number(s.slice(4, 6));
+  const d = Number(s.slice(6, 8));
+  if (!y || !m || !d) return null;
+  const dt = new Date(y, m - 1, d);
+  return Number.isNaN(dt.getTime()) ? null : dt;
+}
+
+// Default daily window when the caller has no FY suffix to derive one
+// from: the trailing 365 days ending today. "All past year data" with
+// no explicit period means "the last year up to now".
+function trailingYearWindow(now = new Date()) {
+  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const start = new Date(end);
+  start.setDate(start.getDate() - 364); // 365 days inclusive
+  return {
+    fromDate: fmtDate(start.getFullYear(), start.getMonth() + 1, start.getDate()),
+    toDate: fmtDate(end.getFullYear(), end.getMonth() + 1, end.getDate()),
+  };
+}
+
+// One bucket per calendar day across [fromDate, toDate] (inclusive).
+// Each bucket has from === to so the edge function recognises it as a
+// single-day window and switches the register to the per-voucher feed
+// (the only feed that returns per-customer / per-supplier detail without
+// crashing Tally — that crash is exactly why we fetch a day at a time).
+// Capped at `cap` days so a malformed window can't spin off thousands of
+// calls; one Indian FY is 365-366 days, so 400 is a comfortable ceiling.
+function fyDays(fromDate, toDate, cap = 400) {
+  let start = parseStamp(fromDate);
+  let end = parseStamp(toDate);
+  if (!start || !end) {
+    const w = trailingYearWindow();
+    start = start || parseStamp(w.fromDate);
+    end = end || parseStamp(w.toDate);
+  }
+  // Never fetch future-dated days — a freshly-opened FY (e.g. day 70 of
+  // FY26-27) would otherwise spin off ~290 empty calls for dates that
+  // can't have vouchers yet. Clamp the window's end at today.
+  const today = new Date();
+  const todayMidnight = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  if (end && end > todayMidnight) end = todayMidnight;
+  if (!start || !end || end < start) return [];
+  const out = [];
+  const cursor = new Date(start);
+  let guard = 0;
+  while (cursor <= end && guard < cap) {
+    const stamp = fmtDate(cursor.getFullYear(), cursor.getMonth() + 1, cursor.getDate());
+    out.push({ from: stamp, to: stamp, label: `D${stamp}` });
+    cursor.setDate(cursor.getDate() + 1);
+    guard += 1;
+  }
+  return out;
+}
+
 // 52 weekly buckets across an FY (intentionally unused for now — kept
 // available for the rare tenant where Purchase Register is too heavy
 // for monthly buckets). Each bucket is 7 days; the final absorbs any
@@ -394,22 +453,37 @@ function fyWeeks(fromDate, toDate) {
 // per-supplier voucher detail in exchange for Tally staying alive
 // across the entire sync.
 //
-// Receipt Register still uses the typed Voucher COLLECTION because
-// receipts haven't shown the crash pattern (low-volume on this
-// tenant; ~500 receipts vs thousands of sales/purchases). If a
-// customer reports Tally crashes on receipts too, switch them to
-// the report path here and the transformer will pick up the
-// monthly summary automatically.
-const CHUNK_STRATEGY = {};
+// Sales + Purchase Register fan into DAILY buckets. Tally's per-voucher
+// Voucher COLLECTION crashes (c0000005) / OOMs on anything wider than a
+// day on real distributor data, but a single day is small and reliable —
+// so we pull one day at a time and loop across the whole FY (or the
+// trailing year when the company name carries no FY suffix). Each day's
+// per-voucher payload is persisted as its own shard; the transformer
+// stitches the shards back into one voucher list on read, which is what
+// restores per-customer revenue and per-supplier purchase detail.
+//
+// Receipt Register stays a single un-chunked call — receipts are low
+// volume (~500 vs thousands of sales/purchases) and the typed Voucher
+// COLLECTION handles a full FY without crashing. Add 'receiptRegister':
+// 'daily' here if a tenant ever reports Tally crashing on receipts too.
+const CHUNK_STRATEGY = {
+  salesRegister: 'daily',
+  purchaseRegister: 'daily',
+};
 function bucketsFor(key, fromDate, toDate) {
   const strategy = CHUNK_STRATEGY[key];
   if (!strategy) return [];
+  if (strategy === 'daily') return fyDays(fromDate, toDate);
   if (strategy === 'weekly') return fyWeeks(fromDate, toDate);
   if (strategy === 'monthly') return fyMonths(fromDate, toDate);
   return [];
 }
 
 const CHUNK_COOLDOWN_MS = {
+  // Per-day calls are tiny and each runs in its own isolate with a fresh
+  // TCP connection, so a short breather is plenty — at ~365 buckets the
+  // cooldown dominates wall-clock, so keep it lean.
+  daily: 500,
   weekly: 3000,
   monthly: 1500,
 };
@@ -541,12 +615,11 @@ export async function syncAllPhases({
   }
 
   // 3) Build the phase list. allData / fromDate / toDate are forwarded
-  //    via phaseConfig (set above) so the edge function knows the
-  //    intended scope, but we no longer fan Sales Register into year
-  //    shards — Tally already has the company's books-from / current-
-  //    period set, so a single un-windowed register call returns the
-  //    right slice without us slicing further.
-  void allData; void fromDate; void toDate;
+  //    via phaseConfig (set above). Sales + Purchase Register fan into
+  //    one sync-collection call PER DAY across the FY window (see
+  //    CHUNK_STRATEGY) — Tally crashes on a wider per-voucher pull, so a
+  //    day at a time is the only way to get per-voucher detail. The
+  //    fromDate/toDate FY window drives the daily bucket range below.
   const phaseKeys = [...CORE_SYNC_PHASES];
 
   // 3) Walk each phase serially with a cooldown between calls. A failure
@@ -562,7 +635,10 @@ export async function syncAllPhases({
   let lastDiagnostics = discovery.diagnostics;
   let anyConnected = false;
   const runPhase = async (key, { bucketFrom, bucketTo, bucketLabel } = {}) => {
-    const effectiveFyTag = bucketLabel ? `${fyTag}_${bucketLabel}` : fyTag;
+    // Compose the storage suffix: "<FY>_<bucket>" for multi-FY tenants,
+    // bare "<bucket>" when the company carries no FY tag (filter(Boolean)
+    // drops the empty FY so we never emit a literal "null_D…" key).
+    const effectiveFyTag = bucketLabel ? [fyTag, bucketLabel].filter(Boolean).join('_') : fyTag;
     const effectiveConfig = bucketFrom && bucketTo
       ? { ...phaseConfig, fromDate: bucketFrom, toDate: bucketTo }
       : phaseConfig;
@@ -599,7 +675,11 @@ export async function syncAllPhases({
   for (let i = 0; i < phaseKeys.length; i++) {
     if (signal?.aborted) break;
     const key = phaseKeys[i];
-    const buckets = (fyTag && fromDate && toDate) ? bucketsFor(key, fromDate, toDate) : [];
+    // Chunk whenever the phase has a strategy, regardless of FY suffix —
+    // the daily generator falls back to the trailing 365 days when no
+    // FY window is supplied, so "all past year data" works even for a
+    // company whose name carries no "(from D-Mon-YY)" suffix.
+    const buckets = CHUNK_STRATEGY[key] ? bucketsFor(key, fromDate, toDate) : [];
     const strategy = CHUNK_STRATEGY[key];
     const bucketCooldown = strategy ? (CHUNK_COOLDOWN_MS[strategy] ?? cooldownMs) : cooldownMs;
     if (buckets.length) {

@@ -263,29 +263,33 @@ export default function SyncProgress({ active, result, progressCompany, livePhas
         if (livePhase.loadCompanyStatus === 'done' && livePhase.loadCompanyName) return livePhase.loadCompanyName;
         return null;
       }
-      // Sales / Purchase Register live detail: aggregate across every
-      // per-quarter / per-FY shard so the user sees "Q2 (running)" or
-      // the total record count once everything's landed.
+      // Sales / Purchase Register live detail: these fan into one shard
+      // per DAY across the year, so aggregate across every per-day /
+      // per-FY shard to show "day 142 · 1,234 vouchers" rather than a
+      // cryptic shard tag.
       if (step.key === 'salesRegister' || step.key === 'purchaseRegister') {
         const matches = (k) => k === step.key || k.startsWith(`${step.key}_`);
         const entries = Object.entries(livePhase.keyStatus).filter(([k]) => matches(k));
         const running = entries.find(([, s]) => s === 'running');
         const errored = entries.filter(([, s]) => s === 'error');
+        const records = Object.keys(livePhase.keyCounts)
+          .filter(matches)
+          .reduce((s, k) => s + (livePhase.keyCounts[k] || 0), 0);
         if (running) {
-          const tag = running[0].replace(new RegExp(`^${step.key}_?`), '') || 'current window';
-          const attempt = livePhase.attempt?.key === running[0]
-            ? ` (retry ${livePhase.attempt.n}/${livePhase.attempt.of})` : '';
-          return `${tag}${attempt}`;
+          // Count days already settled (done OR error); the +1 is the day
+          // in flight. Shards are fetched in date order so this reads as a
+          // live calendar cursor across the year.
+          const settled = entries.filter(([, s]) => s !== 'running').length;
+          const attempt = livePhase.attempt && matches(livePhase.attempt.key)
+            ? ` · retry ${livePhase.attempt.n}/${livePhase.attempt.of}` : '';
+          return `day ${settled + 1} · ${records} vouchers so far${attempt}`;
         }
         if (errored.length) {
           const [k] = errored[0];
           const msg = livePhase.keyErrors[k];
-          return `${errored.length} ${errored.length === 1 ? 'shard' : 'shards'} failed — ${String(msg || '').slice(0, 50)}`;
+          return `${errored.length} ${errored.length === 1 ? 'day' : 'days'} failed — ${String(msg || '').slice(0, 50)}`;
         }
-        const total = Object.keys(livePhase.keyCounts)
-          .filter(matches)
-          .reduce((s, k) => s + (livePhase.keyCounts[k] || 0), 0);
-        if (total > 0) return `${total} records`;
+        if (records > 0) return `${records} vouchers`;
         return null;
       }
       // Per-phase live detail: show the per-phase count if it landed,

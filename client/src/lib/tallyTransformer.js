@@ -620,30 +620,41 @@ export function transformTallyFull(bundle, options = {}) {
     ...purchaseShardTrees,
     ...receiptShardTrees,
   ].filter((t) => t != null);
-  // Sales Register comes back as a DSPACCNAME monthly summary tree
-  // (built-in Tally report — see comment in the edge function for why
-  // we use the report path rather than a typed Voucher COLLECTION:
-  // the latter crashes Tally itself). Per-voucher / per-customer
-  // sales detail isn't available; we get monthly totals.
-  // parseFinancialStatement already knows how to walk the DSPACCNAME
-  // pattern, but its bucketing logic is for the P&L / Balance Sheet
-  // shape — for sales we want a flat [{month, value}] series.
-  const salesRegisterVouchers = []; // intentionally empty — see above
+  // Sales Register has two possible shapes, handled transparently:
+  //   - Per-voucher VOUCHER nodes — the daily-chunked typed Voucher
+  //     COLLECTION feed (one shard per day, stitched here by collectShards).
+  //     This restores per-customer sales detail (drives invoiceHistory).
+  //   - DSPACCNAME monthly summary — the legacy built-in report path
+  //     (sync-full / unscoped callers). Monthly totals only.
+  // salesMonthly is derived from whichever shape is present.
+  const salesRegisterVouchers = salesShardTrees.flatMap((tree) => extractCollection(tree, 'VOUCHER'));
   const salesMonthly = (() => {
     const byMonth = new Map();
-    for (const tree of salesShardTrees) {
-      const rows = parseFinancialStatement(tree, 'sales');
-      if (!rows || !Array.isArray(rows.rows)) continue;
-      for (const row of rows.rows) {
-        const monthKey = monthLabelToKey(row?.name);
-        if (!monthKey) continue;
-        // Net debit-credit gives the period's revenue magnitude
-        // regardless of which side Tally posts to. Sales registers
-        // typically credit the sales ledger so net is negative; we
-        // normalise to a positive revenue figure.
-        const net = Math.abs(Number(row?.net ?? row?.credit ?? row?.debit ?? 0));
-        if (!Number.isFinite(net)) continue;
-        byMonth.set(monthKey, (byMonth.get(monthKey) || 0) + net);
+    // Path 1: per-voucher. Sum VOUCHER AMOUNT by YYYYMM. Tally credits the
+    // sales ledger so AMOUNT is typically negative — abs() normalises to a
+    // positive revenue magnitude.
+    for (const v of salesRegisterVouchers) {
+      const amt = Math.abs(parseAmount(readField(v, 'AMOUNT')));
+      if (!Number.isFinite(amt) || amt === 0) continue;
+      const monthKey = readField(v, 'DATE').slice(0, 6);
+      if (!monthKey) continue;
+      byMonth.set(monthKey, (byMonth.get(monthKey) || 0) + amt);
+    }
+    // Path 2: DSPACCNAME monthly summary. Only when path 1 found nothing,
+    // so a per-voucher feed always wins when both happen to be present.
+    if (!byMonth.size) {
+      for (const tree of salesShardTrees) {
+        const rows = parseFinancialStatement(tree, 'sales');
+        if (!rows || !Array.isArray(rows.rows)) continue;
+        for (const row of rows.rows) {
+          const monthKey = monthLabelToKey(row?.name);
+          if (!monthKey) continue;
+          // Net debit-credit gives the period's revenue magnitude
+          // regardless of which side Tally posts to.
+          const net = Math.abs(Number(row?.net ?? row?.credit ?? row?.debit ?? 0));
+          if (!Number.isFinite(net)) continue;
+          byMonth.set(monthKey, (byMonth.get(monthKey) || 0) + net);
+        }
       }
     }
     return Array.from(byMonth.entries())
@@ -870,13 +881,14 @@ export function transformTallyFull(bundle, options = {}) {
     balanceSheet: parseFinancialStatement(balanceSheetTree, 'bs'),
     trialBalance: parseFinancialStatement(trialBalanceTree, 'tb'),
     purchases: purchaseTotals,
-    // Sales is monthly aggregates only on this dataset (per-voucher
-    // path crashes Tally — see edge function comment). Dashboards
-    // that want a revenue trend chart read salesMonthly directly.
+    // Sales: per-customer detail is available when the daily-chunked
+    // per-voucher feed populated salesVouchers; falls back to monthly
+    // aggregates (salesMonthly) on the legacy report-path shape.
+    // Dashboards that want a revenue trend chart read salesMonthly directly.
     sales: {
       total: salesTotal,
       monthly: salesMonthly,
-      perCustomerAvailable: false,
+      perCustomerAvailable: salesVouchers.length > 0,
     },
     vouchers: {
       sales: salesVouchers,
